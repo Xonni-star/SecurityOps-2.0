@@ -1,0 +1,46 @@
+# SecurityOps 2.0 - Hardened Multi-Stage Dockerfile (BSI TR-02102)
+# Stage 1: Build & Dependencies
+FROM python:3.11-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /install
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/requirements.txt /install/
+RUN pip install --no-cache-dir --prefix=/install/deps -r /install/requirements.txt
+
+# Stage 2: Runtime Container (Unprivileged non-root user UID 10001)
+FROM python:3.11-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/deps/bin:$PATH" \
+    PYTHONPATH="/app:/app/deps/lib/python3.11/site-packages"
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -g 10001 secops \
+    && useradd -u 10001 -g secops -d /app -s /bin/false -M secops \
+    && mkdir -p /var/lib/securityops/storage \
+    && chown -R secops:secops /app /var/lib/securityops/storage
+
+COPY --from=builder /install/deps /app/deps
+COPY --chown=secops:secops backend/ /app/backend/
+COPY --chown=secops:secops alembic/ /app/alembic/
+
+USER 10001:10001
+
+EXPOSE 8000
+
+CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--proxy-headers", "--forwarded-allow-ips", "*"]

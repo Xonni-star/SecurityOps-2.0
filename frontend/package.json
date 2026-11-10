@@ -14,8 +14,7 @@
     "@google/genai": "latest",
     "lucide-react": "latest",
     "recharts": "latest",
-    "framer-motion": "latest",
-    "mermaid": "latest"
+    "zustand": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",

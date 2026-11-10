@@ -1,198 +1,99 @@
 import React, { useState } from 'react';
-import { CheckSquare2, Plus, Clock, AlertTriangle, CheckCircle2 } from 'lucide-react';
-import { store } from '../services/store';
-import { OperationalTask } from '../types';
+import { CheckSquare, Plus, Clock, CheckCircle2, AlertTriangle } from 'lucide-react';
+import { useSecurityStore } from '../store';
 
 export const TasksModule: React.FC = () => {
-  const [showAddModal, setShowAddModal] = useState(false);
+  const { tasks, toggleTaskStatus, addTask } = useSecurityStore();
   const [title, setTitle] = useState('');
-  const [siteName, setSiteName] = useState('Logistikzentrum Nord & Hochregallager');
-  const [assignedTo, setAssignedTo] = useState('Timo Kranz');
-  const [dueDate, setDueDate] = useState('2025-05-20');
-  const [priority, setPriority] = useState<OperationalTask['priority']>('Normal');
-  const [category, setCategory] = useState<OperationalTask['category']>('Audit');
+  const [assignedToName, setAssignedToName] = useState('Alexander Schmidt');
 
-  const tasks = store.tasks;
-
-  const handleCreateTask = (e: React.FormEvent) => {
+  const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
-    store.addTask({
+    if (!title.trim()) return;
+
+    addTask({
       title,
-      siteName,
-      assignedTo,
-      dueDate,
-      priority,
+      assignedToName,
+      dueDate: new Date(Date.now() + 1000 * 3600 * 24 * 7).toISOString().split('T')[0],
+      priority: 'Mittel',
       status: 'Offen',
-      category
+      category: 'Audit'
     });
-    setShowAddModal(false);
+
+    setTitle('');
   };
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-900 p-4 rounded-2xl border border-slate-800">
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <CheckSquare2 className="w-5 h-5 text-brand-400" />
-            <h2 className="text-base font-bold text-white">Aufgaben- & Maßnahmenmanagement</h2>
+            <CheckSquare className="w-6 h-6 text-blue-400" />
+            <h1 className="text-xl font-bold text-white">Aufgaben- & Maßnahmenmanagement</h1>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Nachbearbeitung von Sicherheitsaudits, Kundenanforderungen und wiederkehrenden Prüfungen.
+            Wartungen, Nachschulungen, Kundenanforderungen und Audit-Fristen.
           </p>
         </div>
-
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-md shadow-brand-900/40"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Aufgabe erstellen</span>
-        </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* Add Task Box */}
+      <form onSubmit={handleAdd} className="p-4 rounded-xl bg-slate-900 border border-slate-800 flex flex-col sm:flex-row gap-3">
+        <input
+          type="text"
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Neue Aufgabe / Korrekturmaßnahme eingeben..."
+          className="flex-1 bg-slate-800 text-xs text-slate-200 px-3 py-2 rounded-lg border border-slate-700 focus:outline-none focus:border-blue-500"
+        />
+        <input
+          type="text"
+          value={assignedToName}
+          onChange={(e) => setAssignedToName(e.target.value)}
+          placeholder="Verantwortlich"
+          className="sm:w-48 bg-slate-800 text-xs text-slate-200 px-3 py-2 rounded-lg border border-slate-700"
+        />
+        <button
+          type="submit"
+          className="px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow"
+        >
+          Aufgabe erstellen
+        </button>
+      </form>
+
+      {/* Task List */}
+      <div className="space-y-2">
         {tasks.map((task) => (
           <div
             key={task.id}
-            className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between space-y-3"
+            onClick={() => toggleTaskStatus(task.id)}
+            className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 cursor-pointer flex items-center justify-between transition"
           >
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded font-bold ${
-                    task.priority === 'Dringend'
-                      ? 'bg-rose-500/20 text-rose-300'
-                      : 'bg-blue-500/20 text-blue-300'
-                  }`}
-                >
-                  {task.priority}
+            <div className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={task.status === 'Erledigt'}
+                onChange={() => {}}
+                className="w-4 h-4 rounded bg-slate-800 border-slate-700 text-blue-600 focus:ring-0"
+              />
+              <div>
+                <span className={`text-xs font-semibold ${task.status === 'Erledigt' ? 'line-through text-slate-500' : 'text-slate-200'}`}>
+                  {task.title}
                 </span>
-                <span className="text-[11px] text-slate-400 font-mono">Frist: {task.dueDate}</span>
+                <div className="text-[11px] text-slate-400 mt-0.5">
+                  Verantwortlich: {task.assignedToName} • Frist: {task.dueDate} • Kategorie: {task.category}
+                </div>
               </div>
-              <h3 className="font-bold text-white text-sm mb-1">{task.title}</h3>
-              <p className="text-xs text-slate-400">{task.siteName}</p>
-              <p className="text-xs text-brand-300 mt-1">Verantwortlich: {task.assignedTo}</p>
             </div>
 
-            <div className="pt-2 border-t border-slate-800 flex items-center justify-between">
-              <span className="text-xs text-slate-400">Status: {task.status}</span>
-              <button
-                onClick={() =>
-                  store.updateTaskStatus(
-                    task.id,
-                    task.status === 'Erledigt' ? 'In Bearbeitung' : 'Erledigt'
-                  )
-                }
-                className={`text-xs px-2.5 py-1 rounded font-semibold ${
-                  task.status === 'Erledigt'
-                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
-                    : 'bg-slate-800 text-slate-200 hover:bg-slate-700'
-                }`}
-              >
-                {task.status === 'Erledigt' ? '✓ Erledigt' : 'Als erledigt markieren'}
-              </button>
-            </div>
+            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+              task.status === 'Erledigt' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'
+            }`}>
+              {task.status}
+            </span>
           </div>
         ))}
       </div>
-
-      {showAddModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <form
-            onSubmit={handleCreateTask}
-            className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-4 text-xs"
-          >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base">Neue Aufgabe / Maßnahme zuweisen</h3>
-              <button
-                type="button"
-                onClick={() => setShowAddModal(false)}
-                className="text-slate-400 hover:text-white"
-              >
-                ✕
-              </button>
-            </div>
-
-            <div>
-              <label className="block text-slate-400 mb-1">Aufgabentitel</label>
-              <input
-                type="text"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                required
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-slate-400 mb-1">Verantwortlicher</label>
-                <input
-                  type="text"
-                  value={assignedTo}
-                  onChange={(e) => setAssignedTo(e.target.value)}
-                  required
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-400 mb-1">Frist / Due Date</label>
-                <input
-                  type="date"
-                  value={dueDate}
-                  onChange={(e) => setDueDate(e.target.value)}
-                  required
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-                />
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-slate-400 mb-1">Priorität</label>
-                <select
-                  value={priority}
-                  onChange={(e) => setPriority(e.target.value as any)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-                >
-                  <option value="Dringend">Dringend</option>
-                  <option value="Normal">Normal</option>
-                  <option value="Niedrig">Niedrig</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-slate-400 mb-1">Kategorie</label>
-                <select
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value as any)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-                >
-                  <option value="Audit">Audit</option>
-                  <option value="Wartung">Wartung</option>
-                  <option value="Schulung">Schulung</option>
-                  <option value="Kundenanforderung">Kundenanforderung</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => setShowAddModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700"
-              >
-                Abbrechen
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-xl bg-brand-600 text-white font-semibold hover:bg-brand-500"
-              >
-                Aufgabe anlegen
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
     </div>
   );
 };

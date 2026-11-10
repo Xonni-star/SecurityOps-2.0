@@ -1,229 +1,193 @@
 import React, { useState } from 'react';
-import { Building2, Plus, Phone, Mail, FileText, CheckCircle2 } from 'lucide-react';
-import { store } from '../services/store';
+import { Building2, Plus, FileCheck, Shield, Phone, Mail, MapPin } from 'lucide-react';
+import { useSecurityStore } from '../store';
 
 export const ClientsModule: React.FC = () => {
-  const [showAddClientModal, setShowAddClientModal] = useState(false);
-  const [name, setName] = useState('');
-  const [industry, setIndustry] = useState('');
+  const { clients, addClient } = useSecurityStore();
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  // Form states
+  const [companyName, setCompanyName] = useState('');
   const [contactPerson, setContactPerson] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
-  const [slaLevel, setSlaLevel] = useState<'Gold (24/7 Intervention)' | 'Silber (Werkschutz)' | 'Bronze (Revierdienst)'>('Gold (24/7 Intervention)');
-  const [monthlyRevenue, setMonthlyRevenue] = useState(25000);
+  const [slaLevel, setSlaLevel] = useState<'Gold (24/7 Vor-Ort)' | 'Silber (Revierdienst)' | 'Bronze (Alarmverfolgung)'>('Gold (24/7 Vor-Ort)');
 
-  const clients = store.clients;
-
-  const handleCreateClient = (e: React.FormEvent) => {
+  const handleCreate = (e: React.FormEvent) => {
     e.preventDefault();
-    store.addClient({
-      customerNumber: `KD-${new Date().getFullYear()}-${Math.floor(100 + Math.random() * 899)}`,
-      name,
-      industry,
+    addClient({
+      clientNumber: `KUN-2025-${Math.floor(100 + Math.random() * 900)}`,
+      companyName,
       contactPerson,
       email,
       phone,
       address,
-      contractStart: '2025-01-01',
-      contractEnd: '2027-12-31',
+      contractStart: new Date().toISOString().split('T')[0],
+      contractEnd: '2028-12-31',
       slaLevel,
-      billingStatus: 'Aktiv',
-      assignedSitesCount: 1,
-      monthlyRevenue: Number(monthlyRevenue)
+      billingStatus: 'Regulär',
+      assignedSiteCount: 1
     });
-    setShowAddClientModal(false);
+    setIsModalOpen(false);
   };
 
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-900 p-4 rounded-2xl border border-slate-800">
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <Building2 className="w-5 h-5 text-brand-400" />
-            <h2 className="text-base font-bold text-white">Kundenverwaltung & Dienstleistungsverträge</h2>
+            <Building2 className="w-6 h-6 text-blue-400" />
+            <h1 className="text-xl font-bold text-white">Kunden- & Vertragsverwaltung</h1>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Auftraggeberstammdaten, SLA-Vereinbarungen, Vertragslaufzeiten und zugewiesene Objekte.
+            Mandantenstammdaten, SLA-Vereinbarungen, Bewachungsverträge und Rechnungsstatus.
           </p>
         </div>
 
         <button
-          onClick={() => setShowAddClientModal(true)}
-          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-md shadow-brand-900/40"
+          onClick={() => setIsModalOpen(true)}
+          className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg shadow-blue-600/20 transition flex items-center gap-2 shrink-0 self-start sm:self-auto"
         >
           <Plus className="w-4 h-4" />
-          <span>Kunde anlegen</span>
+          <span>Mandant hinzufügen</span>
         </button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {clients.map((cli) => (
-          <div
-            key={cli.id}
-            className="p-5 rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition-all flex flex-col justify-between space-y-4 shadow-sm"
-          >
+        {clients.map((c) => (
+          <div key={c.id} className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between shadow-sm">
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-mono font-bold text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
-                  {cli.customerNumber}
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-blue-400 font-bold">
+                  {c.clientNumber}
                 </span>
-                <span className="text-xs px-2 py-0.5 rounded font-bold bg-emerald-500/20 text-emerald-300">
-                  {cli.billingStatus}
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                  {c.billingStatus}
                 </span>
               </div>
 
-              <h3 className="font-bold text-white text-base mb-1">{cli.name}</h3>
-              <p className="text-xs text-brand-300 mb-3">{cli.industry}</p>
+              <h3 className="font-bold text-slate-200 text-sm mt-3">{c.companyName}</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Ansprechpartner: {c.contactPerson}</p>
 
-              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs space-y-1.5 mb-3">
-                <p className="text-white font-medium">Ansprechpartner: {cli.contactPerson}</p>
-                <div className="flex items-center gap-2 text-slate-400">
+              <div className="mt-4 space-y-1.5 text-xs text-slate-400">
+                <div className="flex items-center gap-2">
                   <Mail className="w-3.5 h-3.5 text-slate-500" />
-                  <span>{cli.email}</span>
+                  <span className="text-slate-300 truncate">{c.email}</span>
                 </div>
-                <div className="flex items-center gap-2 text-slate-400">
+                <div className="flex items-center gap-2">
                   <Phone className="w-3.5 h-3.5 text-slate-500" />
-                  <span>{cli.phone}</span>
+                  <span className="text-slate-300">{c.phone}</span>
                 </div>
-              </div>
-
-              <div className="p-2.5 rounded-lg bg-slate-800/40 border border-slate-700/60 text-xs space-y-1">
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">SLA-Stufe:</span>
-                  <span className="font-semibold text-emerald-400">{cli.slaLevel}</span>
-                </div>
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">Vertragslaufzeit:</span>
-                  <span className="font-mono">{cli.contractStart} bis {cli.contractEnd}</span>
+                <div className="flex items-center gap-2">
+                  <MapPin className="w-3.5 h-3.5 text-slate-500" />
+                  <span className="text-slate-300 truncate">{c.address}</span>
                 </div>
               </div>
             </div>
 
-            <div className="flex items-center justify-between pt-3 border-t border-slate-800 text-xs">
-              <span className="text-slate-400">Umsatz/Monat:</span>
-              <span className="font-mono font-bold text-white text-sm">
-                {cli.monthlyRevenue.toLocaleString('de-DE')} €
-              </span>
+            <div className="mt-4 pt-3 border-t border-slate-800/80 flex items-center justify-between text-xs">
+              <span className="text-[11px] font-medium text-blue-400">{c.slaLevel}</span>
+              <span className="text-slate-500 text-[10px]">Vertrag bis: {c.contractEnd}</span>
             </div>
           </div>
         ))}
       </div>
 
-      {showAddClientModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <form
-            onSubmit={handleCreateClient}
-            className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-4 text-xs"
-          >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base">Neuen Kundenstamm anlegen</h3>
-              <button
-                type="button"
-                onClick={() => setShowAddClientModal(false)}
-                className="text-slate-400 hover:text-white"
-              >
-                ✕
-              </button>
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#0f172a] border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-base font-bold text-white">Neuen Kunden erfassen</h3>
+              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
 
-            <div>
-              <label className="block text-slate-400 mb-1">Unternehmensname</label>
-              <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-              />
-            </div>
-
-            <div>
-              <label className="block text-slate-400 mb-1">Branche</label>
-              <input
-                type="text"
-                value={industry}
-                onChange={(e) => setIndustry(e.target.value)}
-                required
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleCreate} className="space-y-3 mt-4 text-xs">
               <div>
-                <label className="block text-slate-400 mb-1">Ansprechpartner</label>
+                <label className="block text-slate-400 mb-1">Firmenname *</label>
+                <input
+                  type="text"
+                  value={companyName}
+                  onChange={(e) => setCompanyName(e.target.value)}
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-400 mb-1">Ansprechpartner *</label>
                 <input
                   type="text"
                   value={contactPerson}
                   onChange={(e) => setContactPerson(e.target.value)}
                   required
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
                 />
               </div>
-              <div>
-                <label className="block text-slate-400 mb-1">Monatsvolumen (€)</label>
-                <input
-                  type="number"
-                  value={monthlyRevenue}
-                  onChange={(e) => setMonthlyRevenue(Number(e.target.value))}
-                  required
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-                />
-              </div>
-            </div>
 
-            <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">E-Mail</label>
+                  <input
+                    type="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Telefon</label>
+                  <input
+                    type="text"
+                    value={phone}
+                    onChange={(e) => setPhone(e.target.value)}
+                    required
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                  />
+                </div>
+              </div>
+
               <div>
-                <label className="block text-slate-400 mb-1">E-Mail</label>
+                <label className="block text-slate-400 mb-1">Anschrift</label>
                 <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
+                  type="text"
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
                 />
               </div>
+
               <div>
-                <label className="block text-slate-400 mb-1">Telefon</label>
-                <input
-                  type="tel"
-                  value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  required
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-                />
+                <label className="block text-slate-400 mb-1">SLA Stufe</label>
+                <select
+                  value={slaLevel}
+                  onChange={(e) => setSlaLevel(e.target.value as any)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                >
+                  <option value="Gold (24/7 Vor-Ort)">Gold (24/7 Vor-Ort)</option>
+                  <option value="Silber (Revierdienst)">Silber (Revierdienst)</option>
+                  <option value="Bronze (Alarmverfolgung)">Bronze (Alarmverfolgung)</option>
+                </select>
               </div>
-            </div>
 
-            <div>
-              <label className="block text-slate-400 mb-1">SLA-Klasse</label>
-              <select
-                value={slaLevel}
-                onChange={(e) => setSlaLevel(e.target.value as any)}
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-              >
-                <option value="Gold (24/7 Intervention)">Gold (24/7 Intervention & Werkschutz)</option>
-                <option value="Silber (Werkschutz)">Silber (Werkschutz & Pforte)</option>
-                <option value="Bronze (Revierdienst)">Bronze (Revier- und Streifendienst)</option>
-              </select>
-            </div>
-
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => setShowAddClientModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700"
-              >
-                Abbrechen
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-xl bg-brand-600 text-white font-semibold hover:bg-brand-500"
-              >
-                Kunde anlegen
-              </button>
-            </div>
-          </form>
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold"
+                >
+                  Kunde anlegen
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

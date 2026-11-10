@@ -1,82 +1,52 @@
 export enum UserRole {
   ADMIN = 'Systemadministrator',
-  MANAGEMENT = 'Geschäftsführung',
-  DISPATCHER = 'Einsatzleitung',
-  SITE_MANAGER = 'Objektleitung',
+  GF = 'Geschäftsführung',
+  EINSATZLEITUNG = 'Einsatzleitung',
+  OBJEKTLEITUNG = 'Objektleitung',
   HR = 'Personalverwaltung',
   QM = 'Qualitätsmanagement',
-  GUARD = 'Sicherheitsmitarbeiter'
+  GUARD = 'Wachdienstmitarbeiter',
+  AUDITOR = 'Lesender Zugriff / Auditor'
 }
 
-export type SyncState = 'synced' | 'pending' | 'conflict' | 'error';
+export enum QualificationType {
+  GEWO_34A_UNTERRICHTUNG = 'Unterrichtung § 34a GewO',
+  GEWO_34A_SACHKUNDE = 'Sachkundeprüfung § 34a GewO',
+  FIRST_AID = 'Betrieblicher Ersthelfer (DGUV)',
+  FIRE_SAFETY = 'Brandschutz- & Evakuierungshelfer',
+  WEAPON_PERMIT = 'Waffensachkunde (§ 7 WaffG)',
+  DOG_HANDLER = 'Diensthundeführer (DGUV V23)',
+  DEESCALATION = 'Deeskalationstraining'
+}
 
 export interface Tenant {
   id: string;
-  code: string;
   name: string;
-  companyRegistrationNumber: string;
-  address: string;
-  primaryContact: string;
-  email: string;
-  phone: string;
-  din77200CertificateNumber: string;
-  licenseLevel: 'Enterprise Tier 1' | 'Professional Tier 2' | 'Standard Tier 3';
-  activeModules: string[];
-  maxGuards: number;
-  dataStorageRegion: 'eu-central-1 (Frankfurt)' | 'eu-west-3 (Paris)';
-  rlsSchemaName: string;
-  createdAt: string;
-}
-
-export interface Client {
-  id: string;
-  tenantId: string;
-  customerNumber: string;
-  name: string;
-  industry: string;
-  contactPerson: string;
-  email: string;
-  phone: string;
-  address: string;
-  contractStart: string;
-  contractEnd: string;
-  slaLevel: 'Gold (24/7 Intervention)' | 'Silber (Werkschutz)' | 'Bronze (Revierdienst)';
-  billingStatus: 'Aktiv' | 'In Prüfung' | 'Gekündigt';
-  assignedSitesCount: number;
-  monthlyRevenue: number;
-  syncState: SyncState;
-  version: number;
-}
-
-export interface SecuritySite {
-  id: string;
-  tenantId: string;
-  clientId: string;
-  clientName: string;
-  siteCode: string;
-  name: string;
-  address: string;
-  siteLeader: string;
-  riskLevel: 'Niedrig' | 'Mittel' | 'Hoch' | 'Kritische Infrastruktur (KRITIS)';
-  alarmSystem: string;
-  checkpointsCount: number;
-  activeGuardsRequired: number;
-  specialInstructions: string;
-  keysCount: number;
-  status: 'In Betrieb' | 'Wartung' | 'Gefährdet';
-  syncState: SyncState;
-  version: number;
+  subdomain: string;
+  taxNumber: string;
+  licenseTier: 'Enterprise (Unbegrenzt)' | 'Professional (Bis 50 MA)' | 'Standard (Bis 15 MA)';
+  din77200Certified: boolean;
+  bwrRegisterId: string;
+  active: boolean;
+  contactEmail: string;
 }
 
 export interface Qualification {
   id: string;
-  name: string;
-  type: '34a_Sachkunde' | '34a_Unterrichtung' | 'Erste_Hilfe' | 'Brandschutz' | 'Waffenschein' | 'Hundefuehrer' | 'Interventionskraft';
-  issuer: string;
-  issuedDate: string;
+  type: QualificationType;
+  issueDate: string;
   expiryDate: string;
-  isValid: boolean;
-  documentUrl?: string;
+  certificateNumber: string;
+  verified: boolean;
+}
+
+export interface AbsenceRecord {
+  id: string;
+  type: 'Urlaub' | 'Krankheit' | 'Fortbildung' | 'Sonderurlaub';
+  startDate: string;
+  endDate: string;
+  approved: boolean;
+  replacementEmployeeId?: string;
 }
 
 export interface Employee {
@@ -85,145 +55,555 @@ export interface Employee {
   personnelNumber: string;
   firstName: string;
   lastName: string;
-  role: string;
   email: string;
   phone: string;
+  role: UserRole;
   status: 'Aktiv' | 'Urlaub' | 'Krank' | 'Freigestellt';
-  employmentType: 'Vollzeit' | 'Teilzeit' | 'Minijob' | 'Subunternehmer';
-  targetHours: number;
-  actualHoursMonth: number;
-  overtimeBalance: number;
+  weeklyHours: number;
   qualifications: Qualification[];
-  assignedSiteId?: string;
-  assignedSiteName?: string;
-  syncState: SyncState;
-  version: number;
+  absences?: AbsenceRecord[];
+  assignedSiteIds: string[];
+  hourlyRate: number;
+  dateOfJoining: string;
+  notes?: string;
+  synced?: boolean;
+}
+
+export interface ClientAddress {
+  id: string;
+  type: 'Hauptsitz' | 'Rechnungsadresse' | 'Zweigstelle';
+  street: string;
+  city: string;
+  postalCode: string;
+  country: string;
+}
+
+export interface Client {
+  id: string;
+  tenantId: string;
+  clientNumber: string;
+  companyName: string;
+  contactPerson: string;
+  email: string;
+  phone: string;
+  address: string;
+  addresses?: ClientAddress[];
+  contractStart: string;
+  contractEnd: string;
+  contractAutoRenew: boolean;
+  noticePeriodMonths: number;
+  slaLevel: 'Gold (24/7 Vor-Ort)' | 'Silber (Revierdienst)' | 'Bronze (Alarmverfolgung)';
+  billingStatus: 'Regulär' | 'In Zahlungsverzug' | 'Neu';
+  assignedSiteCount: number;
+}
+
+export interface Checkpoint {
+  id: string;
+  code: string;
+  name: string;
+  locationDetails: string;
+  rfidTag: string;
+  requiredIntervalMinutes: number;
+}
+
+export interface SiteAssessment {
+  id: string;
+  date: string;
+  auditorName: string;
+  score: number;
+  notes: string;
+  deficiencies: string[];
+}
+
+export interface Site {
+  id: string;
+  tenantId: string;
+  clientId: string;
+  clientName: string;
+  siteCode: string;
+  name: string;
+  address: string;
+  securityLevel: 'Niedrig' | 'Mittel' | 'Hoch (KRITIS / BSI)' | 'Höchste Sicherheitsstufe';
+  siteManagerId: string;
+  siteManagerName: string;
+  requiredGuardsDay: number;
+  requiredGuardsNight: number;
+  checkpoints: Checkpoint[];
+  assessments?: SiteAssessment[];
+  alarmSystem: string;
+  instructionsCount: number;
+  accessRules: string;
+  activeAlarms: number;
 }
 
 export interface Shift {
   id: string;
   tenantId: string;
-  date: string;
-  shiftType: 'Frühschicht (06:00 - 14:00)' | 'Spätschicht (14:00 - 22:00)' | 'Nachtschicht (22:00 - 06:00)' | '24h Bereitschaft';
   siteId: string;
   siteName: string;
   employeeId?: string;
   employeeName?: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  type: 'Tagdienst' | 'Nachtdienst' | 'Revierdienst' | 'Sonderposten';
   status: 'Besetzt' | 'Offen' | 'Konflikt' | 'Abgeschlossen';
-  requiredQualification: string;
-  hasConflict?: boolean;
+  requiredQualification: QualificationType;
+  actualStart?: string;
+  actualEnd?: string;
   conflictReason?: string;
-  hours: number;
-  syncState: SyncState;
-  version: number;
 }
 
-export interface Incident {
+export type IncidentWorkflowStage =
+  | 'Erfasst'
+  | 'In Bewertung'
+  | 'Zugewiesen'
+  | 'Maßnahme läuft'
+  | 'Eskaliert'
+  | 'Abgeschlossen'
+  | 'Archiviert';
+
+export interface GuardBookRevision {
+  id: string;
+  timestamp: string;
+  authorName: string;
+  note: string;
+}
+
+export interface GuardBookEntry {
   id: string;
   tenantId: string;
-  incidentNumber: string;
   timestamp: string;
   siteId: string;
   siteName: string;
+  guardId: string;
   guardName: string;
-  category: 'Einbruchversuch' | 'Brandmeldeauslösung' | 'Zutrittsverstoß' | 'Vandalismus' | 'Technischer Defekt' | 'Routinekontrolle' | 'Personenkontrolle';
-  priority: 'Niedrig' | 'Mittel' | 'Hoch' | 'KRITISCH';
+  category: 'Routinemeldung' | 'Vorkommnis' | 'Polizeieinsatz' | 'Fehlalarm' | 'Schichtübergabe' | 'Kontrollgang';
+  priority: 'Niedrig' | 'Normal' | 'Dringend' | 'Kritisch';
+  stage: IncidentWorkflowStage;
   title: string;
   description: string;
-  actionsTaken: string;
+  witnesses?: string;
+  damageValue?: number;
+  checkpointScanned?: string;
   policeInvolved: boolean;
+  assignedManagerId?: string;
+  assignedManagerName?: string;
+  createdTaskId?: string;
   resolved: boolean;
-  imagesCount: number;
-  escalationStatus: 'Gemeldet' | 'In Bearbeitung' | 'Eskaliert' | 'Abgeschlossen';
-  syncState: SyncState;
-  version: number;
+  resolutionNote?: string;
+  revisions?: GuardBookRevision[];
   offlineCreated?: boolean;
-  auditHash?: string;
 }
 
-export interface SopInstruction {
+export interface SOPDocument {
   id: string;
   tenantId: string;
-  code: string;
+  sopNumber: string;
   title: string;
-  category: 'Objektspezifisch' | 'Arbeitssicherheit' | 'Notfallprotokoll' | 'Datenschutz / DSGVO';
+  category: 'Objektbezogen' | 'Allgemeine Dienstanweisung' | 'Notfall-SOP' | 'Arbeitssicherheit';
+  siteId?: string;
   version: string;
-  applicableSite: string;
-  updatedAt: string;
+  effectiveDate: string;
   author: string;
+  signedCount: number;
+  totalRequired: number;
   content: string;
-  requiresDigitalSignature: boolean;
-  acknowledgedCount: number;
-  totalRequiredGuards: number;
-  syncState: SyncState;
+  mandatoryAcknowledgment: boolean;
+  unacknowledgedEmployeeNames?: string[];
+}
+
+export interface EmergencyPlan {
+  id: string;
+  tenantId: string;
+  siteId: string;
+  siteName: string;
+  scenario: 'BMA - Brandmeldeanlage' | 'EMA - Einbruchsalarm' | 'Bombendrohung' | 'Medizinischer Notfall' | 'Hausfriedensbruch / Aggression';
+  chainOfAction: string[];
+  contacts: { role: string; name: string; phone: string }[];
+  lastDrillDate: string;
 }
 
 export interface KeyItem {
   id: string;
   tenantId: string;
   keyNumber: string;
+  label: string;
+  siteId: string;
   siteName: string;
-  bundleLabel: string;
+  type: 'Master-Schlüssel' | 'Transponder' | 'Buntbart' | 'Schrankenschlüssel';
   status: 'Im Tresor' | 'Ausgegeben' | 'Verlustmeldung';
-  currentHolder?: string;
+  currentHolderName?: string;
+  currentHolderId?: string;
   issuedAt?: string;
   expectedReturn?: string;
-  doorAccess: string[];
-  syncState: SyncState;
+  isOverdue?: boolean;
 }
 
-export interface OperationalTask {
+export interface TaskItem {
   id: string;
   tenantId: string;
   title: string;
-  siteName: string;
-  assignedTo: string;
+  assignedToName: string;
+  siteName?: string;
+  sourceModule?: 'Wachbuch' | 'Schlüssel' | 'Vertrag' | 'Qualifikation' | 'QM Audit' | 'Manuell';
+  sourceEntityId?: string;
   dueDate: string;
-  priority: 'Dringend' | 'Normal' | 'Niedrig';
+  priority: 'Niedrig' | 'Mittel' | 'Hoch';
   status: 'Offen' | 'In Bearbeitung' | 'Erledigt';
-  category: 'Audit' | 'Wartung' | 'Kundenanforderung' | 'Schulung';
-  syncState: SyncState;
-  version: number;
+  category: 'Audit' | 'Wartung' | 'Nachschulung' | 'Kundenanforderung' | 'Vorfallsbearbeitung';
+  offlineCreated?: boolean;
 }
 
-export interface NotificationItem {
+export interface ManagedDocument {
   id: string;
   tenantId: string;
-  type: 'warning' | 'alert' | 'info';
   title: string;
-  message: string;
-  timestamp: string;
-  read: boolean;
+  fileName: string;
+  category: 'Vertrag' | 'Dienstanweisung' | 'Personalakte' | 'Vorfallsbericht' | 'Auditnachweis';
+  sizeBytes: number;
+  uploadedAt: string;
+  version: string;
+  linkedEntityType: 'customer' | 'site' | 'employee' | 'incident' | 'general';
+  linkedEntityId?: string;
+  linkedEntityName?: string;
+  url?: string;
+  sha256Hash?: string;
+  scannedClean?: boolean;
 }
 
-export interface SyncQueueItem {
+export type SyncStatus = 'synced' | 'pending' | 'conflict' | 'failed';
+
+export interface OfflineQueueItem {
   id: string;
   tenantId: string;
-  entityType: 'incident' | 'shift' | 'task' | 'key' | 'employee';
-  entityId: string;
+  entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'document' | 'patrol' | 'handover';
   action: 'CREATE' | 'UPDATE' | 'DELETE';
-  payloadSummary: string;
+  payload: any;
   createdAt: string;
   retryCount: number;
-  status: 'pending' | 'syncing' | 'synced' | 'conflict';
+  status: SyncStatus;
+  errorMessage?: string;
   conflictDetails?: {
-    serverVersion: number;
-    clientVersion: number;
-    serverPayloadSnippet: string;
+    serverVersion: any;
+    localVersion: any;
   };
 }
 
-export interface ModuleManifest {
+export interface SecurityModuleManifest {
   id: string;
-  code: string;
-  title: string;
-  version: string;
-  category: 'Core' | 'Operations' | 'Surveillance' | 'Compliance' | 'AI & IoT';
+  name: string;
   description: string;
-  author: string;
+  version: string;
+  category: 'CORE' | 'OPERATIONS' | 'COMPLIANCE' | 'HARDWARE' | 'ADDON';
+  enabled: boolean;
+  requiredPermissions: UserRole[];
   dependencies: string[];
-  permissionsRequired: string[];
-  apiEndpointPrefix: string;
   isCore: boolean;
-  status: 'Aktiv' | 'Inaktiv' | 'Beta';
+}
+
+export interface GlobalSearchResult {
+  id: string;
+  title: string;
+  subtitle: string;
+  category: 'Kunde' | 'Objekt' | 'Mitarbeiter' | 'Wachbuch' | 'Schlüssel' | 'Aufgabe' | 'Dokument';
+  targetTab: string;
+}
+
+export type AutomationTriggerEvent =
+  | 'QUALIFICATION_EXPIRING'
+  | 'CONTRACT_EXPIRING'
+  | 'KEY_OVERDUE'
+  | 'INCIDENT_CREATED'
+  | 'SHIFT_CONFLICT_DETECTED'
+  | 'SOP_UNACKNOWLEDGED'
+  | 'TASK_OVERDUE'
+  | 'SCHEDULED_CRON';
+
+export type ConditionOperator =
+  | 'EQUALS'
+  | 'NOT_EQUALS'
+  | 'LESS_THAN_DAYS'
+  | 'GREATER_THAN'
+  | 'CONTAINS'
+  | 'IN_ARRAY';
+
+export interface AutomationCondition {
+  field: string;
+  operator: ConditionOperator;
+  value: any;
+}
+
+export type ActionType =
+  | 'CREATE_TASK'
+  | 'SEND_NOTIFICATION'
+  | 'DISPATCH_EMAIL'
+  | 'ESCALATE_INCIDENT'
+  | 'SET_KEY_OVERDUE';
+
+export interface AutomationActionConfig {
+  type: ActionType;
+  targetRole?: UserRole;
+  targetRecipient?: string;
+  taskTitleTemplate?: string;
+  taskPriority?: 'Niedrig' | 'Mittel' | 'Hoch';
+  notificationTitle?: string;
+  notificationMessage?: string;
+  notificationSeverity?: 'INFO' | 'WARNUNG' | 'ALARM' | 'KRITISCH';
+}
+
+export interface AutomationRule {
+  id: string;
+  tenantId?: string;
+  name: string;
+  description: string;
+  trigger: AutomationTriggerEvent;
+  conditions: AutomationCondition[];
+  actions: AutomationActionConfig[];
+  active: boolean;
+  isTemplate?: boolean;
+  category: 'Personal' | 'Verträge' | 'Wachbuch' | 'Schlüssel' | 'Dienstplan' | 'QM';
+  lastRun?: string;
+  lastRunStatus?: 'SUCCESS' | 'FAILED' | 'SKIPPED';
+  actionsTriggeredCount: number;
+}
+
+export interface AutomationExecutionLog {
+  id: string;
+  tenantId: string;
+  ruleId: string;
+  ruleName: string;
+  executedAt: string;
+  triggerEvent: string;
+  matchedEntityId?: string;
+  matchedEntityDesc?: string;
+  status: 'SUCCESS' | 'FAILED' | 'SKIPPED';
+  actionsExecuted: string[];
+  executionDurationMs: number;
+  details?: string;
+}
+
+export interface NotificationDelivery {
+  id: string;
+  tenantId: string;
+  userId?: string;
+  recipientEmail?: string;
+  title: string;
+  message: string;
+  channel: 'IN_APP' | 'EMAIL' | 'WEB_PUSH';
+  severity: 'INFO' | 'WARNUNG' | 'ALARM' | 'KRITISCH';
+  status: 'CREATED' | 'SENT' | 'DELIVERED' | 'FAILED';
+  createdAt: string;
+  deliveredAt?: string;
+  read: boolean;
+  sourceModule: string;
+}
+
+export interface NotificationPreference {
+  userId: string;
+  emailEnabled: boolean;
+  inAppEnabled: boolean;
+  pushEnabled: boolean;
+  qualificationWarnings: boolean;
+  contractDeadlines: boolean;
+  criticalIncidents: boolean;
+  keyReturns: boolean;
+  rosterConflicts: boolean;
+}
+
+export interface SecurityAuditEntry {
+  id: string;
+  timestamp: string;
+  actorEmail: string;
+  actorRole: string;
+  actionType: 'LOGIN' | 'FAILED_LOGIN' | 'LOGOUT' | 'ROLE_CHANGE' | 'DATA_EXPORT' | 'DEVICE_REVOKE' | 'IDOR_BLOCKED' | 'INCIDENT_MOD' | 'AUTOMATION_RUN' | 'RULE_MODIFIED' | 'KIOSK_LOCKED' | 'KIOSK_UNLOCKED';
+  severity: 'INFO' | 'WARNUNG' | 'ALARM' | 'KRITISCH';
+  targetEntity: string;
+  details: string;
+  ipAddress: string;
+  tenantId: string;
+}
+
+export interface UserSessionDevice {
+  id: string;
+  deviceName: string;
+  browser: string;
+  ipAddress: string;
+  lastActivity: string;
+  isCurrentSession: boolean;
+  status: 'ACTIVE' | 'REVOKED';
+  mfaVerified: boolean;
+}
+
+export interface GdprRetentionPolicy {
+  id: string;
+  category: string;
+  statutoryBasis: string;
+  retentionYears: number;
+  autoPurgeEnabled: boolean;
+  lastRun?: string;
+}
+
+export type ReportCategory =
+  | 'GESCHAEFTSFUEHRUNG'
+  | 'EINSATZLEITUNG'
+  | 'OBJEKTLEITUNG'
+  | 'PERSONAL'
+  | 'WACHBUCH_EREIGNISSE'
+  | 'QUALITAET_DIN77200'
+  | 'ALARME'
+  | 'AUFGABEN_AUTOMATION';
+
+export interface ReportDefinition {
+  id: string;
+  tenantId: string;
+  name: string;
+  description: string;
+  category: ReportCategory;
+  requiredRole: UserRole[];
+  dataSource: 'shifts' | 'guardbook' | 'employees' | 'clients' | 'sites' | 'tasks' | 'keys' | 'automations';
+  selectedColumns: string[];
+  filterConfig: Record<string, any>;
+  groupBy?: string;
+  scheduleInterval?: 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'NONE';
+  lastGeneratedAt?: string;
+  createdAt: string;
+}
+
+export interface ControllingKPIs {
+  activeClientsCount: number;
+  activeSitesCount: number;
+  activeEmployeesCount: number;
+  totalPlannedHours: number;
+  totalActualHours: number;
+  planFulfillmentRate: number;
+  openCriticalIncidentsCount: number;
+  overdueTasksCount: number;
+  expiringContractsCount: number;
+  expiringQualificationsCount: number;
+  activeAlarmsCount: number;
+  overdueKeysCount: number;
+  din77200ComplianceScore: number;
+}
+
+export interface ShiftSwapRequest {
+  id: string;
+  tenantId: string;
+  shiftId: string;
+  requestingEmployeeId: string;
+  requestingEmployeeName: string;
+  targetEmployeeId: string;
+  targetEmployeeName: string;
+  reason: string;
+  status: 'ANGEFRAGT' | 'BESTAETIGT' | 'ABGELEHNT';
+  requestedAt: string;
+  decidedAt?: string;
+  decidedByName?: string;
+}
+
+export interface PatrolScanEvent {
+  id: string;
+  tenantId: string;
+  siteId: string;
+  siteName: string;
+  checkpointId: string;
+  checkpointCode: string;
+  checkpointName: string;
+  guardId: string;
+  guardName: string;
+  scannedAt: string;
+  method: 'QR_CODE' | 'NFC_TAG' | 'MANUELL';
+  verifiedTag: string;
+  photoUrl?: string;
+  notes?: string;
+  offlineCaptured: boolean;
+}
+
+export interface ShiftHandoverProtocol {
+  id: string;
+  tenantId: string;
+  siteId: string;
+  siteName: string;
+  relievingGuardId: string;
+  relievingGuardName: string;
+  relievedGuardId: string;
+  relievedGuardName: string;
+  handoverTime: string;
+  keyRegisterChecked: boolean;
+  openIncidentsCount: number;
+  remarks: string;
+  acknowledgedByRelievingGuard: boolean;
+  offlineCaptured: boolean;
+}
+
+// ==============================================================================
+// PHASE 14: EIGENSTÄNDIGE MOBILE APP & KIOSK-MODUS
+// ==============================================================================
+
+export enum KioskOperatingMode {
+  SINGLE_APP = 'EINZEL_APP_KIOSK',      // Modus A: Vollbild, Lock Task Mode, kein Verlassen
+  MULTI_APP = 'MEHR_APP_KIOSK',        // Modus B: SecurityOps + freigegebene Tools (Kamera, Telefon)
+  STANDARD = 'NORMALER_BETRIEB'        // Modus C: BYOD / gewöhnliche Mitarbeiter-App
+}
+
+export enum StationProfileType {
+  PFORTE = 'Pforte & Empfang',
+  OBJEKTSCHUTZ = 'Objektschutz Terminal',
+  WACHBUCH_TERMINAL = 'Wachbuch-Terminal (Stationär)',
+  RUNDGANG = 'Rundgangskontrolle (Mobil)',
+  SCHICHTWECHSEL = 'Schichtübergabe-Station',
+  EINSATZLEITUNG = 'Einsatzleitung Mobil'
+}
+
+export interface StationProfile {
+  id: string;
+  type: StationProfileType;
+  name: string;
+  description: string;
+  allowedViews: string[]; // e.g. ['duty', 'guardbook', 'patrol', 'handover', 'sop', 'tasks']
+  defaultKioskMode: KioskOperatingMode;
+  autoLogoutMinutes: number; // 0 = never
+  requireBiometricOnAction: boolean;
+  preventScreenCapture: boolean;
+}
+
+export interface MobileDeviceEntity {
+  id: string;
+  tenantId: string;
+  deviceId: string; // Unique cryptographic fingerprint
+  deviceName: string;
+  platform: 'Android Enterprise' | 'Apple iOS (Supervised)' | 'Capacitor PWA';
+  appVersion: string;
+  osVersion: string;
+  batteryLevel: number; // 0 - 100
+  assignedUserId?: string;
+  assignedUserName?: string;
+  assignedStationProfile: StationProfileType;
+  currentKioskMode: KioskOperatingMode;
+  status: 'ACTIVE' | 'LOCKED' | 'REVOKED' | 'WIPED';
+  isDeviceOwner: boolean;
+  lockTaskModeActive: boolean;
+  registeredAt: string;
+  lastContactAt: string;
+  pendingSyncCount: number;
+}
+
+export interface AndroidEnterpriseProvisioningPayload {
+  version: string;
+  packageName: string;
+  checksumSha256: string;
+  enrollmentToken: string;
+  kioskMode: KioskOperatingMode;
+  stationProfile: StationProfileType;
+  tenantId: string;
+  apiBaseUrl: string;
+  adminPinHash: string;
+  lockTaskPackages: string[];
+}
+
+export interface ResponseEnvelope<T = any> {
+  success: boolean;
+  message: string;
+  data?: T;
+  errors?: string[];
 }

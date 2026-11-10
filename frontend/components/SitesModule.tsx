@@ -1,233 +1,440 @@
 import React, { useState } from 'react';
-import { MapPin, Plus, ShieldCheck, Siren, QrCode, KeyRound, AlertTriangle } from 'lucide-react';
-import { store } from '../services/store';
-import { SecuritySite } from '../types';
+import {
+  MapPin,
+  Plus,
+  Shield,
+  Radio,
+  Building,
+  CheckCircle,
+  AlertTriangle,
+  FileText,
+  Users,
+  Calendar,
+  KeyRound,
+  Siren,
+  Clock,
+  History,
+  BookOpen
+} from 'lucide-react';
+import { useSecurityStore } from '../store';
+import { Site } from '../types';
 
 export const SitesModule: React.FC = () => {
-  const [showAddSiteModal, setShowAddSiteModal] = useState(false);
+  const {
+    getTenantSites,
+    getTenantClients,
+    getTenantEmployees,
+    getTenantShifts,
+    getTenantGuardBook,
+    getTenantKeys,
+    getTenantEmergencyPlans,
+    addSite
+  } = useSecurityStore();
+
+  const sites = getTenantSites();
+  const clients = getTenantClients();
+  const employees = getTenantEmployees();
+  const shifts = getTenantShifts();
+  const guardBook = getTenantGuardBook();
+  const keys = getTenantKeys();
+  const emergencyPlans = getTenantEmergencyPlans();
+
+  const [selectedSite, setSelectedSite] = useState<Site | null>(sites[0] || null);
+  const [activeSiteTab, setActiveSiteTab] = useState<'overview' | 'contacts' | 'roster' | 'guardbook' | 'keys' | 'alarms' | 'checkpoints'>('overview');
+  const [isModalOpen, setIsModalOpen] = useState(false);
 
   // New site form
-  const [name, setName] = useState('');
-  const [siteCode, setSiteCode] = useState('');
-  const [address, setAddress] = useState('');
-  const [siteLeader, setSiteLeader] = useState('Markus Hauer (Einsatzleiter)');
-  const [riskLevel, setRiskLevel] = useState<SecuritySite['riskLevel']>('Mittel');
-  const [alarmSystem, setAlarmSystem] = useState('Telenot BMA / EMA');
-  const [checkpointsCount, setCheckpointsCount] = useState(25);
-  const [activeGuardsRequired, setActiveGuardsRequired] = useState(2);
-  const [specialInstructions, setSpecialInstructions] = useState('');
-
-  const sites = store.sites;
+  const [newSiteCode, setNewSiteCode] = useState('');
+  const [newSiteName, setNewSiteName] = useState('');
+  const [newAddress, setNewAddress] = useState('');
+  const [selectedClientId, setSelectedClientId] = useState(clients[0]?.id || '');
+  const [securityLevel, setSecurityLevel] = useState<Site['securityLevel']>('Hoch (KRITIS / BSI)');
 
   const handleCreateSite = (e: React.FormEvent) => {
     e.preventDefault();
-    const client = store.clients[0];
-    store.addSite({
-      clientId: client ? client.id : 'cli-1',
-      clientName: client ? client.name : 'Allgemeiner Kunde',
-      siteCode: siteCode || `OBJ-${Math.floor(100 + Math.random() * 899)}`,
-      name,
-      address,
-      siteLeader,
-      riskLevel,
-      alarmSystem,
-      checkpointsCount: Number(checkpointsCount),
-      activeGuardsRequired: Number(activeGuardsRequired),
-      specialInstructions,
-      keysCount: 24,
-      status: 'In Betrieb'
+    const client = clients.find((c) => c.id === selectedClientId);
+
+    addSite({
+      clientId: selectedClientId,
+      clientName: client?.companyName || 'Mandant',
+      siteCode: newSiteCode,
+      name: newSiteName,
+      address: newAddress,
+      securityLevel,
+      siteManagerId: employees[0]?.id || 'e-1',
+      siteManagerName: `${employees[0]?.firstName || 'Alexander'} ${employees[0]?.lastName || 'Schmidt'}`,
+      requiredGuardsDay: 2,
+      requiredGuardsNight: 2,
+      alarmSystem: 'Siemens Sinteso / Telenot BMA',
+      instructionsCount: 2,
+      accessRules: 'Ausweispflicht & Taschenkontrolle',
+      activeAlarms: 0,
+      checkpoints: [
+        { id: `cp-${Date.now()}-1`, code: 'CP-01', name: 'Haupteingang', locationDetails: 'Foyer', rfidTag: 'RFID-1001', requiredIntervalMinutes: 60 }
+      ]
     });
-    setShowAddSiteModal(false);
+
+    setIsModalOpen(false);
+    setNewSiteCode('');
+    setNewSiteName('');
+    setNewAddress('');
   };
 
+  // Filter object-scoped data
+  const siteShifts = selectedSite ? shifts.filter((s) => s.siteId === selectedSite.id) : [];
+  const siteLogs = selectedSite ? guardBook.filter((g) => g.siteId === selectedSite.id) : [];
+  const siteKeys = selectedSite ? keys.filter((k) => k.siteId === selectedSite.id) : [];
+  const siteAlarms = selectedSite ? emergencyPlans.filter((p) => p.siteId === selectedSite.id) : [];
+
   return (
-    <div className="space-y-5">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-slate-900 p-4 rounded-2xl border border-slate-800">
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <MapPin className="w-5 h-5 text-brand-400" />
-            <h2 className="text-base font-bold text-white">Sicherheitsobjekte & KRITIS-Verwaltung</h2>
-            <span className="text-xs px-2 py-0.5 rounded bg-brand-500/20 text-brand-200 font-mono">
-              Objektakten
-            </span>
+            <MapPin className="w-6 h-6 text-blue-400" />
+            <h1 className="text-xl font-bold text-white">Objektverwaltung & Sicherheitsanalysen</h1>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Objektstammdaten, Kontrollpunkte, Alarmanlagen und spezifische Sicherungsanforderungen.
+            Zentrale Übersicht aller Schutzobjekte mit integrierten Detailansichten für Kontrollpunkte, Wachbuch und Schlüssel.
           </p>
         </div>
 
         <button
-          onClick={() => setShowAddSiteModal(true)}
-          className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-brand-600 hover:bg-brand-500 text-white text-xs font-semibold shadow-md shadow-brand-900/40"
+          onClick={() => setIsModalOpen(true)}
+          className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg shadow-blue-600/20 transition flex items-center gap-2 shrink-0 self-start sm:self-auto"
         >
           <Plus className="w-4 h-4" />
           <span>Objekt anlegen</span>
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {sites.map((site) => (
-          <div
-            key={site.id}
-            className="p-5 rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition-all flex flex-col justify-between space-y-4 shadow-sm"
-          >
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-mono font-bold text-brand-400 bg-brand-500/10 px-2 py-0.5 rounded border border-brand-500/20">
-                  {site.siteCode}
-                </span>
-                <span
-                  className={`text-[10px] px-2 py-0.5 rounded font-bold ${
-                    site.riskLevel.includes('KRITIS')
-                      ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
-                      : site.riskLevel === 'Mittel'
-                      ? 'bg-amber-500/20 text-amber-300'
-                      : 'bg-emerald-500/20 text-emerald-300'
-                  }`}
-                >
-                  Gefährdung: {site.riskLevel}
-                </span>
-              </div>
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Sites List Column */}
+        <div className="space-y-3">
+          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
+            Aktive Schutzobjekte ({sites.length}):
+          </span>
 
-              <h3 className="font-bold text-white text-sm mb-1">{site.name}</h3>
-              <p className="text-xs text-slate-400 mb-3">{site.address}</p>
-
-              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs space-y-2 mb-3">
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">Auftraggeber:</span>
-                  <span className="font-semibold text-right truncate max-w-[180px]">{site.clientName}</span>
-                </div>
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">Objektleitung:</span>
-                  <span className="font-semibold">{site.siteLeader}</span>
-                </div>
-                <div className="flex items-center justify-between text-slate-300">
-                  <span className="text-slate-400">Alarmsysteme:</span>
-                  <span className="font-semibold truncate max-w-[180px]">{site.alarmSystem}</span>
+          {sites.map((site) => (
+            <div
+              key={site.id}
+              onClick={() => setSelectedSite(site)}
+              className={`p-4 rounded-xl cursor-pointer transition border ${
+                selectedSite?.id === site.id
+                  ? 'bg-blue-600/10 border-blue-500/50 shadow-md'
+                  : 'bg-slate-900 border-slate-800 hover:border-slate-700'
+              }`}
+            >
+              <div className="flex items-start justify-between">
+                <div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-blue-400 font-bold">
+                    {site.siteCode}
+                  </span>
+                  <h3 className="font-bold text-slate-200 text-sm mt-1">{site.name}</h3>
+                  <p className="text-xs text-slate-400 mt-0.5 truncate max-w-[220px]">{site.address}</p>
                 </div>
               </div>
 
-              <div className="p-2.5 rounded-lg bg-slate-800/40 border border-slate-700/60 text-xs text-slate-300">
-                <strong className="text-amber-300 block mb-0.5">Sicherheitsanweisung:</strong>
-                <p className="text-[11px] text-slate-300 leading-relaxed">{site.specialInstructions}</p>
+              <div className="mt-3 flex items-center justify-between text-xs text-slate-400 pt-2 border-t border-slate-800/80">
+                <span className="text-[11px] text-blue-400 font-medium">{site.securityLevel}</span>
+                <span>{site.checkpoints.length} Kontrollpunkte</span>
               </div>
             </div>
+          ))}
+        </div>
 
-            <div className="grid grid-cols-3 gap-2 pt-3 border-t border-slate-800 text-center text-xs">
-              <div className="p-2 rounded-lg bg-slate-950 border border-slate-800">
-                <QrCode className="w-3.5 h-3.5 text-brand-400 mx-auto mb-1" />
-                <span className="font-bold text-white block">{site.checkpointsCount}</span>
-                <span className="text-[10px] text-slate-400">NFC-Punkte</span>
+        {/* Selected Site Details with Tabs */}
+        {selectedSite && (
+          <div className="lg:col-span-2 bg-slate-900 rounded-2xl border border-slate-800 p-6 space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3 pb-4 border-b border-slate-800">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs font-mono font-bold px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                    {selectedSite.siteCode}
+                  </span>
+                  <h2 className="text-lg font-bold text-white">{selectedSite.name}</h2>
+                </div>
+                <p className="text-xs text-slate-400 mt-1">{selectedSite.address} (Kunde: {selectedSite.clientName})</p>
               </div>
-              <div className="p-2 rounded-lg bg-slate-950 border border-slate-800">
-                <KeyRound className="w-3.5 h-3.5 text-emerald-400 mx-auto mb-1" />
-                <span className="font-bold text-white block">{site.keysCount}</span>
-                <span className="text-[10px] text-slate-400">Schlüssel</span>
-              </div>
-              <div className="p-2 rounded-lg bg-slate-950 border border-slate-800">
-                <ShieldCheck className="w-3.5 h-3.5 text-cyan-400 mx-auto mb-1" />
-                <span className="font-bold text-white block">{site.activeGuardsRequired}</span>
-                <span className="text-[10px] text-slate-400">Soll-Posten</span>
-              </div>
+
+              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-300 border border-indigo-500/30 self-start">
+                {selectedSite.securityLevel}
+              </span>
             </div>
+
+            {/* Object Sub-Tabs */}
+            <div className="flex flex-wrap items-center gap-1.5 border-b border-slate-800 pb-2 text-xs">
+              <button
+                onClick={() => setActiveSiteTab('overview')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${
+                  activeSiteTab === 'overview' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Übersicht & Specs
+              </button>
+              <button
+                onClick={() => setActiveSiteTab('checkpoints')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${
+                  activeSiteTab === 'checkpoints' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Kontrollpunkte ({selectedSite.checkpoints.length})
+              </button>
+              <button
+                onClick={() => setActiveSiteTab('guardbook')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${
+                  activeSiteTab === 'guardbook' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Wachbuch ({siteLogs.length})
+              </button>
+              <button
+                onClick={() => setActiveSiteTab('roster')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${
+                  activeSiteTab === 'roster' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Schichten ({siteShifts.length})
+              </button>
+              <button
+                onClick={() => setActiveSiteTab('keys')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${
+                  activeSiteTab === 'keys' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Schlüssel ({siteKeys.length})
+              </button>
+              <button
+                onClick={() => setActiveSiteTab('alarms')}
+                className={`px-3 py-1.5 rounded-lg font-semibold transition ${
+                  activeSiteTab === 'alarms' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Alarmpläne ({siteAlarms.length})
+              </button>
+            </div>
+
+            {/* Tab 1: Overview */}
+            {activeSiteTab === 'overview' && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                  <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-800">
+                    <span className="text-slate-400 block text-[11px]">Objektleiter:</span>
+                    <span className="font-semibold text-slate-200 mt-0.5 block">{selectedSite.siteManagerName}</span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-800">
+                    <span className="text-slate-400 block text-[11px]">Soll-Kräfte (Tag/Nacht):</span>
+                    <span className="font-semibold text-slate-200 mt-0.5 block">{selectedSite.requiredGuardsDay} Tag / {selectedSite.requiredGuardsNight} Nacht</span>
+                  </div>
+                  <div className="p-3 rounded-xl bg-slate-800/40 border border-slate-800">
+                    <span className="text-slate-400 block text-[11px]">Alarmanlage:</span>
+                    <span className="font-semibold text-slate-200 mt-0.5 block">{selectedSite.alarmSystem}</span>
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
+                    Zutritts- und Sicherheitsbestimmungen:
+                  </h4>
+                  <div className="p-3.5 rounded-xl bg-slate-800/60 border border-slate-700/60 text-xs text-slate-200 leading-relaxed">
+                    {selectedSite.accessRules}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Tab 2: Checkpoints */}
+            {activeSiteTab === 'checkpoints' && (
+              <div className="space-y-2">
+                {selectedSite.checkpoints.map((cp) => (
+                  <div key={cp.id} className="p-3 rounded-xl bg-slate-800/40 border border-slate-800 flex items-center justify-between text-xs">
+                    <div>
+                      <div className="font-semibold text-slate-200">{cp.name} ({cp.code})</div>
+                      <div className="text-[11px] text-slate-400">{cp.locationDetails}</div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-[10px] font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-900/40 block">
+                        {cp.rfidTag}
+                      </span>
+                      <span className="text-[10px] text-slate-500">Alle {cp.requiredIntervalMinutes} Min.</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* Tab 3: Guardbook logs */}
+            {activeSiteTab === 'guardbook' && (
+              <div className="space-y-2">
+                {siteLogs.length === 0 ? (
+                  <div className="text-xs text-slate-500 p-4 text-center">Keine Wachbucheinträge für dieses Objekt.</div>
+                ) : (
+                  siteLogs.map((log) => (
+                    <div key={log.id} className="p-3 rounded-xl bg-slate-800/40 border border-slate-800 text-xs">
+                      <div className="flex justify-between font-semibold text-slate-200">
+                        <span>{log.title}</span>
+                        <span className="text-slate-400 text-[10px]">{log.timestamp.slice(0, 10)}</span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 mt-1">{log.description}</p>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* Tab 4: Roster */}
+            {activeSiteTab === 'roster' && (
+              <div className="space-y-2">
+                {siteShifts.length === 0 ? (
+                  <div className="text-xs text-slate-500 p-4 text-center">Keine Schichten geplant.</div>
+                ) : (
+                  siteShifts.map((sh) => (
+                    <div key={sh.id} className="p-3 rounded-xl bg-slate-800/40 border border-slate-800 text-xs flex justify-between items-center">
+                      <div>
+                        <div className="font-semibold text-slate-200">{sh.type} ({sh.startTime} - {sh.endTime})</div>
+                        <div className="text-slate-400 text-[11px]">Eingeteilt: {sh.employeeName || 'Nicht besetzt'}</div>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${sh.status === 'Besetzt' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+                        {sh.status}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* Tab 5: Keys */}
+            {activeSiteTab === 'keys' && (
+              <div className="space-y-2">
+                {siteKeys.length === 0 ? (
+                  <div className="text-xs text-slate-500 p-4 text-center">Keine Schlüssel hinterlegt.</div>
+                ) : (
+                  siteKeys.map((k) => (
+                    <div key={k.id} className="p-3 rounded-xl bg-slate-800/40 border border-slate-800 text-xs flex justify-between items-center">
+                      <div>
+                        <div className="font-semibold text-slate-200">{k.label} ({k.keyNumber})</div>
+                        <div className="text-slate-400 text-[11px]">Inhaber: {k.currentHolderName || 'Im Tresor'}</div>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${k.status === 'Im Tresor' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                        {k.status}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
+            {/* Tab 6: Alarms */}
+            {activeSiteTab === 'alarms' && (
+              <div className="space-y-2">
+                {siteAlarms.length === 0 ? (
+                  <div className="text-xs text-slate-500 p-4 text-center">Keine Alarmierungspläne hinterlegt.</div>
+                ) : (
+                  siteAlarms.map((a) => (
+                    <div key={a.id} className="p-3 rounded-xl bg-slate-800/40 border border-slate-800 text-xs">
+                      <div className="font-semibold text-slate-200">{a.scenario}</div>
+                      <div className="text-slate-400 text-[11px] mt-1">Letzte Übung: {a.lastDrillDate}</div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
-        ))}
+        )}
       </div>
 
-      {showAddSiteModal && (
-        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <form
-            onSubmit={handleCreateSite}
-            className="bg-slate-900 border border-slate-800 w-full max-w-md rounded-2xl p-6 shadow-2xl space-y-4 text-xs"
-          >
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="font-bold text-white text-base">Neues Sicherheitsobjekt anlegen</h3>
-              <button
-                type="button"
-                onClick={() => setShowAddSiteModal(false)}
-                className="text-slate-400 hover:text-white"
-              >
-                ✕
-              </button>
+      {/* Modal: New Site */}
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#0f172a] border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="text-base font-bold text-white">Neues Sicherheitsobjekt erfassen</h3>
+              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <form onSubmit={handleCreateSite} className="space-y-3 mt-4 text-xs">
               <div>
-                <label className="block text-slate-400 mb-1">Objekt-Kürzel</label>
-                <input
-                  type="text"
-                  placeholder="z.B. OBJ-BER-01"
-                  value={siteCode}
-                  onChange={(e) => setSiteCode(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-                />
-              </div>
-              <div>
-                <label className="block text-slate-400 mb-1">Gefährdungsstufe</label>
+                <label className="block text-slate-400 mb-1 font-medium">Zugeordneter Mandanten-Kunde *</label>
                 <select
-                  value={riskLevel}
-                  onChange={(e) => setRiskLevel(e.target.value as SecuritySite['riskLevel'])}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
+                  value={selectedClientId}
+                  onChange={(e) => setSelectedClientId(e.target.value)}
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                  required
                 >
-                  <option value="Niedrig">Niedrig</option>
-                  <option value="Mittel">Mittel</option>
-                  <option value="Hoch">Hoch</option>
-                  <option value="Kritische Infrastruktur (KRITIS)">KRITIS</option>
+                  {clients.map((c) => (
+                    <option key={c.id} value={c.id}>{c.companyName} ({c.clientNumber})</option>
+                  ))}
                 </select>
               </div>
-            </div>
 
-            <div>
-              <label className="block text-slate-400 mb-1">Objektbezeichnung</label>
-              <input
-                type="text"
-                placeholder="z.B. Bundesrechenzentrum Süd"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                required
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-              />
-            </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1 font-medium">Objektcode *</label>
+                  <input
+                    type="text"
+                    value={newSiteCode}
+                    onChange={(e) => setNewSiteCode(e.target.value)}
+                    placeholder="z. B. OBJ-FFM-03"
+                    required
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1 font-medium">Sicherheitslevel</label>
+                  <select
+                    value={securityLevel}
+                    onChange={(e) => setSecurityLevel(e.target.value as any)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                  >
+                    <option value="Niedrig">Niedrig</option>
+                    <option value="Mittel">Mittel</option>
+                    <option value="Hoch (KRITIS / BSI)">Hoch (KRITIS / BSI)</option>
+                    <option value="Höchste Sicherheitsstufe">Höchste Sicherheitsstufe</option>
+                  </select>
+                </div>
+              </div>
 
-            <div>
-              <label className="block text-slate-400 mb-1">Objektanschrift</label>
-              <input
-                type="text"
-                placeholder="Straße, PLZ Ort"
-                value={address}
-                onChange={(e) => setAddress(e.target.value)}
-                required
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-              />
-            </div>
+              <div>
+                <label className="block text-slate-400 mb-1 font-medium">Objektname *</label>
+                <input
+                  type="text"
+                  value={newSiteName}
+                  onChange={(e) => setNewSiteName(e.target.value)}
+                  placeholder="z. B. Rechenzentrum Alpha"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                />
+              </div>
 
-            <div>
-              <label className="block text-slate-400 mb-1">Besondere Sicherheitsanweisung</label>
-              <textarea
-                rows={2}
-                value={specialInstructions}
-                onChange={(e) => setSpecialInstructions(e.target.value)}
-                placeholder="Zutrittsregelungen, Sonderposten, Schließzeiten..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-200"
-              />
-            </div>
+              <div>
+                <label className="block text-slate-400 mb-1 font-medium">Standortadresse *</label>
+                <input
+                  type="text"
+                  value={newAddress}
+                  onChange={(e) => setNewAddress(e.target.value)}
+                  placeholder="Straße, PLZ, Stadt"
+                  required
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
+                />
+              </div>
 
-            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
-              <button
-                type="button"
-                onClick={() => setShowAddSiteModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 hover:bg-slate-700"
-              >
-                Abbrechen
-              </button>
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-xl bg-brand-600 text-white font-semibold hover:bg-brand-500"
-              >
-                Objekt speichern
-              </button>
-            </div>
-          </form>
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setIsModalOpen(false)}
+                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold"
+                >
+                  Objekt anlegen
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
       )}
     </div>

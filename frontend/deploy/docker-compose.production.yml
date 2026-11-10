@@ -1,0 +1,187 @@
+# SecurityOps 2.0 - Production Docker Compose Orchestration (DIN 77200 / BSI TR-02102)
+# Internal network isolation: PostgreSQL & Redis NEVER expose ports publicly!
+
+version: '3.8'
+
+networks:
+  secops_internal:
+    driver: bridge
+    internal: true
+  secops_public:
+    driver: bridge
+
+volumes:
+  secops_pgdata:
+    driver: local
+  secops_storage:
+    driver: local
+  secops_backups:
+    driver: local
+  secops_redisdata:
+    driver: local
+  caddy_data:
+  caddy_config:
+
+services:
+  # 1. PostgreSQL 16+ Database with Row-Level Security
+  db:
+    image: postgres:16.2-alpine
+    container_name: secops_prod_db
+    restart: unless-stopped
+    user: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-securityops_v2}
+      POSTGRES_USER: ${POSTGRES_USER:-secops_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Fehler: POSTGRES_PASSWORD muss gesetzt sein!}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - secops_pgdata:/var/lib/postgresql/data
+    networks:
+      - secops_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2048M
+        reservations:
+          memory: 512M
+
+  # 2. Redis Message Broker & Worker Queue
+  redis:
+    image: redis:7.2-alpine
+    container_name: secops_prod_redis
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Fehler: REDIS_PASSWORD muss gesetzt sein!}", "--appendonly", "yes"]
+    volumes:
+      - secops_redisdata:/data
+    networks:
+      - secops_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+
+  # 3. FastAPI REST Backend Engine
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    container_name: secops_prod_backend
+    restart: unless-stopped
+    user: "10001:10001"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-secops_admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-securityops_v2}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:?Fehler: SECRET_KEY muss gesetzt sein!}
+      STORAGE_ROOT: /var/lib/securityops/storage
+    volumes:
+      - secops_storage:/var/lib/securityops/storage
+    networks:
+      - secops_internal
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1024M
+
+  # 4. Celery / Background Task Worker (Automations, Deadlines & Cleanup)
+  worker:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    container_name: secops_prod_worker
+    restart: unless-stopped
+    user: "10001:10001"
+    command: ["python", "-m", "backend.worker"]
+    depends_on:
+      backend:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      ENV: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-secops_admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-securityops_v2}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      STORAGE_ROOT: /var/lib/securityops/storage
+    volumes:
+      - secops_storage:/var/lib/securityops/storage
+    networks:
+      - secops_internal
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+
+  # 5. Reverse Proxy with Automated TLS (Caddy)
+  proxy:
+    image: caddy:2.7-alpine
+    container_name: secops_prod_proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ../public:/var/www/html:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - secops_internal
+      - secops_public
+    depends_on:
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # 6. Automated Backup Engine (Encrypted pg_dump & storage sync)
+  backup:
+    image: postgres:16.2-alpine
+    container_name: secops_prod_backup
+    restart: unless-stopped
+    user: postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-securityops_v2}
+      POSTGRES_USER: ${POSTGRES_USER:-secops_admin}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY}
+    volumes:
+      - secops_backups:/var/backups
+      - secops_storage:/var/lib/securityops/storage:ro
+      - ./backup_cron.sh:/usr/local/bin/backup_cron.sh:ro
+    entrypoint: ["/bin/sh", "/usr/local/bin/backup_cron.sh"]
+    networks:
+      - secops_internal
+    depends_on:
+      db:
+        condition: service_healthy

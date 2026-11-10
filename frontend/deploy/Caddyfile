@@ -1,0 +1,44 @@
+# SecurityOps 2.0 - Production Reverse Proxy & TLS Configuration
+{$DOMAIN:localhost} {
+    encode gzip zstd
+
+    # Strict BSI / OWASP Security Headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://generativelanguage.googleapis.com; frame-ancestors 'none';"
+        Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=()"
+        -Server
+    }
+
+    # Max upload limit (15MB according to DIN 77200 spec)
+    request_body {
+        max_size 15MB
+    }
+
+    # API and OpenAPI Docs -> FastAPI Backend
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    handle /docs* {
+        reverse_proxy backend:8000
+    }
+
+    handle /openapi.json* {
+        reverse_proxy backend:8000
+    }
+
+    # PWA Static Assets & Frontend Routing
+    root * /var/www/html
+    file_server
+    try_files {path} /index.html
+}

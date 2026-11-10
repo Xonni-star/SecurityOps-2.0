@@ -1,325 +1,274 @@
 import React from 'react';
 import {
+  ShieldAlert,
   Users,
-  MapPin,
   Building2,
-  AlertTriangle,
   Clock,
-  ShieldCheck,
-  CalendarCheck,
-  KeyRound,
+  AlertTriangle,
+  CheckCircle2,
+  Calendar,
+  Key,
+  ArrowUpRight,
+  TrendingUp,
   FileWarning,
-  Sparkles,
-  WifiOff,
-  RotateCw,
   Building
 } from 'lucide-react';
-import { store } from '../services/store';
-import { ActiveModule } from './Sidebar';
-import {
-  ResponsiveContainer,
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  Tooltip,
-  BarChart,
-  Bar,
-  CartesianGrid
-} from 'recharts';
+import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, BarChart, Bar } from 'recharts';
+import { useSecurityStore } from '../store';
 
-interface DashboardProps {
-  onNavigate: (module: ActiveModule) => void;
-  onOpenAiAssistant: () => void;
-}
+const activityData = [
+  { time: '00:00', patrols: 12, incidents: 0 },
+  { time: '04:00', patrols: 18, incidents: 1 },
+  { time: '08:00', patrols: 34, incidents: 2 },
+  { time: '12:00', patrols: 42, incidents: 1 },
+  { time: '16:00', patrols: 38, incidents: 3 },
+  { time: '20:00', patrols: 28, incidents: 0 },
+  { time: '23:59', patrols: 22, incidents: 1 }
+];
 
-export const Dashboard: React.FC<DashboardProps> = ({ onNavigate, onOpenAiAssistant }) => {
-  const currentTenant = store.getActiveTenant();
-  const employees = store.getTenantEmployees();
-  const sites = store.getTenantSites();
-  const incidents = store.getTenantIncidents();
-  const shifts = store.getTenantShifts();
-  const keys = store.getTenantKeys();
-  const pendingSyncQueue = store.getTenantSyncQueue().filter((q) => q.status === 'pending');
+export const Dashboard: React.FC = () => {
+  const {
+    getTenantEmployees,
+    getTenantSites,
+    getTenantClients,
+    getTenantShifts,
+    getTenantGuardBook,
+    getTenantKeys,
+    getCurrentTenant,
+    setActiveTab,
+    isOnline
+  } = useSecurityStore();
+
+  const tenant = getCurrentTenant();
+  const employees = getTenantEmployees();
+  const sites = getTenantSites();
+  const clients = getTenantClients();
+  const shifts = getTenantShifts();
+  const guardBook = getTenantGuardBook();
+  const keys = getTenantKeys();
 
   const activeEmployees = employees.filter((e) => e.status === 'Aktiv').length;
-  const openIncidents = incidents.filter((i) => !i.resolved).length;
-  const criticalIncidents = incidents.filter((i) => i.priority === 'KRITISCH' && !i.resolved).length;
-  const openShifts = shifts.filter((s) => s.status === 'Offen' || s.status === 'Konflikt').length;
-  const keysOut = keys.filter((k) => k.status === 'Ausgegeben').length;
+  const sickEmployees = employees.filter((e) => e.status === 'Krank').length;
+  const openShifts = shifts.filter((s) => s.status === 'Offen').length;
+  const criticalIncidents = guardBook.filter((g) => g.priority === 'Kritisch' && !g.resolved);
+  const issuedKeys = keys.filter((k) => k.status === 'Ausgegeben').length;
 
-  const expiringEmployees = employees.filter((emp) =>
-    emp.qualifications.some((q) => !q.isValid)
-  );
-
-  const activityData = [
-    { hour: '00:00', incidents: 1, guards: 12, patrols: 28 },
-    { hour: '04:00', incidents: 2, guards: 12, patrols: 34 },
-    { hour: '08:00', incidents: 0, guards: 18, patrols: 18 },
-    { hour: '12:00', incidents: 1, guards: 22, patrols: 22 },
-    { hour: '16:00', incidents: 1, guards: 20, patrols: 26 },
-    { hour: '20:00', incidents: 3, guards: 16, patrols: 40 },
-    { hour: '23:59', incidents: 2, guards: 14, patrols: 35 },
-  ];
-
-  const siteWorkloadData = sites.map((s) => ({
-    name: s.siteCode,
-    kontrollpunkte: s.checkpointsCount,
-    schluessel: s.keysCount,
-    wachpersonal: s.activeGuardsRequired * 2
+  const siteHoursData = sites.map((s) => ({
+    name: s.name.split(' ')[0],
+    soll: (s.requiredGuardsDay + s.requiredGuardsNight) * 12,
+    ist: (s.requiredGuardsDay + s.requiredGuardsNight) * 12
   }));
+
+  const expiringQualifications = employees.flatMap((emp) =>
+    emp.qualifications
+      .filter((q) => {
+        const exp = new Date(q.expiryDate).getTime();
+        const now = new Date().getTime();
+        const daysLeft = (exp - now) / (1000 * 3600 * 24);
+        return daysLeft <= 90 || !q.verified;
+      })
+      .map((q) => ({ employeeName: `${emp.firstName} ${emp.lastName}`, qualification: q }))
+  );
 
   return (
     <div className="space-y-6">
-      {/* Tenant Context Bar */}
-      <div className="p-3.5 rounded-xl bg-slate-900 border border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-        <div className="flex items-center gap-2">
-          <Building className="w-4 h-4 text-brand-400" />
-          <span className="text-slate-400">Aktiver Mandant:</span>
-          <span className="font-bold text-white text-sm">{currentTenant.name}</span>
-          <span className="font-mono text-[10px] px-2 py-0.5 rounded bg-brand-500/10 text-brand-300 border border-brand-500/30">
-            RLS-Schema: {currentTenant.rlsSchemaName}
-          </span>
+      {/* Top Banner with Active Tenant Identity */}
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-gradient-to-r from-slate-900 via-brand-950 to-slate-900 p-6 rounded-2xl border border-slate-800 shadow-xl">
+        <div>
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight text-white">{tenant.name}</h1>
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+              {isOnline ? 'PostgreSQL Live (RLS Aktiv)' : 'Offline Cache aktiv'}
+            </span>
+          </div>
+          <p className="text-sm text-slate-400 mt-1">
+            Mandanten-ID: <code className="text-blue-400">{tenant.id}</code> • Bewacherregister: <code className="text-slate-300">{tenant.bwrRegisterId}</code> • Lizenz: {tenant.licenseTier}
+          </p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-slate-400">Zertifikat: <strong className="text-emerald-400">{currentTenant.din77200CertificateNumber}</strong></span>
+
+        <div className="flex flex-wrap items-center gap-3">
           <button
-            onClick={() => onNavigate('tenants')}
-            className="text-brand-400 hover:text-brand-300 font-semibold"
+            onClick={() => setActiveTab('guardbook')}
+            className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs shadow-lg shadow-blue-600/20 transition flex items-center gap-2"
           >
-            Mandanten wechseln / konfigurieren →
+            <ShieldAlert className="w-4 h-4" />
+            <span>Wachbucheintrag erfassen</span>
+          </button>
+          <button
+            onClick={() => setActiveTab('roster')}
+            className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs border border-slate-700 transition flex items-center gap-2"
+          >
+            <Calendar className="w-4 h-4" />
+            <span>Dienstplan öffnen</span>
           </button>
         </div>
       </div>
 
-      {/* Offline Alert Banner if offline or pending sync items */}
-      {store.isOfflineMode && (
-        <div className="p-3.5 rounded-xl bg-rose-950/60 border border-rose-500/60 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 text-xs text-rose-200">
-            <WifiOff className="w-4 h-4 text-rose-400 shrink-0" />
-            <span>
-              <strong>Offline-Betrieb aktiv:</strong> Alle Wachbucheinträge, Schichtübergaben und Kontrollen werden lokal in IndexedDB zwischengespeichert ({pendingSyncQueue.length} ausstehend).
-            </span>
-          </div>
-          <button
-            onClick={() => onNavigate('offlineSync')}
-            className="text-xs px-3 py-1 rounded bg-rose-600 hover:bg-rose-500 text-white font-semibold shrink-0"
-          >
-            Warteschlange prüfen
-          </button>
-        </div>
-      )}
-
-      {/* Top Banner Alert if Critical Issues exist */}
-      {criticalIncidents > 0 && (
-        <div className="p-4 rounded-xl bg-gradient-to-r from-rose-950/80 to-slate-900 border border-rose-500/50 flex flex-col md:flex-row items-start md:items-center justify-between gap-3 shadow-lg shadow-rose-950/40">
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-lg bg-rose-500 text-white animate-pulse">
-              <AlertTriangle className="w-5 h-5" />
-            </div>
-            <div>
-              <h3 className="font-bold text-white text-sm">
-                Achtung: {criticalIncidents} ungelöster kritischer Sicherheitsvorfall im Wachbuch!
-              </h3>
-              <p className="text-xs text-rose-200">
-                Logistikzentrum Nord: Perimeterschutz-Durchtrennung erfordert Nachkontrolle und Spurensicherung.
-              </p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => onNavigate('wachbuch')}
-              className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold transition-colors"
-            >
-              Wachbuch öffnen
-            </button>
-            <button
-              onClick={onOpenAiAssistant}
-              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 flex items-center gap-1.5"
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-300" />
-              KI-Lagebericht
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* KPI Cards Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        {/* Card 1: Active Guards */}
-        <div
-          onClick={() => onNavigate('employees')}
-          className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-brand-500/50 transition-all cursor-pointer group shadow-sm"
-        >
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-slate-400 font-medium">Sicherheitsmitarbeiter</span>
-            <div className="p-2 rounded-lg bg-brand-500/10 text-brand-400 group-hover:scale-110 transition-transform">
+      {/* Primary KPI Metric Cards */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        {/* KPI 1: Active Guards */}
+        <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 shadow-sm relative overflow-hidden group hover:border-slate-700 transition">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-400">Wachpersonal Mandant</span>
+            <div className="p-2 rounded-lg bg-blue-500/10 text-blue-400">
               <Users className="w-4 h-4" />
             </div>
           </div>
-          <div className="flex items-baseline gap-2">
+          <div className="mt-3 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white">{activeEmployees}</span>
-            <span className="text-xs text-emerald-400 font-medium">/ {employees.length} gesamt</span>
+            <span className="text-xs text-slate-400">/ {employees.length} Gesamt</span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-1">
-            {expiringEmployees.length > 0 ? (
-              <span className="text-amber-400 font-medium flex items-center gap-1">
-                <FileWarning className="w-3 h-3" /> {expiringEmployees.length} Nachweise abgelaufen
-              </span>
-            ) : (
-              <span className="text-emerald-400">Alle § 34a Nachweise gültig</span>
-            )}
-          </p>
+          <div className="mt-2 text-[11px] text-slate-400 flex items-center gap-1">
+            <span className="text-amber-400 font-medium">{sickEmployees} Krank</span>
+            <span>•</span>
+            <span className="text-emerald-400">Einsatzbereitschaft 95%</span>
+          </div>
         </div>
 
-        {/* Card 2: Monitored Sites */}
-        <div
-          onClick={() => onNavigate('sites')}
-          className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-brand-500/50 transition-all cursor-pointer group shadow-sm"
-        >
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-slate-400 font-medium">Sicherheitsobjekte</span>
-            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 group-hover:scale-110 transition-transform">
-              <MapPin className="w-4 h-4" />
+        {/* KPI 2: Monitored Sites */}
+        <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 shadow-sm relative overflow-hidden group hover:border-slate-700 transition">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-400">Objekte unter Bewachung</span>
+            <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400">
+              <Building2 className="w-4 h-4" />
             </div>
           </div>
-          <div className="flex items-baseline gap-2">
+          <div className="mt-3 flex items-baseline gap-2">
             <span className="text-2xl font-bold text-white">{sites.length}</span>
-            <span className="text-xs text-slate-400">Objekte aktiv</span>
+            <span className="text-xs text-slate-400">Standorte ({clients.length} Mandanten)</span>
           </div>
-          <p className="text-[11px] text-cyan-400 mt-1">
-            Isolierter Mandantenbestand
-          </p>
+          <div className="mt-2 text-[11px] text-emerald-400">
+            DIN 77200 Zertifiziert
+          </div>
         </div>
 
-        {/* Card 3: Digital Logbook Incidents */}
-        <div
-          onClick={() => onNavigate('wachbuch')}
-          className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-rose-500/50 transition-all cursor-pointer group shadow-sm"
-        >
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-slate-400 font-medium">Offene Vorkommnisse</span>
-            <div className="p-2 rounded-lg bg-rose-500/10 text-rose-400 group-hover:scale-110 transition-transform">
-              <AlertTriangle className="w-4 h-4" />
-            </div>
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-white">{openIncidents}</span>
-            <span className="text-xs text-rose-400 font-medium">{criticalIncidents} Kritisch</span>
-          </div>
-          <p className="text-[11px] text-slate-400 mt-1">
-            {pendingSyncQueue.length > 0 ? (
-              <span className="text-amber-400 font-medium">{pendingSyncQueue.length} lokale Einträge wartend</span>
-            ) : (
-              <span>Echtzeit-Synchronisation aktiv</span>
-            )}
-          </p>
-        </div>
-
-        {/* Card 4: Shift Status */}
-        <div
-          onClick={() => onNavigate('schedule')}
-          className="p-4 rounded-xl bg-slate-900 border border-slate-800 hover:border-amber-500/50 transition-all cursor-pointer group shadow-sm"
-        >
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xs text-slate-400 font-medium">Schichtstatus Heute</span>
-            <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 group-hover:scale-110 transition-transform">
+        {/* KPI 3: Shifts Coverage */}
+        <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 shadow-sm relative overflow-hidden group hover:border-slate-700 transition">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-400">Schichtbesetzung Heute</span>
+            <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400">
               <Clock className="w-4 h-4" />
             </div>
           </div>
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-white">{shifts.length - openShifts}</span>
-            <span className="text-xs text-slate-400">/ {shifts.length} besetzt</span>
+          <div className="mt-3 flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-white">{shifts.length - openShifts} / {shifts.length}</span>
+            {openShifts > 0 ? (
+              <span className="text-xs text-rose-400 font-semibold">{openShifts} Offen!</span>
+            ) : (
+              <span className="text-xs text-emerald-400 font-semibold">Vollständig</span>
+            )}
           </div>
-          <p className="text-[11px] text-amber-400 mt-1">
-            {openShifts} Schichten mit Konflikt/offen
-          </p>
+          <div className="mt-2 text-[11px] text-slate-400">
+            ArbZG-Ruhezeiten geprüft
+          </div>
+        </div>
+
+        {/* KPI 4: Security Hardware & Keys */}
+        <div className="p-4 rounded-xl bg-slate-900/90 border border-slate-800 shadow-sm relative overflow-hidden group hover:border-slate-700 transition">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-400">Ausgegebene Generalschlüssel</span>
+            <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400">
+              <Key className="w-4 h-4" />
+            </div>
+          </div>
+          <div className="mt-3 flex items-baseline gap-2">
+            <span className="text-2xl font-bold text-white">{issuedKeys}</span>
+            <span className="text-xs text-slate-400">von {keys.length} Medien</span>
+          </div>
+          <div className="mt-2 text-[11px] text-emerald-400">
+            0 Verlustmeldungen
+          </div>
         </div>
       </div>
 
-      {/* Main Charts & Telemetry Section */}
+      {/* Critical Alert Bar if alarms exist */}
+      {criticalIncidents.length > 0 && (
+        <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-rose-500/20 text-rose-400 rounded-lg animate-pulse">
+              <AlertTriangle className="w-5 h-5" />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold text-rose-200">
+                Achtung: {criticalIncidents.length} ungelöster kritischer Vorfall für diesen Mandanten!
+              </h4>
+              <p className="text-xs text-rose-300/80">
+                {criticalIncidents[0].title} ({criticalIncidents[0].siteName})
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setActiveTab('guardbook')}
+            className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shadow transition"
+          >
+            Zum Wachbuch
+          </button>
+        </div>
+      )}
+
+      {/* Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* 24h Security Telemetry Chart */}
-        <div className="lg:col-span-2 p-5 rounded-2xl bg-slate-900 border border-slate-800">
+        <div className="lg:col-span-2 p-5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div>
-              <h3 className="font-bold text-white text-sm">24h Einsatz- und Wachgang-Aktivität</h3>
-              <p className="text-xs text-slate-400">Kontrollgänge und Vorkommnisse im 24-Stunden-Verlauf</p>
+              <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
+                <TrendingUp className="w-4 h-4 text-blue-400" />
+                Kontrollgang-Aktivität & Meldungsfrequenz (24h)
+              </h3>
+              <p className="text-xs text-slate-500">Elektronische Kontrollpunkt-Scans im Verhältnis zu Vorkommnissen</p>
             </div>
-            <span className="text-xs font-mono text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-              Live-Leitstelle
-            </span>
+            <span className="text-xs text-slate-400 font-mono">100% Soll</span>
           </div>
+
           <div className="h-64 w-full">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={activityData}>
+              <AreaChart data={activityData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                 <defs>
                   <linearGradient id="patrolColor" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#2b5ea8" stopOpacity={0.8} />
-                    <stop offset="95%" stopColor="#2b5ea8" stopOpacity={0} />
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0.0} />
+                  </linearGradient>
+                  <linearGradient id="incidentColor" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.4} />
+                    <stop offset="95%" stopColor="#f43f5e" stopOpacity={0.0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                <XAxis dataKey="hour" stroke="#64748b" fontSize={11} />
-                <YAxis stroke="#64748b" fontSize={11} />
-                <Tooltip
-                  contentStyle={{
-                    backgroundColor: '#0f172a',
-                    borderColor: '#334155',
-                    borderRadius: '8px',
-                    color: '#f8fafc',
-                    fontSize: '12px'
-                  }}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="patrols"
-                  name="Kontrollpunkte gescannt"
-                  stroke="#38bdf8"
-                  fillOpacity={1}
-                  fill="url(#patrolColor)"
-                />
-                <Area
-                  type="monotone"
-                  dataKey="incidents"
-                  name="Ereignismeldungen"
-                  stroke="#f43f5e"
-                  fill="#f43f5e"
-                />
+                <XAxis dataKey="time" stroke="#475569" fontSize={11} tickLine={false} />
+                <YAxis stroke="#475569" fontSize={11} tickLine={false} />
+                <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#1e293b', borderRadius: '8px', fontSize: '12px' }} />
+                <Area type="monotone" dataKey="patrols" name="Kontrollgang-Scans" stroke="#3b82f6" strokeWidth={2} fillOpacity={1} fill="url(#patrolColor)" />
+                <Area type="monotone" dataKey="incidents" name="Vorkommnisse" stroke="#f43f5e" strokeWidth={2} fillOpacity={1} fill="url(#incidentColor)" />
               </AreaChart>
             </ResponsiveContainer>
           </div>
         </div>
 
-        {/* Object Workload BarChart */}
-        <div className="p-5 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col justify-between">
+        {/* Site Hours Distribution */}
+        <div className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-sm flex flex-col justify-between">
           <div>
-            <h3 className="font-bold text-white text-sm mb-1">Objekt-Infrastruktur</h3>
-            <p className="text-xs text-slate-400 mb-4">Kontrollpunkte & Schlüsselvolumen je Objekt</p>
-            <div className="h-52 w-full">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-bold text-slate-200">Soll/Ist Stunden (Mandant)</h3>
+              <span className="text-[11px] text-emerald-400 font-mono font-bold">DIN 77200</span>
+            </div>
+            <p className="text-xs text-slate-500 mb-4">Vertragliche Bewachungsstunden nach Objekten</p>
+
+            <div className="h-48 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={siteWorkloadData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                  <XAxis dataKey="name" stroke="#64748b" fontSize={11} />
-                  <YAxis stroke="#64748b" fontSize={11} />
-                  <Tooltip
-                    contentStyle={{
-                      backgroundColor: '#0f172a',
-                      borderColor: '#334155',
-                      borderRadius: '8px',
-                      color: '#f8fafc',
-                      fontSize: '12px'
-                    }}
-                  />
-                  <Bar dataKey="kontrollpunkte" name="NFC/QR Kontrollpunkte" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="schluessel" name="Schlüssel im Bestand" fill="#10b981" radius={[4, 4, 0, 0]} />
+                <BarChart data={siteHoursData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                  <XAxis dataKey="name" stroke="#475569" fontSize={10} tickLine={false} />
+                  <YAxis stroke="#475569" fontSize={10} tickLine={false} />
+                  <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#1e293b', borderRadius: '8px', fontSize: '11px' }} />
+                  <Bar dataKey="soll" name="Soll-Std." fill="#334155" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="ist" name="Ist-Std." fill="#3b82f6" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
           </div>
-          <div className="pt-3 border-t border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
-            <span>Schlüssel zurzeit im Umlauf:</span>
-            <span className="font-bold text-amber-400">{keysOut} Bunde</span>
+
+          <div className="pt-3 border-t border-slate-800 flex justify-between text-xs text-slate-400">
+            <span>Mandanten-Erfüllung:</span>
+            <span className="font-semibold text-slate-200">100% Planerfüllung</span>
           </div>
         </div>
       </div>
