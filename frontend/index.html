@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="de" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>SecurityOps 2.0 | Einsatzleit- & Sicherheitsdienstverwaltung</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#f0f4fa',
+              100: '#d9e2f2',
+              200: '#b8cbe7',
+              500: '#2b5ea8',
+              600: '#1e4887',
+              700: '#163668',
+              800: '#11284d',
+              900: '#0c1b33',
+              950: '#070f1f',
+            },
+            accent: {
+              amber: '#f59e0b',
+              emerald: '#10b981',
+              rose: '#f43f5e',
+              cyan: '#06b6d4',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  </head>
+<body class="bg-slate-950 text-slate-100 antialiased selection:bg-brand-500 selection:text-white min-h-screen">
+  <div id="root"></div>
+  <script type="module" src="./index.tsx"></script>
+<script type="module" src="/index.js"></script></body>
+</html>
