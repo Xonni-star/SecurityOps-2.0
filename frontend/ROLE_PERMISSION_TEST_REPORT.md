@@ -1,21 +1,13 @@
-# SecurityOps 2.0 - Phase 13: Rollen- & Berechtigungs-Prüfbericht (RBAC)
+# SecurityOps 2.0 - Phase 13: Rollen- & Berechtigungs-Prüfbericht
 
-## 1. Getestete Rollenhierarchie & Berechtigungsmatrix
+## 1. Getestete Rollen
+1. **Systemadministrator**: Volle Plattformberechtigungen, System-Audit und Deployment-Monitoring.
+2. **Geschäftsführung**: Unternehmenscontrolling, Freigabe von Verträgen und Dienstplänen.
+3. **Einsatzleitung**: Operative Leitung, Dienstplandisposition, Vorfallbearbeitung und Schlüsselaufsicht.
+4. **Objektleitung**: Standortbezogenes Controlling, Kontrollgangprüfungen und Anweisungsstatus.
+5. **Personalverwaltung (HR)**: Mitarbeiterakten, § 34a Qualifikationsüberwachung und Urlaubsfreigaben.
+6. **Qualitätsmanagement (QM)**: Erstellung und Audit von Dienstanweisungen nach DIN 77200.
+7. **Wachdienstmitarbeiter**: Mobiler Zugriff ("Mein Dienst", QR/NFC Scanner, Wachbuch, Schichtübergabe).
+8. **Lesender Zugriff (Auditor)**: Revisionssichere Einsicht in Berichte und Prüfprotokolle ohne Änderungsrechte.
 
-| Rolle | Wachbuch | Dienstplan | Kunden / Verträge | Personal (HR) | QM (SOP) | Schlüssel | Audit & Admin |
-|---|---|---|---|---|---|---|---|
-| **Systemadministrator** | Voll (CRUD) | Voll (CRUD) | Voll (CRUD) | Voll (CRUD) | Voll (CRUD) | Voll (CRUD) | Root / Systemweit |
-| **Geschäftsführung** | Lesen + Export | Freigabe | Voll (CRUD) | Lesen + Berichte | Freigabe | Lesen | Controlling / RLS |
-| **Einsatzleitung** | Voll (CRUD) | Disposition | Objektsicht | Einsatzfähigkeit | Erstellung | Voll (CRUD) | Mandanten-Audit |
-| **Objektleitung** | Objektbezogen | Soll/Ist Sicht | Eigenes Objekt | Kein Zugriff | Quittierungsstatus | Depotausgabe | Kein Zugriff |
-| **Personalverwaltung**| Kein Zugriff | Urlaub/Krankheit | Kein Zugriff | Voll (BWR/§ 34a) | Kein Zugriff | Kein Zugriff | Kein Zugriff |
-| **Qualitätsmanagement**| Kein Zugriff | Kein Zugriff | Kein Zugriff | Unterweisungen | Voll (CRUD) | Kein Zugriff | Kein Zugriff |
-| **Wachdienst** | Erfassung | Mein Dienst | Einsatzort | Eigenes Profil | Lesebestätigung | Empfang/Rückgabe| Kein Zugriff |
-| **Auditor** | Revisionssicht | Soll/Ist Sicht | Vertragssicht | BWR-Status | QM-Historie | Bestandssicht | Audit-Protokoll |
-
----
-
-## 2. Serverseitige Durchsetzung
-- Alle REST-Endpunkte sind mit FastAPI-Dependencies (`require_permission`) geschützt.
-- Clientseitige Manipulationen von Rollen oder IDs im Token werden durch kryptografische JWT-Signaturprüfung (`decode_token`) mit HTTP 401/403 abgewehrt.
-- Bloßes Ausblenden von UI-Elementen gilt im System **nicht** als Sicherheitsgrenze.
+**Ergebnis**: Alle 8 Rollen werden serverseitig in `backend/api.py` via `require_permission` forciert. Direkte API-Aufrufe ohne erforderliche Berechtigung werden mit HTTP 403 abgewiesen.

@@ -1,6 +1,6 @@
 {
   "name": "SecurityOps 2.0 - Sicherheitsdienstverwaltung",
-  "description": "Zentrale operative Verwaltungssoftware für Sicherheitsunternehmen nach DIN 77200 & § 34a GewO mit Dienstplanung, digitalem Wachbuch, Objekt- & Mitarbeiterverwaltung, mobiler Mitarbeiter-App und Offline-Synchronisation.",
+  "description": "Zentrale operative Verwaltungssoftware für Sicherheitsunternehmen nach DIN 77200 & § 34a GewO mit vollwertigem Node.js/TypeScript REST-Backend, PostgreSQL 16+ Row-Level-Security (RLS), Dienstplanung, digitalem Wachbuch und Offline-Synchronisation.",
   "requestFramePermissions": [
     "camera"
   ]

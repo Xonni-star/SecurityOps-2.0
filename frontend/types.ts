@@ -416,7 +416,7 @@ export interface SecurityAuditEntry {
   timestamp: string;
   actorEmail: string;
   actorRole: string;
-  actionType: 'LOGIN' | 'FAILED_LOGIN' | 'LOGOUT' | 'ROLE_CHANGE' | 'DATA_EXPORT' | 'DEVICE_REVOKE' | 'IDOR_BLOCKED' | 'INCIDENT_MOD' | 'AUTOMATION_RUN' | 'RULE_MODIFIED' | 'KIOSK_LOCKED' | 'KIOSK_UNLOCKED';
+  actionType: 'LOGIN' | 'FAILED_LOGIN' | 'LOGOUT' | 'ROLE_CHANGE' | 'DATA_EXPORT' | 'DEVICE_REVOKE' | 'IDOR_BLOCKED' | 'INCIDENT_MOD' | 'AUTOMATION_RUN' | 'RULE_MODIFIED';
   severity: 'INFO' | 'WARNUNG' | 'ALARM' | 'KRITISCH';
   targetEntity: string;
   details: string;
@@ -486,6 +486,10 @@ export interface ControllingKPIs {
   din77200ComplianceScore: number;
 }
 
+// ==============================================================================
+// PHASE 11: MOBILE MITARBEITER-APP & OBJEKTSTEUERUNG
+// ==============================================================================
+
 export interface ShiftSwapRequest {
   id: string;
   tenantId: string;
@@ -534,71 +538,6 @@ export interface ShiftHandoverProtocol {
   remarks: string;
   acknowledgedByRelievingGuard: boolean;
   offlineCaptured: boolean;
-}
-
-// ==============================================================================
-// PHASE 14: EIGENSTÄNDIGE MOBILE APP & KIOSK-MODUS
-// ==============================================================================
-
-export enum KioskOperatingMode {
-  SINGLE_APP = 'EINZEL_APP_KIOSK',      // Modus A: Vollbild, Lock Task Mode, kein Verlassen
-  MULTI_APP = 'MEHR_APP_KIOSK',        // Modus B: SecurityOps + freigegebene Tools (Kamera, Telefon)
-  STANDARD = 'NORMALER_BETRIEB'        // Modus C: BYOD / gewöhnliche Mitarbeiter-App
-}
-
-export enum StationProfileType {
-  PFORTE = 'Pforte & Empfang',
-  OBJEKTSCHUTZ = 'Objektschutz Terminal',
-  WACHBUCH_TERMINAL = 'Wachbuch-Terminal (Stationär)',
-  RUNDGANG = 'Rundgangskontrolle (Mobil)',
-  SCHICHTWECHSEL = 'Schichtübergabe-Station',
-  EINSATZLEITUNG = 'Einsatzleitung Mobil'
-}
-
-export interface StationProfile {
-  id: string;
-  type: StationProfileType;
-  name: string;
-  description: string;
-  allowedViews: string[]; // e.g. ['duty', 'guardbook', 'patrol', 'handover', 'sop', 'tasks']
-  defaultKioskMode: KioskOperatingMode;
-  autoLogoutMinutes: number; // 0 = never
-  requireBiometricOnAction: boolean;
-  preventScreenCapture: boolean;
-}
-
-export interface MobileDeviceEntity {
-  id: string;
-  tenantId: string;
-  deviceId: string; // Unique cryptographic fingerprint
-  deviceName: string;
-  platform: 'Android Enterprise' | 'Apple iOS (Supervised)' | 'Capacitor PWA';
-  appVersion: string;
-  osVersion: string;
-  batteryLevel: number; // 0 - 100
-  assignedUserId?: string;
-  assignedUserName?: string;
-  assignedStationProfile: StationProfileType;
-  currentKioskMode: KioskOperatingMode;
-  status: 'ACTIVE' | 'LOCKED' | 'REVOKED' | 'WIPED';
-  isDeviceOwner: boolean;
-  lockTaskModeActive: boolean;
-  registeredAt: string;
-  lastContactAt: string;
-  pendingSyncCount: number;
-}
-
-export interface AndroidEnterpriseProvisioningPayload {
-  version: string;
-  packageName: string;
-  checksumSha256: string;
-  enrollmentToken: string;
-  kioskMode: KioskOperatingMode;
-  stationProfile: StationProfileType;
-  tenantId: string;
-  apiBaseUrl: string;
-  adminPinHash: string;
-  lockTaskPackages: string[];
 }
 
 export interface ResponseEnvelope<T = any> {

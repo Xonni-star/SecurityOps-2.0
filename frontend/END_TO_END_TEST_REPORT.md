@@ -1,22 +1,16 @@
-# SecurityOps 2.0 - Phase 13: End-to-End Abnahmebericht (Szenarien 1–10)
+# SecurityOps 2.0 - Phase 13: End-to-End Testbericht (Szenarien 1–10)
 
-## 1. Zusammenfassung der Abnahmeergebnisse
-Alle 10 geforderten realen Geschäftsprozesse wurden über das integrierte Abnahme-Cockpit (`components/E2EAcceptanceCenter.tsx`) und die zugehörige Pytest-Suite (`tests/test_e2e_integration.py`) geprüft.
+## 1. Abnahmeergebnisse der realen Arbeitsabläufe
 
-| Test-ID | Geschäftsszenario | Geprüfte Verknüpfung | Status | Reale Assertion & Messwert |
+| Test | Szenario | Ausführung | Status | Verifikationsergebnis |
 |---|---|---|---|---|
-| **E2E-01** | Neuer Kunde & Schutzobjekt | Kunde ➔ Vertrag ➔ Objekt | **BESTANDEN** | Mandantenkunde mit SLA "Gold (24/7)" angelegt; Objekt `OBJ-E2E` über Composite FK `(customer_id, tenant_id)` gebunden. |
-| **E2E-02** | Mitarbeiter-Anlage & § 34a BWR | Personal ➔ Qualifikation ➔ BWR | **BESTANDEN** | Nachweisprüfung verifiziert: IHK-Sachkundenachweis und Ersthelfer im Bewacherregister-Profil erfasst. |
-| **E2E-03** | Dienstplanung & ArbZG-Konflikt | Roster ➔ Personal ➔ ArbZG | **BESTANDEN** | Schichtzuweisung erfolgreich; bei krankgemeldetem Personal blockiert das System die Zuweisung mit Status `Konflikt`. |
-| **E2E-04** | Wachbuch & Append-Only Revision | Wachbuch ➔ Revision ➔ Audit | **BESTANDEN** | Nachträgliche Korrektur erzeugt Revision v2; der ursprüngliche Eintrag bleibt unverändert erhalten (DIN 77200 konform). |
-| **E2E-05** | Vorfall ➔ Automatische Aufgabe | Vorfall ➔ Watchdog ➔ Task | **BESTANDEN** | Kritisches BMA-Ereignis generiert automatisch eine terminierte Vorfallsaufgabe für den Objektleiter mit Idempotenz-Schutz. |
-| **E2E-06** | QM-Anweisung & Lesebestätigung | SOP ➔ Personal ➔ DIN 77200 | **BESTANDEN** | Dienstanweisung versioniert; digitale Kenntnisnahme signiert; unbestätigte Mitarbeiter in Leitstelle gelistet. |
-| **E2E-07** | Schlüsselverzug & Rücknahme | Schlüssel ➔ Frist ➔ Aufgabe | **BESTANDEN** | Generalschlüssel SCHL-LOG-09 als überfällig erkannt; Warnung und Rückforderungsaufgabe erzeugt; Rücknahme quittiert. |
-| **E2E-08** | Offline-Betrieb & Outbox Sync | PWA ➔ IndexedDB ➔ Sync | **BESTANDEN** | Offline-Wachbucheintrag in `outbox` gespeichert; Reconnect synchronisiert idempotent über `client_mutation_id`. |
-| **E2E-09** | Mandantentrennung & PostgreSQL RLS | RLS ➔ IDOR ➔ DB-Filter | **BESTANDEN** | Mandant Frankfurt und Mandant Bavaria vollständig isoliert; 0 Leaks bei direkten Abfragen oder manipulierter Mandanten-ID. |
-| **E2E-10** | Verschlüsseltes Backup & Restore | pg_dump ➔ AES-256 ➔ Restore | **BESTANDEN** | Tägliches Backup-Archiv mit AES-256 verschlüsselt; Wiederherstellungsskript `restore.sh` ohne RLS-Verlust validiert. |
-
----
-
-## 2. Abnahme-Bestätigung
-Die End-to-End-Testsuite ergab eine Erfolgsquote von **10/10 (100% Bestanden)**.
+| **Test 1** | Neuer Kunde & Schutzobjekt | E2E-Runner / Pytest | **BESTANDEN** | Kunde angelegt, Objekt mit KRITIS-Level gebunden, Composite FK integer |
+| **Test 2** | Neuer Mitarbeiter & § 34a | E2E-Runner / Pytest | **BESTANDEN** | BWR-Gültigkeitsprüfung aktiv, IHK-Zertifikat hinterlegt |
+| **Test 3** | Dienstplanung & Konflikte | E2E-Runner / Pytest | **BESTANDEN** | Schichtzuweisung geprüft, Krankheit erzeugt Einsatzblockade |
+| **Test 4** | Wachbuch & Append-Only | E2E-Runner / Pytest | **BESTANDEN** | Nachträgliche Korrektur erzeugt Revision v2; Original unverändert |
+| **Test 5** | Vorfall ➔ Automatische Aufgabe | E2E-Runner / Pytest | **BESTANDEN** | Kritischer Alarm erzeugt Fristaufgabe für Objektleiter mit Idempotenz |
+| **Test 6** | QM-Anweisung & Lesebestätigung | E2E-Runner / Pytest | **BESTANDEN** | Digitale Lesequittung erfasst, unbestätigte Mitarbeiter gelistet |
+| **Test 7** | Schlüsselverzug & Rückgabe | E2E-Runner / Pytest | **BESTANDEN** | Überfälliger Generalschlüssel erkannt, Warnung im Dashboard erzeugt |
+| **Test 8** | Offline-Betrieb & Outbox Sync | E2E-Runner / Pytest | **BESTANDEN** | Lokale Erfassung in IndexedDB, idempotenter Push nach Reconnect |
+| **Test 9** | Mandantentrennung & RLS | E2E-Runner / Pytest | **BESTANDEN** | Null Leaks zwischen Mandant Frankfurt und Mandant Bavaria |
+| **Test 10**| Backup & Disaster Recovery | E2E-Runner / Pytest | **BESTANDEN** | Verschlüsselter AES-256 Dump erzeugt, Test-Wiederherstellung intakt |

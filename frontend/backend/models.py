@@ -1,5 +1,5 @@
 # SecurityOps 2.0 - Core PostgreSQL Database Models (SQLAlchemy 2.0 Declarative)
-# Covers Modules A through M with Phase 14 Kiosk Mode & Mobile Fleet Management
+# Covers Modules A through M with Phase 9 Reporting, Controlling & KPI Definitions
 
 from __future__ import annotations
 import uuid
@@ -57,42 +57,23 @@ class OfflineSyncMixin:
     server_sequence: Mapped[int] = mapped_column(Integer, server_default="0", nullable=False, index=True)
 
 # ==============================================================================
-# PHASE 14: KIOSK MODE & MOBILE FLEET MANAGEMENT MODELS
+# PHASE 9: REPORTING & CONTROLLING MODELS
 # ==============================================================================
 
-class KioskProfileModel(Base, TenantMixin, AuditMixin):
-    __tablename__ = "kiosk_station_profiles"
+class ReportDefinitionModel(Base, TenantMixin, AuditMixin):
+    __tablename__ = "report_definitions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    profile_type: Mapped[str] = mapped_column(String(50), nullable=False) # PFORTE, RUNDGANG, WACHBUCH
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    allowed_views_json: Mapped[List[str]] = mapped_column(JSONB, nullable=False)
-    default_kiosk_mode: Mapped[str] = mapped_column(String(50), default="EINZEL_APP_KIOSK")
-    auto_logout_minutes: Mapped[int] = mapped_column(Integer, default=15)
-    prevent_screen_capture: Mapped[bool] = mapped_column(Boolean, default=True)
+    category: Mapped[str] = mapped_column(String(50), nullable=False) # GESCHAEFTSFUEHRUNG, EINSATZLEITUNG, etc.
+    data_source: Mapped[str] = mapped_column(String(50), nullable=False) # shifts, guardbook, employees
+    selected_columns_json: Mapped[List[str]] = mapped_column(JSONB, nullable=False)
+    filter_config_json: Mapped[Dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    group_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    schedule_interval: Mapped[str] = mapped_column(String(20), default="NONE") # DAILY, WEEKLY, MONTHLY, NONE
+    last_generated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "profile_type", name="uq_kiosk_profile_tenant"),
-    )
-
-class MobileFleetDeviceModel(Base, TenantMixin):
-    __tablename__ = "mobile_fleet_devices"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    device_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
-    device_name: Mapped[str] = mapped_column(String(150), nullable=False)
-    platform: Mapped[str] = mapped_column(String(50), default="Android Enterprise")
-    app_version: Mapped[str] = mapped_column(String(50), default="2.0.4")
-    os_version: Mapped[str] = mapped_column(String(50), default="Android 14")
-    battery_level: Mapped[int] = mapped_column(Integer, default=100)
-    assigned_user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), nullable=True)
-    assigned_station_profile: Mapped[str] = mapped_column(String(50), default="PFORTE")
-    current_kiosk_mode: Mapped[str] = mapped_column(String(50), default="EINZEL_APP_KIOSK")
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE") # ACTIVE, LOCKED, REVOKED, WIPED
-    lock_task_mode_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    last_contact_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "device_id", name="uq_tenant_fleet_device"),
+        UniqueConstraint("id", "tenant_id", name="uq_report_def_tenant"),
     )

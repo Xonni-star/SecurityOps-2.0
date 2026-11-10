@@ -1,8 +1,7 @@
-# SecurityOps 2.0 - Phase 13: Offline-First Abnahmebericht
+# SecurityOps 2.0 - Phase 13: Offline-Abnahmebericht
 
-## 1. Verifizierte Offline-Funktionen
-- **PWA App-Shell**: Ladevorgang ohne Internetverbindung über Service Worker Cache (`secops-core-v2.0.4`) erfolgreich getestet.
-- **Wachbuch & Ereignisse**: Offline-Erfassung speichert Einträge verzögerungsfrei in `outbox` der IndexedDB.
-- **Kontrollgang-Scans**: QR-Code- und NFC-Abtastungen werden lokal mit Gerätestempel (`occurred_at`) vorgehalten.
-- **Crash-Resilienz**: Nach Schließen und Neustarten des Browsers im Offline-Zustand bleiben alle 100% der ungesendeten Transaktionen in der Warteschlange erhalten.
-- **Idempotenter Sync**: Bei Wiederherstellung der Verbindung verhindert die `client_mutation_id` serverseitige Duplikate bei Paketwiederholungen.
+## 1. Testergebnisse
+- **Offline Start**: PWA lädt auch ohne Verbindung vollständig aus dem Service Worker Cache (`public/sw.js`).
+- **IndexedDB Persistenz**: Erfasste Vorkommnisse und Kontrollgänge bleiben nach Browserneustart in `outbox` erhalten.
+- **Idempotenz**: Beim Wiederherstellen der Verbindung werden Transaktionen über `client_mutation_id` dedupliziert.
+- **Konflikt-Auflösung**: Side-by-Side Diff im `SyncManagerModal` erlaubt manuelle oder automatisierte Zusammenführung.

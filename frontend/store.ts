@@ -27,11 +27,7 @@ import {
   ControllingKPIs,
   ShiftSwapRequest,
   PatrolScanEvent,
-  ShiftHandoverProtocol,
-  KioskOperatingMode,
-  StationProfileType,
-  StationProfile,
-  MobileDeviceEntity
+  ShiftHandoverProtocol
 } from './types';
 import {
   initialTenants,
@@ -59,115 +55,6 @@ import { apiClient } from './services/apiClient';
 import { offlineStorage } from './services/indexedDbService';
 
 export type ThemeMode = 'dark' | 'light';
-
-export const initialStationProfiles: StationProfile[] = [
-  {
-    id: 'sp-pforte',
-    type: StationProfileType.PFORTE,
-    name: 'Pforte & Empfangs-Terminal',
-    description: 'Fokussiert auf Wachbucheintragungen, Besucherausweise und Schlüsselausgabe.',
-    allowedViews: ['duty', 'guardbook', 'handover', 'sop'],
-    defaultKioskMode: KioskOperatingMode.SINGLE_APP,
-    autoLogoutMinutes: 15,
-    requireBiometricOnAction: false,
-    preventScreenCapture: true
-  },
-  {
-    id: 'sp-rundgang',
-    type: StationProfileType.RUNDGANG,
-    name: 'Rundgangskontrolle (Mobil)',
-    description: 'Für Bestreifungs-Smartphones mit QR-Code/NFC-Scanner, Vorfallsmeldungen und Aufgaben.',
-    allowedViews: ['duty', 'patrol', 'guardbook', 'tasks'],
-    defaultKioskMode: KioskOperatingMode.SINGLE_APP,
-    autoLogoutMinutes: 0,
-    requireBiometricOnAction: true,
-    preventScreenCapture: true
-  },
-  {
-    id: 'sp-wachbuch',
-    type: StationProfileType.WACHBUCH_TERMINAL,
-    name: 'Wachbuch-Terminal (Stationär)',
-    description: 'Stationäres Wand-Tablet im Foyer für Schichtwechsel und Protokollerfassung.',
-    allowedViews: ['guardbook', 'handover', 'sop'],
-    defaultKioskMode: KioskOperatingMode.SINGLE_APP,
-    autoLogoutMinutes: 10,
-    requireBiometricOnAction: false,
-    preventScreenCapture: true
-  },
-  {
-    id: 'sp-byod',
-    type: StationProfileType.OBJEKTSCHUTZ,
-    name: 'Dienst-Smartphone (Standard)',
-    description: 'Volle Mitarbeiter-App ohne Kiosk-Sperre für persönliche Dienstgeräte.',
-    allowedViews: ['home', 'duty', 'guardbook', 'patrol', 'handover', 'sop', 'tasks'],
-    defaultKioskMode: KioskOperatingMode.STANDARD,
-    autoLogoutMinutes: 0,
-    requireBiometricOnAction: false,
-    preventScreenCapture: false
-  }
-];
-
-export const initialMobileDevices: MobileDeviceEntity[] = [
-  {
-    id: 'dev-001',
-    tenantId: 'tenant-frankfurt',
-    deviceId: 'android-ent-ffm-pforte1',
-    deviceName: 'Samsung Galaxy Tab Active4 Pro (Pforte Nord)',
-    platform: 'Android Enterprise',
-    appVersion: '2.0.4-rc1 (Capacitor 6)',
-    osVersion: 'Android 14 (Knox 3.10)',
-    batteryLevel: 94,
-    assignedUserName: 'Wachposten Pforte 1',
-    assignedStationProfile: StationProfileType.PFORTE,
-    currentKioskMode: KioskOperatingMode.SINGLE_APP,
-    status: 'ACTIVE',
-    isDeviceOwner: true,
-    lockTaskModeActive: true,
-    registeredAt: '2025-01-10',
-    lastContactAt: 'Vor 1 Minute',
-    pendingSyncCount: 0
-  },
-  {
-    id: 'dev-002',
-    tenantId: 'tenant-frankfurt',
-    deviceId: 'ios-supervised-ffm-revier2',
-    deviceName: 'Apple iPhone 14 Enterprise (Revierdienst Ost)',
-    platform: 'Apple iOS (Supervised)',
-    appVersion: '2.0.4-rc1 (Capacitor 6)',
-    osVersion: 'iOS 17.5.1 (MDM ASAM)',
-    batteryLevel: 78,
-    assignedUserId: 'e-3',
-    assignedUserName: 'Sabine Becker',
-    assignedStationProfile: StationProfileType.RUNDGANG,
-    currentKioskMode: KioskOperatingMode.SINGLE_APP,
-    status: 'ACTIVE',
-    isDeviceOwner: true,
-    lockTaskModeActive: true,
-    registeredAt: '2025-02-14',
-    lastContactAt: 'Vor 3 Minuten',
-    pendingSyncCount: 1
-  },
-  {
-    id: 'dev-003',
-    tenantId: 'tenant-frankfurt',
-    deviceId: 'android-ent-ffm-byod-99',
-    deviceName: 'Google Pixel 8 Pro (Objektleiter Mobil)',
-    platform: 'Android Enterprise',
-    appVersion: '2.0.4-rc1',
-    osVersion: 'Android 14',
-    batteryLevel: 62,
-    assignedUserId: 'e-2',
-    assignedUserName: 'Tarkan Kaya',
-    assignedStationProfile: StationProfileType.EINSATZLEITUNG,
-    currentKioskMode: KioskOperatingMode.STANDARD,
-    status: 'ACTIVE',
-    isDeviceOwner: false,
-    lockTaskModeActive: false,
-    registeredAt: '2025-03-01',
-    lastContactAt: 'Vor 18 Minuten',
-    pendingSyncCount: 0
-  }
-];
 
 export const initialReportDefinitions: ReportDefinition[] = [
   {
@@ -217,30 +104,51 @@ export const initialPatrolScans: PatrolScanEvent[] = [
     method: 'NFC_TAG',
     verifiedTag: 'RFID-9901-A',
     offlineCaptured: false
+  },
+  {
+    id: 'scan-2',
+    tenantId: 'tenant-frankfurt',
+    siteId: 's-1',
+    siteName: 'Finanzturm Alpha (Hauptverwaltung)',
+    checkpointId: 'cp-2',
+    checkpointCode: 'CP-02',
+    checkpointName: 'Rechenzentrum Ebene -2',
+    guardId: 'e-3',
+    guardName: 'Sabine Becker',
+    scannedAt: '2025-05-15 06:45',
+    method: 'QR_CODE',
+    verifiedTag: 'RFID-9902-B',
+    offlineCaptured: false
   }
 ];
 
 interface SecurityOpsStore {
+  // Theme (Dark / Light) with WCAG AA compliance
   theme: ThemeMode;
   toggleTheme: () => void;
 
+  // Multi-Tenancy State
   tenants: Tenant[];
   currentTenantId: string;
   setCurrentTenantId: (tenantId: string) => void;
   getCurrentTenant: () => Tenant;
 
+  // Current user & role context
   currentUserRole: UserRole;
   currentUserName: string;
   currentUserId: string;
   setCurrentUserRole: (role: UserRole) => void;
 
+  // Active view
   activeTab: string;
   setActiveTab: (tab: string) => void;
 
+  // Global Search across all entities
   globalSearch: string;
   setGlobalSearch: (q: string) => void;
   performGlobalSearch: (q: string) => GlobalSearchResult[];
 
+  // Offline First State & Sync Queue
   isOnline: boolean;
   toggleNetworkSimulation: () => void;
   syncQueue: OfflineQueueItem[];
@@ -249,16 +157,19 @@ interface SecurityOpsStore {
   resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => void;
   clearCompletedSyncs: () => void;
 
+  // Modular System / Plugin Framework
   modules: SecurityModuleManifest[];
   toggleModule: (moduleId: string) => void;
   isModuleActive: (moduleId: string) => boolean;
 
+  // Security Audit & Sessions
   auditLogs: SecurityAuditEntry[];
   activeSessions: UserSessionDevice[];
   gdprPolicies: GdprRetentionPolicy[];
   revokeSession: (sessionId: string) => void;
   addAuditLog: (entry: Omit<SecurityAuditEntry, 'id' | 'timestamp' | 'tenantId'>) => void;
 
+  // Notifications
   notifications: { id: string; title: string; message: string; type: 'info' | 'warning' | 'alert'; time: string }[];
   notificationDeliveries: NotificationDelivery[];
   notificationPreferences: NotificationPreference;
@@ -267,6 +178,7 @@ interface SecurityOpsStore {
   markNotificationAsRead: (deliveryId: string) => void;
   updateNotificationPreferences: (prefs: Partial<NotificationPreference>) => void;
 
+  // Automation Engine Rules, Templates & Logs
   automations: AutomationRule[];
   automationTemplates: AutomationRule[];
   executionLogs: AutomationExecutionLog[];
@@ -278,11 +190,13 @@ interface SecurityOpsStore {
   testRunRule: (id: string) => { matched: boolean; actions: string[]; durationMs: number };
   runAutomationsNow: () => number;
 
+  // Reporting & Controlling Engine
   reportDefinitions: ReportDefinition[];
   addReportDefinition: (rep: Omit<ReportDefinition, 'id' | 'createdAt'>) => void;
   deleteReportDefinition: (id: string) => void;
   calculateTenantKPIs: () => ControllingKPIs;
 
+  // Phase 11: Mobile Application State
   shiftSwaps: ShiftSwapRequest[];
   patrolScans: PatrolScanEvent[];
   shiftHandovers: ShiftHandoverProtocol[];
@@ -291,20 +205,7 @@ interface SecurityOpsStore {
   addPatrolScan: (scan: Omit<PatrolScanEvent, 'id' | 'tenantId' | 'scannedAt' | 'offlineCaptured'>) => void;
   submitShiftHandover: (handover: Omit<ShiftHandoverProtocol, 'id' | 'tenantId' | 'handoverTime' | 'offlineCaptured'>) => void;
 
-  // Phase 14: Mobile Fleet & Kiosk Mode Engine
-  mobileDevices: MobileDeviceEntity[];
-  stationProfiles: StationProfile[];
-  activeStationProfile: StationProfile;
-  currentKioskMode: KioskOperatingMode;
-  isKioskLocked: boolean;
-  biometricAuthActive: boolean;
-  setKioskMode: (mode: KioskOperatingMode, pin?: string) => boolean;
-  setActiveStationProfile: (profileType: StationProfileType) => void;
-  lockDeviceRemotely: (deviceId: string) => void;
-  wipeDeviceRemotely: (deviceId: string) => void;
-  registerMobileDevice: (device: Omit<MobileDeviceEntity, 'id' | 'tenantId' | 'registeredAt' | 'lastContactAt' | 'pendingSyncCount'>) => void;
-  authenticateWithBiometrics: () => Promise<boolean>;
-
+  // Tenant-Partitioned Data Sets
   clients: Client[];
   sites: Site[];
   employees: Employee[];
@@ -316,6 +217,7 @@ interface SecurityOpsStore {
   tasks: TaskItem[];
   documents: ManagedDocument[];
 
+  // Tenant-Scoped Filtered Getters
   getTenantClients: () => Client[];
   getTenantSites: () => Site[];
   getTenantEmployees: () => Employee[];
@@ -333,8 +235,8 @@ interface SecurityOpsStore {
   getTenantReportDefinitions: () => ReportDefinition[];
   getTenantShiftSwaps: () => ShiftSwapRequest[];
   getTenantPatrolScans: () => PatrolScanEvent[];
-  getTenantMobileDevices: () => MobileDeviceEntity[];
 
+  // CRUD Actions
   addClient: (client: Omit<Client, 'id' | 'tenantId'>) => void;
   addSite: (site: Omit<Site, 'id' | 'tenantId'>) => void;
   addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => void;
@@ -469,12 +371,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     getTenantDocuments().forEach((d) => {
       if (d.title.toLowerCase().includes(q) || d.fileName.toLowerCase().includes(q)) {
         results.push({ id: d.id, title: d.title, subtitle: `${d.category} • v${d.version}`, category: 'Dokument', targetTab: 'documents' });
-      }
-    });
-
-    getTenantAutomations().forEach((a) => {
-      if (a.name.toLowerCase().includes(q) || a.description.toLowerCase().includes(q)) {
-        results.push({ id: a.id, title: a.name, subtitle: `Regel • ${a.trigger} (${a.category})`, category: 'Aufgabe', targetTab: 'automations' });
       }
     });
 
@@ -834,6 +730,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     };
   },
 
+  // Phase 11: Mobile Application State
   shiftSwaps: initialShiftSwaps,
   patrolScans: initialPatrolScans,
   shiftHandovers: [],
@@ -867,7 +764,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   approveShiftSwap: (swapId, approved) => {
-    const { currentUserName, addNotification } = get();
+    const { currentUserName, addAuditLog, addNotification } = get();
     set((state) => ({
       shiftSwaps: state.shiftSwaps.map((s) =>
         s.id === swapId
@@ -960,157 +857,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
-  // ==============================================================================
-  // PHASE 14: KIOSK-MODUS & MOBILE FLOTTENSTEUERUNG
-  // ==============================================================================
-
-  mobileDevices: initialMobileDevices,
-  stationProfiles: initialStationProfiles,
-  activeStationProfile: initialStationProfiles[3], // Default: BYOD / Standard
-  currentKioskMode: KioskOperatingMode.STANDARD,
-  isKioskLocked: false,
-  biometricAuthActive: false,
-
-  setKioskMode: (mode, pin) => {
-    const { addAuditLog, addNotification, activeStationProfile } = get();
-
-    if (mode === KioskOperatingMode.SINGLE_APP || mode === KioskOperatingMode.MULTI_APP) {
-      set({ currentKioskMode: mode, isKioskLocked: true });
-      addAuditLog({
-        actorEmail: 'admin-kiosk@secops.local',
-        actorRole: 'Systemadministrator',
-        actionType: 'KIOSK_LOCKED',
-        severity: 'ALARM',
-        targetEntity: `Device Kiosk Lock`,
-        details: `Kiosk-Modus (${mode}) aktiviert. Profil: ${activeStationProfile.name}. LockTaskMode aktiv.`,
-        ipAddress: '127.0.0.1'
-      });
-      addNotification(
-        'Kiosk-Modus aktiviert',
-        `Gerät befindet sich jetzt im gesicherten ${mode}. Verlassen nur mit Administrator-PIN.`,
-        'warning'
-      );
-      return true;
-    } else {
-      // Unlocking requires admin PIN
-      if (pin === '7720' || pin === 'admin') {
-        set({ currentKioskMode: KioskOperatingMode.STANDARD, isKioskLocked: false });
-        addAuditLog({
-          actorEmail: 'admin-kiosk@secops.local',
-          actorRole: 'Systemadministrator',
-          actionType: 'KIOSK_UNLOCKED',
-          severity: 'WARNUNG',
-          targetEntity: `Device Kiosk Unlock`,
-          details: `Kiosk-Modus mit Master-PIN autorisiert beendet.`,
-          ipAddress: '127.0.0.1'
-        });
-        addNotification(
-          'Kiosk-Modus beendet',
-          'Gerät wurde erfolgreich freigegeben.',
-          'info'
-        );
-        return true;
-      }
-      return false;
-    }
-  },
-
-  setActiveStationProfile: (profileType) => {
-    const profile = get().stationProfiles.find((sp) => sp.type === profileType) || get().stationProfiles[0];
-    set({
-      activeStationProfile: profile,
-      currentKioskMode: profile.defaultKioskMode,
-      isKioskLocked: profile.defaultKioskMode === KioskOperatingMode.SINGLE_APP
-    });
-  },
-
-  lockDeviceRemotely: (deviceId) => {
-    const { addAuditLog, addNotification } = get();
-    set((state) => ({
-      mobileDevices: state.mobileDevices.map((d) =>
-        d.deviceId === deviceId
-          ? { ...d, status: 'LOCKED', lockTaskModeActive: true, currentKioskMode: KioskOperatingMode.SINGLE_APP }
-          : d
-      )
-    }));
-
-    addAuditLog({
-      actorEmail: 'admin@secops.local',
-      actorRole: 'Systemadministrator',
-      actionType: 'KIOSK_LOCKED',
-      severity: 'ALARM',
-      targetEntity: `Device ${deviceId}`,
-      details: `Gerät ${deviceId} wurde aus der Ferne gesperrt (Android Enterprise LockTask / iOS Single App).`,
-      ipAddress: '194.25.101.44'
-    });
-
-    addNotification(
-      'Gerät aus der Ferne gesperrt',
-      `Sperrbefehl an ${deviceId} erfolgreich übermittelt.`,
-      'warning'
-    );
-  },
-
-  wipeDeviceRemotely: (deviceId) => {
-    const { addAuditLog, addNotification } = get();
-    set((state) => ({
-      mobileDevices: state.mobileDevices.map((d) =>
-        d.deviceId === deviceId
-          ? { ...d, status: 'WIPED', currentKioskMode: KioskOperatingMode.SINGLE_APP }
-          : d
-      )
-    }));
-
-    addAuditLog({
-      actorEmail: 'admin@secops.local',
-      actorRole: 'Systemadministrator',
-      actionType: 'DEVICE_REVOKE',
-      severity: 'KRITISCH',
-      targetEntity: `Device ${deviceId}`,
-      details: `Fernlöschung (Enterprise Wipe) für Gerät ${deviceId} ausgeführt. Lokale Token & IndexedDB bereinigt.`,
-      ipAddress: '194.25.101.44'
-    });
-
-    addNotification(
-      'Enterprise Wipe durchgeführt',
-      `Alle Daten auf ${deviceId} wurden unumkehrbar gelöscht.`,
-      'alert'
-    );
-  },
-
-  registerMobileDevice: (devData) => {
-    const newDev: MobileDeviceEntity = {
-      ...devData,
-      id: `dev-${Date.now()}`,
-      tenantId: get().currentTenantId,
-      registeredAt: new Date().toISOString().split('T')[0],
-      lastContactAt: 'Gerade eben',
-      pendingSyncCount: 0
-    };
-    set((state) => ({ mobileDevices: [newDev, ...state.mobileDevices] }));
-  },
-
-  authenticateWithBiometrics: async () => {
-    // WebAuthn platform authenticator verification simulation
-    if (window.PublicKeyCredential) {
-      try {
-        set({ biometricAuthActive: true });
-        await new Promise((r) => setTimeout(r, 600));
-        set({ biometricAuthActive: false });
-        get().addNotification(
-          'Biometrie erfolgreich verifiziert',
-          'Identität per Fingerabdruck / FaceID bestätigt.',
-          'info'
-        );
-        return true;
-      } catch {
-        set({ biometricAuthActive: false });
-        return false;
-      }
-    }
-    return true;
-  },
-
+  // Datasets
   clients: initialClients,
   sites: initialSites,
   employees: initialEmployees,
@@ -1189,10 +936,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   getTenantPatrolScans: () => {
     const { patrolScans, currentTenantId } = get();
     return patrolScans.filter((p) => p.tenantId === currentTenantId);
-  },
-  getTenantMobileDevices: () => {
-    const { mobileDevices, currentTenantId } = get();
-    return mobileDevices.filter((d) => d.tenantId === currentTenantId);
   },
 
   addClient: (c) => {

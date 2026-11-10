@@ -1,24 +1,13 @@
 # SecurityOps 2.0 - Administrator- & Betriebshandbuch
 
-## 1. Installation und Inbetriebnahme
-Die Installation erfolgt reproduzierbar über das CLI-Installationsskript:
-```bash
-chmod +x deploy/install.sh
-./deploy/install.sh
-```
-Das Skript validiert Systemanforderungen, erzeugt kryptografische Geheimnisse in `.env`, startet die isolierte Docker-Topologie und wendet die Alembic-Migrationen an.
+## 1. Berechtigungen & Rollen (RBAC)
+- Wechseln Sie im oberen Menü oder im **Sicherheits-Audit** Bereich die aktive Rolle.
+- Administratoren haben Zugriff auf das **E2E-Abnahme Center**, die **Docker & DB Blueprints** sowie das **Audit-Log**.
 
-## 2. Backup & Disaster Recovery
-- **Tägliches Backup**: Erfolgt vollautomatisch verschlüsselt um 02:00 UTC nach `/var/backups`.
-- **Manuelles Backup**:
-  ```bash
-  docker compose -f deploy/docker-compose.production.yml exec db pg_dump -U secops_admin securityops_v2 -F c -f /var/backups/manual.dump
-  ```
-- **Wiederherstellung (Disaster Recovery)**:
-  ```bash
-  ./deploy/restore.sh /var/backups/secops_backup_20250515_020000.tar.gz.enc
-  ```
+## 2. Automatisierungsregeln & Watchdog
+- Im **Automatisierungs-Center** konfigurieren Sie deklarative Regeln für Zertifikatsabläufe, Kündigungsfristen und Schlüsselverzug.
+- Der Scheduler führt regelmäßige Prüfungen durch und erzeugt Aufgaben sowie In-App Meldungen.
 
-## 3. Sicherheits- und Berechtigungsverwaltung (RBAC)
-- Administratoren verwalten Benutzerrollen im Modul **Sicherheits-Audit & DSGVO**.
-- Kompromittierte Endgeräte können dort mit einem Klick (`Sitzung widerrufen`) gesperrt werden; ihr JWT-Token wird umgehend abgewiesen.
+## 3. Backup und Wiederherstellung
+- Backups laufen täglich um 02:00 UTC vollautomatisch verschlüsselt nach `/var/backups`.
+- Wiederherstellung via CLI: `./deploy/restore.sh /var/backups/secops_backup_YYYYMMDD_HHMMSS.tar.gz.enc`.
