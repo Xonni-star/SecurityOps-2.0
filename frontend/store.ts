@@ -171,6 +171,66 @@ function mapGuardBookRow(row: any, tenantId: string): GuardBookEntry {
   };
 }
 
+
+function mapShiftRow(row: any, tenantId: string): Shift {
+  return {
+    id: asString(row.id),
+    tenantId,
+    siteId: asString(row.site_id ?? row.siteId),
+    siteName: asString(row.site_name ?? row.siteName),
+    employeeId: row.employee_id ?? row.employeeId ?? undefined,
+    employeeName: row.employee_name ?? row.employeeName ?? undefined,
+    date: asString(row.shift_date ?? row.date),
+    startTime: asString(row.start_time ?? row.startTime),
+    endTime: asString(row.end_time ?? row.endTime),
+    type: (row.type ?? 'Tagdienst') as unknown as Shift['type'],
+    status: (row.status ?? 'Offen') as unknown as Shift['status'],
+    requiredQualification: (row.required_qualification ?? row.requiredQualification ?? 'Unterrichtung § 34a GewO') as unknown as Shift['requiredQualification'],
+    conflictReason: row.conflict_reason ?? row.conflictReason ?? undefined,
+    revisionVersion: asNumber(row.revision_version, 1)
+  };
+}
+
+function mapKeyRow(row: any, tenantId: string): KeyItem {
+  const expectedReturn = row.expected_return ?? row.expectedReturn ?? undefined;
+  const status = row.status ?? 'Im Tresor';
+
+  return {
+    id: asString(row.id),
+    tenantId,
+    keyNumber: asString(row.key_number ?? row.keyNumber),
+    label: asString(row.label),
+    siteId: asString(row.site_id ?? row.siteId),
+    siteName: asString(row.site_name ?? row.siteName),
+    type: (row.type ?? 'Master-Schlüssel') as unknown as KeyItem['type'],
+    status: status as unknown as KeyItem['status'],
+    currentHolderName: row.current_holder_name ?? row.currentHolderName ?? undefined,
+    currentHolderId: row.current_holder_id ?? row.currentHolderId ?? undefined,
+    issuedAt: row.issued_at ?? row.issuedAt ?? undefined,
+    expectedReturn,
+    isOverdue:
+      status === 'Ausgegeben' && expectedReturn
+        ? new Date(expectedReturn).getTime() < Date.now()
+        : false,
+    revisionVersion: asNumber(row.revision_version, 1)
+  };
+}
+
+function mapTaskRow(row: any, tenantId: string): TaskItem {
+  return {
+    id: asString(row.id),
+    tenantId,
+    title: asString(row.title),
+    assignedToName: asString(row.assigned_to_name ?? row.assignedToName),
+    siteName: row.site_name ?? row.siteName ?? undefined,
+    dueDate: asString(row.due_date ?? row.dueDate),
+    priority: (row.priority ?? 'Mittel') as unknown as TaskItem['priority'],
+    status: (row.status ?? 'Offen') as unknown as TaskItem['status'],
+    category: (row.category ?? 'Audit') as unknown as TaskItem['category'],
+    revisionVersion: asNumber(row.revision_version, 1)
+  };
+}
+
 interface SecurityOpsStore {
   // Theme
   theme: ThemeMode;
@@ -286,16 +346,16 @@ interface SecurityOpsStore {
   addSite: (site: Omit<Site, 'id' | 'tenantId'>) => Promise<void>;
   addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => Promise<void>;
   updateEmployee: (id: string, updates: Partial<Employee>) => Promise<void>;
-  addShift: (shift: Omit<Shift, 'id' | 'tenantId'>) => void;
-  assignShiftEmployee: (shiftId: string, employeeId: string, employeeName: string) => void;
+  addShift: (shift: Omit<Shift, 'id' | 'tenantId'>) => Promise<void>;
+  assignShiftEmployee: (shiftId: string, employeeId: string, employeeName: string) => Promise<void>;
   addGuardBookEntry: (entry: Omit<GuardBookEntry, 'id' | 'timestamp' | 'tenantId'>) => Promise<void>;
   updateGuardBookStage: (id: string, stage: GuardBookEntry['stage'], note?: string) => void;
   resolveGuardBookEntry: (id: string, note: string) => void;
   acknowledgeSOP: (sopId: string) => void;
-  issueKey: (keyId: string, holderName: string, holderId: string, returnDate: string) => void;
-  returnKey: (keyId: string) => void;
-  addTask: (task: Omit<TaskItem, 'id' | 'tenantId'>) => void;
-  toggleTaskStatus: (taskId: string) => void;
+  issueKey: (keyId: string, holderName: string, holderId: string, returnDate: string) => Promise<void>;
+  returnKey: (keyId: string) => Promise<void>;
+  addTask: (task: Omit<TaskItem, 'id' | 'tenantId'>) => Promise<void>;
+  toggleTaskStatus: (taskId: string) => Promise<void>;
   addDocument: (doc: Omit<ManagedDocument, 'id' | 'tenantId' | 'uploadedAt'>) => void;
   deleteDocument: (docId: string) => void;
   addEmergencyPlan: (plan: Omit<EmergencyPlan, 'id' | 'tenantId'>) => void;
@@ -397,14 +457,28 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       clients: [],
       sites: [],
       employees: [],
-      guardBook: []
+      guardBook: [],
+      shifts: [],
+      keys: [],
+      tasks: []
     });
 
-    const [clientsResult, sitesResult, employeesResult, logbookResult] = await Promise.allSettled([
+    const [
+      clientsResult,
+      sitesResult,
+      employeesResult,
+      logbookResult,
+      shiftsResult,
+      keysResult,
+      tasksResult
+    ] = await Promise.allSettled([
       apiClient.get<any[]>('/customers'),
       apiClient.get<any[]>('/sites'),
       apiClient.get<any[]>('/employees'),
-      apiClient.get<any[]>('/logbook')
+      apiClient.get<any[]>('/logbook'),
+      apiClient.get<any[]>('/shifts'),
+      apiClient.get<any[]>('/keys'),
+      apiClient.get<any[]>('/tasks')
     ]);
 
     const tenantId = get().currentTenantId;
@@ -433,6 +507,24 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       nextState.guardBook = logbookResult.value.map((row) => mapGuardBookRow(row, tenantId));
     } else {
       errors.push(`Wachbuch: ${errorText(logbookResult.reason)}`);
+    }
+
+    if (shiftsResult.status === 'fulfilled') {
+      nextState.shifts = shiftsResult.value.map((row) => mapShiftRow(row, tenantId));
+    } else {
+      errors.push(`Schichten: ${errorText(shiftsResult.reason)}`);
+    }
+
+    if (keysResult.status === 'fulfilled') {
+      nextState.keys = keysResult.value.map((row) => mapKeyRow(row, tenantId));
+    } else {
+      errors.push(`Schlüssel: ${errorText(keysResult.reason)}`);
+    }
+
+    if (tasksResult.status === 'fulfilled') {
+      nextState.tasks = tasksResult.value.map((row) => mapTaskRow(row, tenantId));
+    } else {
+      errors.push(`Aufgaben: ${errorText(tasksResult.reason)}`);
     }
 
     const dataLoadError = errors.length > 0 ? errors.join(' | ') : null;
@@ -1218,13 +1310,50 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
-  addShift: (s) => {
+  addShift: async (s) => {
     const { currentTenantId } = get();
-    const newShift: Shift = { ...s, tenantId: currentTenantId, id: `sh-${Date.now()}` };
-    set((state) => ({ shifts: [newShift, ...state.shifts] }));
+
+    try {
+      const created = await apiClient.post<any>('/shifts', {
+        siteId: s.siteId,
+        employeeId: s.employeeId ?? null,
+        date: s.date,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        type: s.type,
+        status: s.status,
+        requiredQualification: String(s.requiredQualification),
+        conflictReason: s.conflictReason ?? null
+      });
+
+      const newShift = mapShiftRow(
+        {
+          ...created,
+          site_name: s.siteName,
+          employee_name: s.employeeName,
+          shift_date: s.date,
+          start_time: s.startTime,
+          end_time: s.endTime,
+          type: s.type,
+          status: s.status,
+          required_qualification: String(s.requiredQualification),
+          conflict_reason: s.conflictReason
+        },
+        currentTenantId
+      );
+
+      set((state) => ({ shifts: [newShift, ...state.shifts] }));
+      get().addNotification('Schicht gespeichert', 'Die Schicht wurde in PostgreSQL gespeichert.', 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Schicht nicht gespeichert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
+        'alert'
+      );
+    }
   },
 
-  assignShiftEmployee: (shiftId, employeeId, employeeName) => {
+  assignShiftEmployee: async (shiftId, employeeId, employeeName) => {
     const { employees } = get();
     const emp = employees.find((e) => e.id === employeeId);
 
@@ -1236,19 +1365,34 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       conflictReason = `Mitarbeiter hat Status ${emp.status}! Nicht disponierbar.`;
     }
 
-    set((state) => ({
-      shifts: state.shifts.map((sh) =>
-        sh.id === shiftId
-          ? {
-              ...sh,
-              employeeId,
-              employeeName,
-              status,
-              conflictReason
-            }
-          : sh
-      )
-    }));
+    try {
+      await apiClient.patch(`/shifts/${shiftId}`, {
+        employeeId,
+        status,
+        conflictReason: conflictReason ?? null
+      });
+
+      set((state) => ({
+        shifts: state.shifts.map((sh) =>
+          sh.id === shiftId
+            ? {
+                ...sh,
+                employeeId,
+                employeeName,
+                status,
+                conflictReason
+              }
+            : sh
+        )
+      }));
+      get().addNotification('Schichtzuweisung gespeichert', 'Die Zuweisung wurde in PostgreSQL gespeichert.', 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Schichtzuweisung nicht gespeichert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen.',
+        'alert'
+      );
+    }
   },
 
   addGuardBookEntry: async (entry) => {
@@ -1359,60 +1503,135 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       )
     })),
 
-  issueKey: (keyId, holderName, holderId, returnDate) =>
-    set((state) => ({
-      keys: state.keys.map((k) =>
-        k.id === keyId
-          ? {
-              ...k,
-              status: 'Ausgegeben',
-              currentHolderName: holderName,
-              currentHolderId: holderId,
-              issuedAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
-              expectedReturn: returnDate,
-              isOverdue: false
-            }
-          : k
-      )
-    })),
+  issueKey: async (keyId, holderName, holderId, returnDate) => {
+    const issuedAt = new Date().toISOString().replace('T', ' ').substring(0, 16);
 
-  returnKey: (keyId) =>
-    set((state) => ({
-      keys: state.keys.map((k) =>
-        k.id === keyId
-          ? {
-              ...k,
-              status: 'Im Tresor',
-              currentHolderName: undefined,
-              currentHolderId: undefined,
-              issuedAt: undefined,
-              expectedReturn: undefined,
-              isOverdue: false
-            }
-          : k
-      )
-    })),
+    try {
+      await apiClient.patch(`/keys/${keyId}`, {
+        status: 'Ausgegeben',
+        currentHolderId: holderId,
+        issuedAt,
+        expectedReturn: returnDate
+      });
 
-  addTask: (t) => {
-    const { currentTenantId } = get();
-    const newTask: TaskItem = {
-      ...t,
-      id: `t-${Date.now()}`,
-      tenantId: currentTenantId
-    };
-    set((state) => ({
-      tasks: [newTask, ...state.tasks]
-    }));
+      set((state) => ({
+        keys: state.keys.map((k) =>
+          k.id === keyId
+            ? {
+                ...k,
+                status: 'Ausgegeben',
+                currentHolderName: holderName,
+                currentHolderId: holderId,
+                issuedAt,
+                expectedReturn: returnDate,
+                isOverdue: false
+              }
+            : k
+        )
+      }));
+      get().addNotification('Schlüssel ausgegeben', 'Die Ausgabe wurde in PostgreSQL gespeichert.', 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Schlüssel nicht ausgegeben',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen.',
+        'alert'
+      );
+    }
   },
 
-  toggleTaskStatus: (taskId) =>
-    set((state) => ({
-      tasks: state.tasks.map((t) =>
-        t.id === taskId
-          ? { ...t, status: t.status === 'Erledigt' ? 'In Bearbeitung' : 'Erledigt' }
-          : t
-      )
-    })),
+  returnKey: async (keyId) => {
+    try {
+      await apiClient.patch(`/keys/${keyId}`, {
+        status: 'Im Tresor',
+        currentHolderId: null,
+        issuedAt: null,
+        expectedReturn: null
+      });
+
+      set((state) => ({
+        keys: state.keys.map((k) =>
+          k.id === keyId
+            ? {
+                ...k,
+                status: 'Im Tresor',
+                currentHolderName: undefined,
+                currentHolderId: undefined,
+                issuedAt: undefined,
+                expectedReturn: undefined,
+                isOverdue: false
+              }
+            : k
+        )
+      }));
+      get().addNotification('Schlüssel zurückgenommen', 'Die Rückgabe wurde in PostgreSQL gespeichert.', 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Schlüssel nicht zurückgenommen',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen.',
+        'alert'
+      );
+    }
+  },
+
+  addTask: async (t) => {
+    const { currentTenantId } = get();
+
+    try {
+      const created = await apiClient.post<any>('/tasks', {
+        title: t.title,
+        assignedToName: t.assignedToName,
+        siteName: t.siteName ?? null,
+        dueDate: t.dueDate,
+        priority: t.priority,
+        status: t.status,
+        category: t.category
+      });
+
+      const newTask = mapTaskRow(
+        {
+          ...created,
+          title: t.title,
+          assigned_to_name: t.assignedToName,
+          site_name: t.siteName,
+          due_date: t.dueDate,
+          priority: t.priority,
+          status: t.status,
+          category: t.category
+        },
+        currentTenantId
+      );
+
+      set((state) => ({ tasks: [newTask, ...state.tasks] }));
+      get().addNotification('Aufgabe gespeichert', 'Die Aufgabe wurde in PostgreSQL gespeichert.', 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Aufgabe nicht gespeichert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
+        'alert'
+      );
+    }
+  },
+
+  toggleTaskStatus: async (taskId) => {
+    const task = get().tasks.find((item) => item.id === taskId);
+    if (!task) return;
+
+    const status: TaskItem['status'] = task.status === 'Erledigt' ? 'In Bearbeitung' : 'Erledigt';
+
+    try {
+      await apiClient.patch(`/tasks/${taskId}`, { status });
+      set((state) => ({
+        tasks: state.tasks.map((item) => (item.id === taskId ? { ...item, status } : item))
+      }));
+      get().addNotification('Aufgabe aktualisiert', 'Der Status wurde in PostgreSQL gespeichert.', 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Aufgabe nicht aktualisiert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen.',
+        'alert'
+      );
+    }
+  },
 
   addDocument: (doc) => {
     const { currentTenantId } = get();

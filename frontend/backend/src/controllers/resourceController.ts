@@ -246,3 +246,415 @@ export async function updateEmployee(req: Request, res: Response, next: NextFunc
     next(error);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Dienstplanung, Schlüsselverwaltung und Aufgaben
+// ---------------------------------------------------------------------------
+
+const shiftCreateSchema = z.object({
+  siteId: z.string().uuid(),
+  employeeId: z.string().uuid().nullable().optional(),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date muss YYYY-MM-DD sein.'),
+  startTime: z.string().min(3).max(10),
+  endTime: z.string().min(3).max(10),
+  type: z.enum(['Tagdienst', 'Nachtdienst', 'Revierdienst', 'Sonderposten']).default('Tagdienst'),
+  status: z.enum(['Besetzt', 'Offen', 'Konflikt', 'Abgeschlossen']).default('Offen'),
+  requiredQualification: z.string().min(2).max(100),
+  conflictReason: z.string().max(500).nullable().optional()
+});
+
+const shiftUpdateSchema = shiftCreateSchema.partial();
+
+const keyCreateSchema = z.object({
+  siteId: z.string().uuid(),
+  keyNumber: z.string().min(1).max(50),
+  label: z.string().min(1).max(150),
+  type: z.enum(['Master-Schlüssel', 'Transponder', 'Buntbart', 'Schrankenschlüssel']).default('Master-Schlüssel'),
+  status: z.enum(['Im Tresor', 'Ausgegeben', 'Verlustmeldung']).default('Im Tresor'),
+  currentHolderId: z.string().uuid().nullable().optional(),
+  issuedAt: z.string().min(8).nullable().optional(),
+  expectedReturn: z.string().min(8).nullable().optional()
+});
+
+const keyUpdateSchema = keyCreateSchema.partial();
+
+const taskCreateSchema = z.object({
+  title: z.string().min(2).max(255),
+  assignedToName: z.string().min(2).max(100),
+  siteName: z.string().max(200).nullable().optional(),
+  dueDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'dueDate muss YYYY-MM-DD sein.'),
+  priority: z.enum(['Niedrig', 'Mittel', 'Hoch']).default('Mittel'),
+  status: z.enum(['Offen', 'In Bearbeitung', 'Erledigt']).default('Offen'),
+  category: z
+    .enum(['Audit', 'Wartung', 'Nachschulung', 'Kundenanforderung', 'Vorfallsbearbeitung'])
+    .default('Audit')
+});
+
+const taskUpdateSchema = taskCreateSchema.partial();
+
+const SHIFT_COLUMNS: Record<string, string> = {
+  siteId: 'site_id',
+  employeeId: 'employee_id',
+  date: 'shift_date',
+  startTime: 'start_time',
+  endTime: 'end_time',
+  type: 'type',
+  status: 'status',
+  requiredQualification: 'required_qualification',
+  conflictReason: 'conflict_reason'
+};
+
+const KEY_COLUMNS: Record<string, string> = {
+  siteId: 'site_id',
+  keyNumber: 'key_number',
+  label: 'label',
+  type: 'type',
+  status: 'status',
+  currentHolderId: 'current_holder_id',
+  issuedAt: 'issued_at',
+  expectedReturn: 'expected_return'
+};
+
+const TASK_COLUMNS: Record<string, string> = {
+  title: 'title',
+  assignedToName: 'assigned_to_name',
+  siteName: 'site_name',
+  dueDate: 'due_date',
+  priority: 'priority',
+  status: 'status',
+  category: 'category'
+};
+
+const SHIFT_SELECT = `s.id, s.site_id, st.name AS site_name, s.employee_id,
+  NULLIF(concat(e.first_name, ' ', e.last_name), ' ') AS employee_name,
+  s.shift_date, s.start_time, s.end_time, s.type, s.status,
+  s.required_qualification, s.conflict_reason, s.revision_version`;
+
+const KEY_SELECT = `k.id, k.site_id, st.name AS site_name, k.key_number, k.label,
+  k.type, k.status, k.current_holder_id,
+  NULLIF(concat(e.first_name, ' ', e.last_name), ' ') AS current_holder_name,
+  k.issued_at, k.expected_return, k.revision_version`;
+
+const TASK_SELECT = `id, title, assigned_to_name, site_name, due_date,
+  priority, status, category, revision_version`;
+
+export async function listShifts(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `SELECT ${SHIFT_SELECT}
+           FROM shifts s
+           JOIN sites st ON st.id = s.site_id AND st.tenant_id = s.tenant_id
+           LEFT JOIN employees e ON e.id = s.employee_id AND e.tenant_id = s.tenant_id
+          ORDER BY s.shift_date DESC, s.start_time`
+      )
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createShift(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const body = shiftCreateSchema.parse(req.body);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `INSERT INTO shifts
+           (tenant_id, site_id, employee_id, shift_date, start_time, end_time,
+            type, status, required_qualification, conflict_reason)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         RETURNING id, site_id, employee_id, shift_date, start_time, end_time,
+                   type, status, required_qualification, conflict_reason, revision_version`,
+        [
+          tenantId,
+          body.siteId,
+          body.employeeId ?? null,
+          body.date,
+          body.startTime,
+          body.endTime,
+          body.type,
+          body.status,
+          body.requiredQualification,
+          body.conflictReason ?? null
+        ]
+      )
+    );
+
+    res.status(201).json({ success: true, message: 'Schicht erfolgreich angelegt', data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateShift(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+    const body = shiftUpdateSchema.parse(req.body);
+    const entries = Object.entries(body).filter(([, value]) => value !== undefined);
+
+    if (entries.length === 0) {
+      res.status(400).json({ success: false, message: 'Keine aktualisierbaren Felder übermittelt.' });
+      return;
+    }
+
+    const assignments = entries.map(([key], index) => `${SHIFT_COLUMNS[key]} = $${index + 1}`);
+    const values = entries.map(([, value]) => value);
+    values.push(id, tenantId);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `UPDATE shifts
+            SET ${assignments.join(', ')},
+                revision_version = revision_version + 1,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id = $${values.length - 1} AND tenant_id = $${values.length}
+          RETURNING id, site_id, employee_id, shift_date, start_time, end_time,
+                    type, status, required_qualification, conflict_reason, revision_version`,
+        values
+      )
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Schicht aktualisiert', data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function deleteShift(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query('DELETE FROM shifts WHERE id = $1 AND tenant_id = $2 RETURNING id', [id, tenantId])
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Schicht gelöscht', data: { id } });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listKeys(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `SELECT ${KEY_SELECT}
+           FROM keys k
+           JOIN sites st ON st.id = k.site_id AND st.tenant_id = k.tenant_id
+           LEFT JOIN employees e ON e.id = k.current_holder_id AND e.tenant_id = k.tenant_id
+          ORDER BY k.key_number`
+      )
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createKey(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const body = keyCreateSchema.parse(req.body);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `INSERT INTO keys
+           (tenant_id, site_id, key_number, label, type, status,
+            current_holder_id, issued_at, expected_return)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         RETURNING id, site_id, key_number, label, type, status,
+                   current_holder_id, issued_at, expected_return, revision_version`,
+        [
+          tenantId,
+          body.siteId,
+          body.keyNumber,
+          body.label,
+          body.type,
+          body.status,
+          body.currentHolderId ?? null,
+          body.issuedAt ?? null,
+          body.expectedReturn ?? null
+        ]
+      )
+    );
+
+    res.status(201).json({ success: true, message: 'Schlüssel erfolgreich angelegt', data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateKey(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+    const body = keyUpdateSchema.parse(req.body);
+    const entries = Object.entries(body).filter(([, value]) => value !== undefined);
+
+    if (entries.length === 0) {
+      res.status(400).json({ success: false, message: 'Keine aktualisierbaren Felder übermittelt.' });
+      return;
+    }
+
+    const assignments = entries.map(([key], index) => `${KEY_COLUMNS[key]} = $${index + 1}`);
+    const values = entries.map(([, value]) => value);
+    values.push(id, tenantId);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `UPDATE keys
+            SET ${assignments.join(', ')},
+                revision_version = revision_version + 1
+          WHERE id = $${values.length - 1} AND tenant_id = $${values.length}
+          RETURNING id, site_id, key_number, label, type, status,
+                    current_holder_id, issued_at, expected_return, revision_version`,
+        values
+      )
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Schlüssel nicht gefunden.' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Schlüssel aktualisiert', data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function deleteKey(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query('DELETE FROM keys WHERE id = $1 AND tenant_id = $2 RETURNING id', [id, tenantId])
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Schlüssel nicht gefunden.' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Schlüssel gelöscht', data: { id } });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listTasks(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(`SELECT ${TASK_SELECT} FROM tasks ORDER BY due_date, created_at`)
+    );
+    res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createTask(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const body = taskCreateSchema.parse(req.body);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `INSERT INTO tasks
+           (tenant_id, title, assigned_to_name, site_name, due_date, priority, status, category)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING ${TASK_SELECT}`,
+        [
+          tenantId,
+          body.title,
+          body.assignedToName,
+          body.siteName ?? null,
+          body.dueDate,
+          body.priority,
+          body.status,
+          body.category
+        ]
+      )
+    );
+
+    res.status(201).json({ success: true, message: 'Aufgabe erfolgreich angelegt', data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateTask(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+    const body = taskUpdateSchema.parse(req.body);
+    const entries = Object.entries(body).filter(([, value]) => value !== undefined);
+
+    if (entries.length === 0) {
+      res.status(400).json({ success: false, message: 'Keine aktualisierbaren Felder übermittelt.' });
+      return;
+    }
+
+    const assignments = entries.map(([key], index) => `${TASK_COLUMNS[key]} = $${index + 1}`);
+    const values = entries.map(([, value]) => value);
+    values.push(id, tenantId);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query(
+        `UPDATE tasks
+            SET ${assignments.join(', ')}, revision_version = revision_version + 1
+          WHERE id = $${values.length - 1} AND tenant_id = $${values.length}
+          RETURNING ${TASK_SELECT}`,
+        values
+      )
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Aufgabe nicht gefunden.' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Aufgabe aktualisiert', data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function deleteTask(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+
+    const result = await withTenantTransaction(tenantId, (client) =>
+      client.query('DELETE FROM tasks WHERE id = $1 AND tenant_id = $2 RETURNING id', [id, tenantId])
+    );
+
+    if (result.rows.length === 0) {
+      res.status(404).json({ success: false, message: 'Aufgabe nicht gefunden.' });
+      return;
+    }
+
+    res.json({ success: true, message: 'Aufgabe gelöscht', data: { id } });
+  } catch (error) {
+    next(error);
+  }
+}

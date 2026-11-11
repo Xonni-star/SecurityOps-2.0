@@ -12,6 +12,10 @@ const siteCode = `API-SITE-${Date.now()}`;
 const personnelNumber = `API-MA-${Date.now()}`;
 let createdSiteId: string | undefined;
 let createdEmployeeId: string | undefined;
+let createdShiftId: string | undefined;
+let createdKeyId: string | undefined;
+let createdTaskId: string | undefined;
+const keyNumber = `API-KEY-${Date.now()}`;
 
 async function login(email: string): Promise<string> {
   const response = await request(app)
@@ -52,6 +56,9 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await migrationPool.query('DELETE FROM tasks WHERE id = $1', [createdTaskId ?? null]);
+  await migrationPool.query('DELETE FROM keys WHERE id = $1 OR key_number = $2', [createdKeyId ?? null, keyNumber]);
+  await migrationPool.query('DELETE FROM shifts WHERE id = $1', [createdShiftId ?? null]);
   await migrationPool.query('DELETE FROM employees WHERE id = $1 OR personnel_number = $2', [createdEmployeeId ?? null, personnelNumber]);
   await migrationPool.query('DELETE FROM sites WHERE id = $1 OR site_code = $2', [createdSiteId ?? null, siteCode]);
   await migrationPool.query('DELETE FROM clients WHERE client_number = $1', [clientNumber]);
@@ -220,6 +227,125 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     expect(siteCodes).not.toContain(siteCode);
     expect(personnelNumbers).not.toContain(personnelNumber);
+  });
+
+
+  test('6. Schicht, Schlüssel und Aufgabe werden gespeichert, geladen und aktualisiert', async () => {
+    if (!createdSiteId || !createdEmployeeId) {
+      throw new Error('Test 4 muss zuerst Objekt und Mitarbeiter anlegen.');
+    }
+
+    const token = await login(SEED_USER_EMAIL);
+
+    const shiftResponse = await request(app)
+      .post('/api/v1/shifts')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        siteId: createdSiteId,
+        employeeId: createdEmployeeId,
+        date: '2026-11-12',
+        startTime: '06:00',
+        endTime: '18:00',
+        type: 'Tagdienst',
+        status: 'Besetzt',
+        requiredQualification: 'Unterrichtung § 34a GewO'
+      });
+    expect(shiftResponse.status).toBe(201);
+    createdShiftId = shiftResponse.body.data.id;
+
+    const keyResponse = await request(app)
+      .post('/api/v1/keys')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        siteId: createdSiteId,
+        keyNumber,
+        label: 'API Testsclüssel',
+        type: 'Transponder',
+        status: 'Im Tresor'
+      });
+    expect(keyResponse.status).toBe(201);
+    createdKeyId = keyResponse.body.data.id;
+
+    const taskResponse = await request(app)
+      .post('/api/v1/tasks')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        title: 'API Testaufgabe',
+        assignedToName: 'Einsatzleitung',
+        siteName: 'API Testobjekt',
+        dueDate: '2026-11-20',
+        priority: 'Hoch',
+        status: 'Offen',
+        category: 'Audit'
+      });
+    expect(taskResponse.status).toBe(201);
+    createdTaskId = taskResponse.body.data.id;
+
+    const issueResponse = await request(app)
+      .patch(`/api/v1/keys/${createdKeyId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        status: 'Ausgegeben',
+        currentHolderId: createdEmployeeId,
+        issuedAt: new Date().toISOString(),
+        expectedReturn: '2026-11-20T18:00:00.000Z'
+      });
+    expect(issueResponse.status).toBe(200);
+
+    const completeTaskResponse = await request(app)
+      .patch(`/api/v1/tasks/${createdTaskId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'Erledigt' });
+    expect(completeTaskResponse.status).toBe(200);
+
+    const closeShiftResponse = await request(app)
+      .patch(`/api/v1/shifts/${createdShiftId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'Abgeschlossen' });
+    expect(closeShiftResponse.status).toBe(200);
+
+    const secondToken = await login(SEED_USER_EMAIL);
+
+    const shiftsResponse = await request(app)
+      .get('/api/v1/shifts')
+      .set('Authorization', `Bearer ${secondToken}`);
+    expect(shiftsResponse.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: createdShiftId, status: 'Abgeschlossen', site_name: 'API Testobjekt' })
+      ])
+    );
+
+    const keysResponse = await request(app)
+      .get('/api/v1/keys')
+      .set('Authorization', `Bearer ${secondToken}`);
+    expect(keysResponse.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: createdKeyId, key_number: keyNumber, status: 'Ausgegeben' })
+      ])
+    );
+
+    const tasksResponse = await request(app)
+      .get('/api/v1/tasks')
+      .set('Authorization', `Bearer ${secondToken}`);
+    expect(tasksResponse.body.data).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: createdTaskId, status: 'Erledigt' })])
+    );
+  });
+
+  test('7. Mandant B sieht Schichten, Schlüssel und Aufgaben aus Mandant A nicht', async () => {
+    const bavariaToken = await login(BAVARIA_USER_EMAIL);
+
+    const shiftsResponse = await request(app).get('/api/v1/shifts').set('Authorization', `Bearer ${bavariaToken}`);
+    const keysResponse = await request(app).get('/api/v1/keys').set('Authorization', `Bearer ${bavariaToken}`);
+    const tasksResponse = await request(app).get('/api/v1/tasks').set('Authorization', `Bearer ${bavariaToken}`);
+
+    expect(shiftsResponse.status).toBe(200);
+    expect(keysResponse.status).toBe(200);
+    expect(tasksResponse.status).toBe(200);
+
+    expect((shiftsResponse.body.data as Array<{ id: string }>).some((row) => row.id === createdShiftId)).toBe(false);
+    expect((keysResponse.body.data as Array<{ key_number: string }>).some((row) => row.key_number === keyNumber)).toBe(false);
+    expect((tasksResponse.body.data as Array<{ id: string }>).some((row) => row.id === createdTaskId)).toBe(false);
   });
 
 });

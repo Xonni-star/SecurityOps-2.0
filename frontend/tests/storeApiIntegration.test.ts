@@ -102,6 +102,12 @@ function mockReadEndpoints(): void {
         return Promise.resolve([employeeRow]);
       case '/logbook':
         return Promise.resolve([logbookRow]);
+      case '/shifts':
+        return Promise.resolve([]);
+      case '/keys':
+        return Promise.resolve([]);
+      case '/tasks':
+        return Promise.resolve([]);
       default:
         return Promise.reject(new Error(`Unerwarteter Endpunkt: ${endpoint}`));
     }
@@ -115,6 +121,9 @@ beforeEach(() => {
     sites: [],
     employees: [],
     guardBook: [],
+    shifts: [],
+    keys: [],
+    tasks: [],
     notifications: [],
     authUser: null,
     isAuthenticated: false,
@@ -329,6 +338,140 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     const state = useSecurityStore.getState();
     expect(state.employees[0].status).toBe('Urlaub');
     expect(state.notifications[0].title).toBe('Mitarbeiter aktualisiert');
+  });
+
+
+  test('7. addShift und assignShiftEmployee persistieren über die API', async () => {
+    mockedApi.post.mockResolvedValueOnce({
+      id: '88888888-8888-8888-8888-888888888888',
+      site_id: '22222222-2222-2222-2222-222222222222',
+      employee_id: null,
+      shift_date: '2026-11-12',
+      start_time: '06:00',
+      end_time: '18:00',
+      type: 'Tagdienst',
+      status: 'Offen',
+      required_qualification: 'Unterrichtung § 34a GewO',
+      revision_version: 1
+    });
+
+    await useSecurityStore.getState().addShift({
+      siteId: '22222222-2222-2222-2222-222222222222',
+      siteName: 'API Objekt',
+      date: '2026-11-12',
+      startTime: '06:00',
+      endTime: '18:00',
+      type: 'Tagdienst',
+      status: 'Offen',
+      requiredQualification: 'Unterrichtung § 34a GewO' as any
+    });
+
+    expect(mockedApi.post).toHaveBeenCalledWith(
+      '/shifts',
+      expect.objectContaining({ siteId: '22222222-2222-2222-2222-222222222222', status: 'Offen' })
+    );
+
+    useSecurityStore.setState({
+      employees: [
+        {
+          id: '99999999-9999-9999-9999-999999999999',
+          tenantId: 'tenant-frankfurt',
+          personnelNumber: 'MA-1',
+          firstName: 'Erika',
+          lastName: 'Muster',
+          email: 'erika@test.de',
+          phone: '+49',
+          role: 'Wachdienstmitarbeiter' as any,
+          status: 'Aktiv',
+          weeklyHours: 40,
+          qualifications: [],
+          assignedSiteIds: [],
+          hourlyRate: 19,
+          dateOfJoining: '2026-01-01'
+        }
+      ]
+    });
+
+    mockedApi.patch.mockResolvedValueOnce({});
+
+    await useSecurityStore.getState().assignShiftEmployee(
+      '88888888-8888-8888-8888-888888888888',
+      '99999999-9999-9999-9999-999999999999',
+      'Erika Muster'
+    );
+
+    expect(mockedApi.patch).toHaveBeenCalledWith(
+      '/shifts/88888888-8888-8888-8888-888888888888',
+      expect.objectContaining({ status: 'Besetzt' })
+    );
+    expect(useSecurityStore.getState().shifts[0].status).toBe('Besetzt');
+  });
+
+  test('8. addTask, toggleTaskStatus, issueKey und returnKey persistieren', async () => {
+    mockedApi.post.mockResolvedValueOnce({
+      id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      title: 'API Aufgabe',
+      assigned_to_name: 'Einsatzleitung',
+      site_name: 'API Objekt',
+      due_date: '2026-11-20',
+      priority: 'Hoch',
+      status: 'Offen',
+      category: 'Audit',
+      revision_version: 1
+    });
+
+    await useSecurityStore.getState().addTask({
+      title: 'API Aufgabe',
+      assignedToName: 'Einsatzleitung',
+      siteName: 'API Objekt',
+      dueDate: '2026-11-20',
+      priority: 'Hoch',
+      status: 'Offen',
+      category: 'Audit'
+    });
+
+    expect(mockedApi.post).toHaveBeenCalledWith(
+      '/tasks',
+      expect.objectContaining({ title: 'API Aufgabe', status: 'Offen' })
+    );
+
+    mockedApi.patch.mockResolvedValueOnce({});
+    await useSecurityStore.getState().toggleTaskStatus('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+    expect(mockedApi.patch).toHaveBeenCalledWith(
+      '/tasks/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+      { status: 'Erledigt' }
+    );
+    expect(useSecurityStore.getState().tasks[0].status).toBe('Erledigt');
+
+    useSecurityStore.setState({
+      keys: [
+        {
+          id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+          tenantId: 'tenant-frankfurt',
+          keyNumber: 'K-1',
+          label: 'Testschlüssel',
+          siteId: '22222222-2222-2222-2222-222222222222',
+          siteName: 'API Objekt',
+          type: 'Transponder',
+          status: 'Im Tresor'
+        }
+      ]
+    });
+
+    mockedApi.patch.mockResolvedValueOnce({});
+    await useSecurityStore
+      .getState()
+      .issueKey('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'Erika Muster', '99999999-9999-9999-9999-999999999999', '2026-11-20');
+
+    expect(mockedApi.patch).toHaveBeenCalledWith(
+      '/keys/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+      expect.objectContaining({ status: 'Ausgegeben' })
+    );
+    expect(useSecurityStore.getState().keys[0].status).toBe('Ausgegeben');
+
+    mockedApi.patch.mockResolvedValueOnce({});
+    await useSecurityStore.getState().returnKey('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb');
+    expect(useSecurityStore.getState().keys[0].status).toBe('Im Tresor');
   });
 
 });

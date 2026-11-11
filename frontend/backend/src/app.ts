@@ -63,6 +63,21 @@ app.get('/api/v1/sites', authenticateJwt, requirePermission('sites:read'), resou
 app.post('/api/v1/sites', authenticateJwt, requirePermission('sites:create'), resourceController.createSite);
 app.patch('/api/v1/sites/:id', authenticateJwt, requirePermission('sites:create'), resourceController.updateSite);
 
+app.get('/api/v1/shifts', authenticateJwt, requirePermission('shifts:read'), resourceController.listShifts);
+app.post('/api/v1/shifts', authenticateJwt, requirePermission('shifts:manage'), resourceController.createShift);
+app.patch('/api/v1/shifts/:id', authenticateJwt, requirePermission('shifts:manage'), resourceController.updateShift);
+app.delete('/api/v1/shifts/:id', authenticateJwt, requirePermission('shifts:manage'), resourceController.deleteShift);
+
+app.get('/api/v1/keys', authenticateJwt, requirePermission('keys:read'), resourceController.listKeys);
+app.post('/api/v1/keys', authenticateJwt, requirePermission('keys:manage'), resourceController.createKey);
+app.patch('/api/v1/keys/:id', authenticateJwt, requirePermission('keys:manage'), resourceController.updateKey);
+app.delete('/api/v1/keys/:id', authenticateJwt, requirePermission('keys:manage'), resourceController.deleteKey);
+
+app.get('/api/v1/tasks', authenticateJwt, requirePermission('tasks:read'), resourceController.listTasks);
+app.post('/api/v1/tasks', authenticateJwt, requirePermission('tasks:manage'), resourceController.createTask);
+app.patch('/api/v1/tasks/:id', authenticateJwt, requirePermission('tasks:manage'), resourceController.updateTask);
+app.delete('/api/v1/tasks/:id', authenticateJwt, requirePermission('tasks:manage'), resourceController.deleteTask);
+
 app.get('/api/v1/employees', authenticateJwt, requirePermission('employees:read'), resourceController.listEmployees);
 app.post('/api/v1/employees', authenticateJwt, requirePermission('employees:manage'), resourceController.createEmployee);
 app.patch('/api/v1/employees/:id', authenticateJwt, requirePermission('employees:manage'), resourceController.updateEmployee);
