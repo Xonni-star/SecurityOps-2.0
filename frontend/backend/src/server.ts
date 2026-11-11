@@ -1,7 +1,22 @@
 import { app } from './app';
 import { env } from './config/env';
+import { verifyAppDatabaseRole } from './config/database';
 
-app.listen(env.PORT, () => {
-  console.log(`[SECURITYOPS 2.0 BACKEND] Läuft auf Port ${env.PORT} im ${env.NODE_ENV}-Modus.`);
-  console.log(`[API V1] Bereit unter http://localhost:${env.PORT}/api/v1/health`);
-});
+async function bootstrap() {
+  try {
+    // 3. Vor dem Start des HTTP-Servers die Datenbankrolle zwingend verifizieren:
+    // Der Anwendungsbenutzer DARF KEIN Superuser und KEIN BYPASSRLS sein!
+    await verifyAppDatabaseRole();
+
+    app.listen(env.PORT, () => {
+      console.log(`[SECURITYOPS 2.0 BACKEND] Gestartet auf Port ${env.PORT} (${env.NODE_ENV}).`);
+      console.log(`[CORS WHITELIST] Erlaubte Origins: ${env.ALLOWED_CORS_ORIGINS.join(', ')}`);
+      console.log(`[API V1 HEALTH] http://localhost:${env.PORT}/api/v1/health`);
+    });
+  } catch (err) {
+    console.error('[FATAL SERVER START ERROR]', err);
+    process.exit(1);
+  }
+}
+
+bootstrap();

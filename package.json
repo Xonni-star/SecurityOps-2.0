@@ -1,5 +1,5 @@
 {
-  "name": "securityops-2-0-sicherheitsdienstverwaltung",
+  "name": "securityops-2-1-sicherheitsdienstverwaltung",
   "workspaces": ["frontend", "backend"], 
   "scripts": {
     "dev-frontend": "npm run dev --prefix frontend",

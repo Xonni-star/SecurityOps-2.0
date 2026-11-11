@@ -1,18 +1,19 @@
-// SecurityOps 2.0 - Native Enterprise IndexedDB Storage Engine (Zero Unapproved Dependencies)
-// Implements Outbox, Inbox, Drafts, Chunked Attachments, Device Fingerprints, and Conflict Audits
+// SecurityOps 2.0 - Zuverlässige Enterprise IndexedDB Storage Engine (Schritt 5R gehärtet)
+// Wartet bei Schreiboperationen zwingend auf transaction.oncomplete.
+// Behandelt transaction.onerror und transaction.onabort als echte Fehler. Keine verschluckten Fehler!
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
 const DB_VERSION = 2;
 
 export interface OutboxMutation {
-  id: string; // Unique client_mutation_id (UUID v4)
+  id: string; // Eindeutige client_mutation_id (UUID v4)
   tenantId: string;
   userId: string;
   deviceId: string;
-  entityType: 'logbook' | 'shift' | 'task' | 'key' | 'employee' | 'attachment';
+  entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'attachment' | 'patrol' | 'handover';
   action: 'CREATE' | 'UPDATE' | 'DELETE';
   payload: any;
-  occurredAt: string; // ISO timestamp on client device
+  occurredAt: string;
   baseVersion: number;
   retryCount: number;
   lastAttemptAt?: string;
@@ -29,23 +30,13 @@ export interface OutboxMutation {
 export interface StoredAttachment {
   id: string;
   tenantId: string;
-  entityId: string; // e.g. logbook entry id
+  entityId: string;
   fileName: string;
   mimeType: string;
   sizeBytes: number;
-  blobData: string; // Base64 data URL
+  blobData: string;
   capturedAt: string;
   synced: boolean;
-}
-
-export interface DeviceProfile {
-  deviceId: string;
-  tenantId: string;
-  userId: string;
-  deviceName: string;
-  registeredAt: string;
-  isTrusted: boolean;
-  lastSyncCursorSeq: number;
 }
 
 class IndexedDbService {
@@ -61,20 +52,27 @@ class IndexedDbService {
   }
 
   private getOrCreateDeviceId(): string {
-    if (typeof localStorage === 'undefined') {
-      return 'dev-browser-default';
+    try {
+      if (typeof localStorage !== 'undefined') {
+        let dId = localStorage.getItem('secops_device_uuid');
+        if (!dId) {
+          dId = `dev-${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15)}`;
+          localStorage.setItem('secops_device_uuid', dId);
+        }
+        return dId;
+      }
+    } catch (e) {
+      console.warn('[STORAGE NOTICE] localStorage nicht verfügbar:', e);
     }
-    let dId = localStorage.getItem('secops_device_uuid');
-    if (!dId) {
-      dId = `dev-${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15)}`;
-      localStorage.setItem('secops_device_uuid', dId);
-    }
-    return dId;
+    return 'dev-browser-vault';
   }
 
-  async init(): Promise<void> {
-    if (this.db) return;
-    if (typeof indexedDB === 'undefined') return;
+  async init(): Promise<IDBDatabase> {
+    if (this.db) return this.db;
+
+    if (typeof indexedDB === 'undefined') {
+      throw new Error('IndexedDB wird von diesem Browser / Iframe nicht unterstützt.');
+    }
 
     return new Promise((resolve, reject) => {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
@@ -82,7 +80,6 @@ class IndexedDbService {
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
 
-        // 1. Outbox: Queued mutations to push to server
         if (!db.objectStoreNames.contains('outbox')) {
           const outboxStore = db.createObjectStore('outbox', { keyPath: 'id' });
           outboxStore.createIndex('tenantId', 'tenantId', { unique: false });
@@ -90,42 +87,38 @@ class IndexedDbService {
           outboxStore.createIndex('occurredAt', 'occurredAt', { unique: false });
         }
 
-        // 2. Inbox: Local mirror of server entities
         if (!db.objectStoreNames.contains('inbox')) {
           const inboxStore = db.createObjectStore('inbox', { keyPath: 'compositeKey' });
           inboxStore.createIndex('tenantId', 'tenantId', { unique: false });
           inboxStore.createIndex('entityType', 'entityType', { unique: false });
         }
 
-        // 3. Attachments: Offline photo documentation and files
         if (!db.objectStoreNames.contains('attachments')) {
           const attachStore = db.createObjectStore('attachments', { keyPath: 'id' });
           attachStore.createIndex('entityId', 'entityId', { unique: false });
           attachStore.createIndex('synced', 'synced', { unique: false });
         }
-
-        // 4. Device Meta
-        if (!db.objectStoreNames.contains('device_meta')) {
-          db.createObjectStore('device_meta', { keyPath: 'deviceId' });
-        }
       };
 
       request.onsuccess = (event) => {
         this.db = (event.target as IDBOpenDBRequest).result;
-        resolve();
+        resolve(this.db);
       };
 
-      request.onerror = (event) => {
-        console.warn('IndexedDB open notice:', event);
-        resolve(); // gracefully resolve so UI does not crash
+      request.onerror = () => {
+        reject(request.error || new Error('Fehler beim Öffnen von IndexedDB'));
       };
     });
   }
 
-  // --- OUTBOX OPERATIONS ---
-
+  /**
+   * Speichert eine Mutation transaktionssicher in der Outbox.
+   * Wartet zwingend auf transaction.oncomplete!
+   * Bei transaction.onerror oder onabort wird ein echter Fehler geworfen.
+   */
   async enqueueMutation(mutation: Omit<OutboxMutation, 'deviceId' | 'retryCount' | 'status'>): Promise<OutboxMutation> {
-    await this.init();
+    const db = await this.init();
+
     const item: OutboxMutation = {
       ...mutation,
       deviceId: this.currentDeviceId,
@@ -133,28 +126,32 @@ class IndexedDbService {
       status: 'PENDING'
     };
 
-    if (!this.db) return item;
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('outbox', 'readwrite');
 
-    return new Promise((resolve) => {
-      try {
-        const tx = this.db!.transaction('outbox', 'readwrite');
-        const store = tx.objectStore('outbox');
-        const req = store.put(item);
-        req.onsuccess = () => resolve(item);
-        req.onerror = () => resolve(item);
-      } catch {
+      tx.oncomplete = () => {
         resolve(item);
-      }
+      };
+
+      tx.onerror = () => {
+        reject(tx.error || new Error(`[INDEXEDDB FEHLER] Speichern der Mutation ${item.id} fehlgeschlagen`));
+      };
+
+      tx.onabort = () => {
+        reject(tx.error || new Error(`[INDEXEDDB ABORT] Transaktion für ${item.id} abgebrochen`));
+      };
+
+      const store = tx.objectStore('outbox');
+      store.put(item);
     });
   }
 
-  // Kompatibilität: enqueueOffline Alias
   async enqueueOffline(record: any): Promise<void> {
     await this.enqueueMutation({
       id: record.id,
       tenantId: record.tenantId,
-      userId: 'offline-user',
-      entityType: record.storeName || 'logbook',
+      userId: 'offline-guard',
+      entityType: record.storeName || 'guardbook',
       action: record.action || 'CREATE',
       payload: record.data,
       occurredAt: record.timestamp || new Date().toISOString(),
@@ -162,163 +159,101 @@ class IndexedDbService {
     });
   }
 
-  async markSynced(id: string): Promise<void> {
-    await this.removeMutation(id);
-  }
-
   async getPendingOutbox(tenantId: string): Promise<OutboxMutation[]> {
-    await this.init();
-    if (!this.db) return [];
+    const db = await this.init();
 
-    return new Promise((resolve) => {
-      try {
-        const tx = this.db!.transaction('outbox', 'readonly');
-        const store = tx.objectStore('outbox');
-        const req = store.getAll();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('outbox', 'readonly');
+      const store = tx.objectStore('outbox');
+      const req = store.getAll();
 
-        req.onsuccess = () => {
-          const records = (req.result as OutboxMutation[]) || [];
-          resolve(records.filter((r) => r.tenantId === tenantId && (r.status === 'PENDING' || r.status === 'FAILED')));
-        };
-        req.onerror = () => resolve([]);
-      } catch {
-        resolve([]);
-      }
+      req.onsuccess = () => {
+        const records = (req.result as OutboxMutation[]) || [];
+        // Nur Einträge des jeweiligen Mandanten zurückliefern, die PENDING oder FAILED sind
+        resolve(records.filter((r) => r.tenantId === tenantId && (r.status === 'PENDING' || r.status === 'FAILED')));
+      };
+
+      req.onerror = () => {
+        reject(req.error || new Error('[INDEXEDDB FEHLER] Lesen der Outbox fehlgeschlagen'));
+      };
     });
   }
 
+  /**
+   * Aktualisiert den Status einer Mutation in der Outbox erst nach Bestätigung.
+   */
   async updateMutationStatus(
     id: string,
     status: OutboxMutation['status'],
     details?: { errorMessage?: string; conflictDetails?: OutboxMutation['conflictDetails'] }
   ): Promise<void> {
-    await this.init();
-    if (!this.db) return;
+    const db = await this.init();
 
-    return new Promise((resolve) => {
-      try {
-        const tx = this.db!.transaction('outbox', 'readwrite');
-        const store = tx.objectStore('outbox');
-        const getReq = store.get(id);
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('outbox', 'readwrite');
 
-        getReq.onsuccess = () => {
-          const record = getReq.result as OutboxMutation;
-          if (!record) {
-            resolve();
-            return;
-          }
-          record.status = status;
-          record.lastAttemptAt = new Date().toISOString();
-          if (status === 'FAILED') record.retryCount += 1;
-          if (details?.errorMessage) record.errorMessage = details.errorMessage;
-          if (details?.conflictDetails) record.conflictDetails = details.conflictDetails;
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error(`Aktualisierung für ${id} fehlgeschlagen`));
+      tx.onabort = () => reject(tx.error || new Error(`Transaktion für ${id} abgebrochen`));
 
-          const putReq = store.put(record);
-          putReq.onsuccess = () => resolve();
-          putReq.onerror = () => resolve();
-        };
-        getReq.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
+      const store = tx.objectStore('outbox');
+      const getReq = store.get(id);
+
+      getReq.onsuccess = () => {
+        const record = getReq.result as OutboxMutation;
+        if (!record) {
+          return;
+        }
+        record.status = status;
+        record.lastAttemptAt = new Date().toISOString();
+        if (status === 'FAILED') record.retryCount += 1;
+        if (details?.errorMessage) record.errorMessage = details.errorMessage;
+        if (details?.conflictDetails) record.conflictDetails = details.conflictDetails;
+
+        store.put(record);
+      };
     });
   }
 
+  /**
+   * Entfernt eine Mutation erst NACH erfolgreicher Serverquittierung.
+   */
   async removeMutation(id: string): Promise<void> {
-    await this.init();
-    if (!this.db) return;
+    const db = await this.init();
 
-    return new Promise((resolve) => {
-      try {
-        const tx = this.db!.transaction('outbox', 'readwrite');
-        const store = tx.objectStore('outbox');
-        const req = store.delete(id);
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('outbox', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error(`Löschen der Mutation ${id} fehlgeschlagen`));
+      tx.onabort = () => reject(tx.error || new Error(`Transaktion ${id} abgebrochen`));
+
+      const store = tx.objectStore('outbox');
+      store.delete(id);
     });
   }
 
-  // --- ATTACHMENTS (OFFLINE BLOB/BASE64 PHOTO STORAGE) ---
+  async markSynced(id: string): Promise<void> {
+    await this.removeMutation(id);
+  }
+
+  // --- ANHÄNGE & FOTODOKUMENTATION ---
 
   async saveAttachment(attachment: StoredAttachment): Promise<void> {
-    await this.init();
-    if (!this.db) return;
-
-    const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
-    if (attachment.sizeBytes > MAX_PHOTO_BYTES) {
+    const MAX_BYTES = 5 * 1024 * 1024;
+    if (attachment.sizeBytes > MAX_BYTES) {
       throw new Error(`Dateigröße (${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MB) überschreitet das Limit von 5 MB.`);
     }
 
-    return new Promise((resolve) => {
-      try {
-        const tx = this.db!.transaction('attachments', 'readwrite');
-        const store = tx.objectStore('attachments');
-        const req = store.put(attachment);
-        req.onsuccess = () => resolve();
-        req.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  }
+    const db = await this.init();
 
-  async getAttachmentsForEntity(entityId: string): Promise<StoredAttachment[]> {
-    await this.init();
-    if (!this.db) return [];
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('attachments', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Speichern des Anhangs fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Transaktion abgebrochen'));
 
-    return new Promise((resolve) => {
-      try {
-        const tx = this.db!.transaction('attachments', 'readonly');
-        const store = tx.objectStore('attachments');
-        const index = store.index('entityId');
-        const req = index.getAll(entityId);
-        req.onsuccess = () => resolve((req.result as StoredAttachment[]) || []);
-        req.onerror = () => resolve([]);
-      } catch {
-        resolve([]);
-      }
-    });
-  }
-
-  async getStorageEstimates(): Promise<{ usageBytes: number; quotaBytes: number; percentage: number; countOutbox: number }> {
-    let usageBytes = 1250000;
-    let quotaBytes = 50000000;
-
-    if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.estimate) {
-      try {
-        const estimate = await navigator.storage.estimate();
-        usageBytes = estimate.usage || usageBytes;
-        quotaBytes = estimate.quota || quotaBytes;
-      } catch {}
-    }
-
-    const outboxItems = await this.getAllOutboxItems();
-
-    return {
-      usageBytes,
-      quotaBytes,
-      percentage: Math.min(100, (usageBytes / quotaBytes) * 100),
-      countOutbox: outboxItems.length
-    };
-  }
-
-  private async getAllOutboxItems(): Promise<OutboxMutation[]> {
-    await this.init();
-    if (!this.db) return [];
-
-    return new Promise((resolve) => {
-      try {
-        const tx = this.db!.transaction('outbox', 'readonly');
-        const store = tx.objectStore('outbox');
-        const req = store.getAll();
-        req.onsuccess = () => resolve((req.result as OutboxMutation[]) || []);
-        req.onerror = () => resolve([]);
-      } catch {
-        resolve([]);
-      }
+      const store = tx.objectStore('attachments');
+      store.put(attachment);
     });
   }
 }

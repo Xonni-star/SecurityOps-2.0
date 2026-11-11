@@ -6,10 +6,11 @@ dotenv.config();
 const envSchema = z.object({
   PORT: z.string().default('8000').transform((val) => parseInt(val, 10)),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  DATABASE_URL: z.string().min(10, 'DATABASE_URL muss zwingend konfiguriert sein.'),
+  DATABASE_URL: z.string().min(10, 'DATABASE_URL muss zwingend konfiguriert sein (für secops_app_user).'),
+  DATABASE_MIGRATION_URL: z.string().min(10, 'DATABASE_MIGRATION_URL muss konfiguriert sein (für secops_admin).'),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET muss mindestens 32 Zeichen lang sein.'),
   JWT_EXPIRES_IN: z.string().default('8h'),
-  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss explizit konfiguriert werden (kein ungesicherter Wildcard).'),
+  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss konfiguriert sein.'),
   RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10))
 });
 
@@ -40,10 +41,30 @@ if (knownInsecureSecrets.includes(parsedEnv.data.JWT_SECRET)) {
   }
 }
 
-// Im Produktivbetrieb darf CORS_ORIGIN kein Wildcard sein
-if (parsedEnv.data.NODE_ENV === 'production' && parsedEnv.data.CORS_ORIGIN === '*') {
-  console.error('[PRODUKTIONSABBRUCH] CORS_ORIGIN darf in der Produktionsumgebung kein Wildcard "*" sein.');
+// 4. CORS Whitelist Parsing & Validierung:
+// Kommagetrennte Origins parsen, Leerzeichen entfernen und doppelte Einträge bereinigen.
+const rawOrigins = parsedEnv.data.CORS_ORIGIN.split(',')
+  .map((o) => o.trim())
+  .filter((o) => o.length > 0);
+
+const uniqueOrigins = Array.from(new Set(rawOrigins));
+
+// Wildcard '*' grundsätzlich verbieten
+if (uniqueOrigins.includes('*')) {
+  console.error('[SICHERHEITSABBRUCH] CORS_ORIGIN darf niemals das ungesicherte Wildcard "*" enthalten.');
   process.exit(1);
 }
 
-export const env = parsedEnv.data;
+// Ausschließlich gültige HTTP-/HTTPS-Origins akzeptieren
+const originRegex = /^https?:\/\/[a-zA-Z0-9\.\-:]+$/;
+for (const origin of uniqueOrigins) {
+  if (!originRegex.test(origin)) {
+    console.error(`[SICHERHEITSABBRUCH] CORS_ORIGIN enthält ungültigen Origin: "${origin}". Nur http:// oder https:// zulässig.`);
+    process.exit(1);
+  }
+}
+
+export const env = {
+  ...parsedEnv.data,
+  ALLOWED_CORS_ORIGINS: uniqueOrigins
+};

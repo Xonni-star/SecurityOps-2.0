@@ -52,60 +52,12 @@ import {
   initialGdprPolicies
 } from './mockData';
 import { apiClient } from './services/apiClient';
-import { offlineStorage } from './services/indexedDbService';
+import { offlineVault } from './services/indexedDbService';
 
 export type ThemeMode = 'dark' | 'light';
 
-export const initialReportDefinitions: ReportDefinition[] = [
-  {
-    id: 'rep-gf-monthly',
-    tenantId: 'tenant-frankfurt',
-    name: 'Monatscontrolling Geschäftsführung (Soll/Ist & DIN 77200)',
-    description: 'Vollständiger Monatsabschluss mit Stundenbilanz, Überstunden, Personalauslastung und Vorfallsquote.',
-    category: 'GESCHAEFTSFUEHRUNG',
-    requiredRole: [UserRole.ADMIN, UserRole.GF],
-    dataSource: 'shifts',
-    selectedColumns: ['siteName', 'date', 'type', 'status', 'employeeName'],
-    filterConfig: { dateRange: 'THIS_MONTH' },
-    groupBy: 'siteName',
-    scheduleInterval: 'MONTHLY',
-    lastGeneratedAt: '2025-05-14 23:59',
-    createdAt: '2025-01-01'
-  }
-];
-
-export const initialShiftSwaps: ShiftSwapRequest[] = [
-  {
-    id: 'swap-1',
-    tenantId: 'tenant-frankfurt',
-    shiftId: 'sh-1',
-    requestingEmployeeId: 'e-3',
-    requestingEmployeeName: 'Sabine Becker',
-    targetEmployeeId: 'e-4',
-    targetEmployeeName: 'Dennis Kowalski',
-    reason: 'Familiäre Angelegenheit / Arzttermin',
-    status: 'ANGEFRAGT',
-    requestedAt: '2025-05-15 08:30'
-  }
-];
-
-export const initialPatrolScans: PatrolScanEvent[] = [
-  {
-    id: 'scan-1',
-    tenantId: 'tenant-frankfurt',
-    siteId: 's-1',
-    siteName: 'Finanzturm Alpha (Hauptverwaltung)',
-    checkpointId: 'cp-1',
-    checkpointCode: 'CP-01',
-    checkpointName: 'Hauptfoyer Schrankenanlage',
-    guardId: 'e-3',
-    guardName: 'Sabine Becker',
-    scannedAt: '2025-05-15 06:15',
-    method: 'NFC_TAG',
-    verifiedTag: 'RFID-9901-A',
-    offlineCaptured: false
-  }
-];
+// Mutex zur Verhinderung paralleler Synchronisationsläufe
+let isSyncRunningMutex = false;
 
 interface SecurityOpsStore {
   // Theme
@@ -133,12 +85,14 @@ interface SecurityOpsStore {
   setGlobalSearch: (q: string) => void;
   performGlobalSearch: (q: string) => GlobalSearchResult[];
 
-  // Offline Engine
+  // Offline Engine & Sync Status
   isOnline: boolean;
+  isSyncing: boolean;
+  lastSyncTime: string | null;
   toggleNetworkSimulation: () => void;
   syncQueue: OfflineQueueItem[];
-  enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'>) => void;
-  triggerManualSync: () => Promise<{ success: number; failed: number }>;
+  enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'>) => Promise<void>;
+  triggerManualSync: () => Promise<{ success: number; failed: number; conflicts: number }>;
   resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => void;
   clearCompletedSyncs: () => void;
 
@@ -163,7 +117,7 @@ interface SecurityOpsStore {
   markNotificationAsRead: (deliveryId: string) => void;
   updateNotificationPreferences: (prefs: Partial<NotificationPreference>) => void;
 
-  // Automation Engine
+  // Automations
   automations: AutomationRule[];
   automationTemplates: AutomationRule[];
   executionLogs: AutomationExecutionLog[];
@@ -174,21 +128,6 @@ interface SecurityOpsStore {
   toggleAutomationRule: (id: string) => void;
   testRunRule: (id: string) => { matched: boolean; actions: string[]; durationMs: number };
   runAutomationsNow: () => number;
-
-  // Reporting & Controlling
-  reportDefinitions: ReportDefinition[];
-  addReportDefinition: (rep: Omit<ReportDefinition, 'id' | 'createdAt'>) => void;
-  deleteReportDefinition: (id: string) => void;
-  calculateTenantKPIs: () => ControllingKPIs;
-
-  // Mobile App
-  shiftSwaps: ShiftSwapRequest[];
-  patrolScans: PatrolScanEvent[];
-  shiftHandovers: ShiftHandoverProtocol[];
-  addShiftSwapRequest: (req: Omit<ShiftSwapRequest, 'id' | 'tenantId' | 'requestedAt' | 'status'>) => void;
-  approveShiftSwap: (swapId: string, approved: boolean) => void;
-  addPatrolScan: (scan: Omit<PatrolScanEvent, 'id' | 'tenantId' | 'scannedAt' | 'offlineCaptured'>) => void;
-  submitShiftHandover: (handover: Omit<ShiftHandoverProtocol, 'id' | 'tenantId' | 'handoverTime' | 'offlineCaptured'>) => void;
 
   // Datasets
   clients: Client[];
@@ -217,9 +156,6 @@ interface SecurityOpsStore {
   getTenantAuditLogs: () => SecurityAuditEntry[];
   getTenantExecutionLogs: () => AutomationExecutionLog[];
   getTenantNotificationDeliveries: () => NotificationDelivery[];
-  getTenantReportDefinitions: () => ReportDefinition[];
-  getTenantShiftSwaps: () => ShiftSwapRequest[];
-  getTenantPatrolScans: () => PatrolScanEvent[];
 
   // Actions
   addClient: (client: Omit<Client, 'id' | 'tenantId'>) => void;
@@ -228,7 +164,7 @@ interface SecurityOpsStore {
   updateEmployee: (id: string, updates: Partial<Employee>) => void;
   addShift: (shift: Omit<Shift, 'id' | 'tenantId'>) => void;
   assignShiftEmployee: (shiftId: string, employeeId: string, employeeName: string) => void;
-  addGuardBookEntry: (entry: Omit<GuardBookEntry, 'id' | 'timestamp' | 'tenantId'>) => void;
+  addGuardBookEntry: (entry: Omit<GuardBookEntry, 'id' | 'timestamp' | 'tenantId'>) => Promise<void>;
   updateGuardBookStage: (id: string, stage: GuardBookEntry['stage'], note?: string) => void;
   resolveGuardBookEntry: (id: string, note: string) => void;
   acknowledgeSOP: (sopId: string) => void;
@@ -243,10 +179,18 @@ interface SecurityOpsStore {
 }
 
 export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
-  theme: (typeof localStorage !== 'undefined' ? localStorage.getItem('secops_theme') as ThemeMode : 'dark') || 'dark',
+  theme: (() => {
+    try {
+      return (typeof localStorage !== 'undefined' ? localStorage.getItem('secops_theme') as ThemeMode : 'dark') || 'dark';
+    } catch {
+      return 'dark';
+    }
+  })(),
   toggleTheme: () => {
     const nextTheme = get().theme === 'dark' ? 'light' : 'dark';
-    if (typeof localStorage !== 'undefined') localStorage.setItem('secops_theme', nextTheme);
+    try {
+      if (typeof localStorage !== 'undefined') localStorage.setItem('secops_theme', nextTheme);
+    } catch {}
     if (typeof document !== 'undefined') {
       if (nextTheme === 'dark') document.documentElement.classList.add('dark');
       else document.documentElement.classList.remove('dark');
@@ -255,7 +199,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   tenants: initialTenants,
-  currentTenantId: (typeof localStorage !== 'undefined' ? localStorage.getItem('secops_tenant_id') : null) || 'tenant-frankfurt',
+  currentTenantId: (() => {
+    try {
+      return (typeof localStorage !== 'undefined' ? localStorage.getItem('secops_tenant_id') : null) || 'tenant-frankfurt';
+    } catch {
+      return 'tenant-frankfurt';
+    }
+  })(),
   setCurrentTenantId: (tenantId) => {
     apiClient.setTenantId(tenantId);
     set({ currentTenantId: tenantId });
@@ -284,7 +234,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     set({ currentUserRole: role, currentUserName: name, currentUserId: uId });
   },
 
-  // Standardmäßig 'dashboard' laden für sofortige sichtbare Leitstellen-Darstellung
   activeTab: 'dashboard',
   setActiveTab: (tab) => set({ activeTab: tab }),
 
@@ -322,28 +271,12 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       }
     });
 
-    getTenantKeys().forEach((k) => {
-      if (k.label.toLowerCase().includes(q) || k.keyNumber.toLowerCase().includes(q)) {
-        results.push({ id: k.id, title: `${k.label} (${k.keyNumber})`, subtitle: `Status: ${k.status} • ${k.siteName}`, category: 'Schlüssel', targetTab: 'keys' });
-      }
-    });
-
-    getTenantTasks().forEach((t) => {
-      if (t.title.toLowerCase().includes(q) || t.assignedToName.toLowerCase().includes(q)) {
-        results.push({ id: t.id, title: t.title, subtitle: `Frist: ${t.dueDate} • ${t.assignedToName}`, category: 'Aufgabe', targetTab: 'tasks' });
-      }
-    });
-
-    getTenantDocuments().forEach((d) => {
-      if (d.title.toLowerCase().includes(q) || d.fileName.toLowerCase().includes(q)) {
-        results.push({ id: d.id, title: d.title, subtitle: `${d.category} • v${d.version}`, category: 'Dokument', targetTab: 'documents' });
-      }
-    });
-
     return results;
   },
 
   isOnline: true,
+  isSyncing: false,
+  lastSyncTime: null,
   toggleNetworkSimulation: () => {
     const nextState = !get().isOnline;
     set({ isOnline: nextState });
@@ -358,26 +291,19 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     } else {
       get().addNotification(
         'Offline-Modus aktiv',
-        'Netzwerk unterbrochen. Wachbuch, Kontrollgänge und Aufgaben werden lokal in der Sync-Queue gespeichert.',
+        'Netzwerk unterbrochen. Wachbuch, Kontrollgänge und Aufgaben werden lokal in der IndexedDB Outbox gesichert.',
         'warning'
       );
     }
   },
 
-  syncQueue: [
-    {
-      id: 'sync-demo-1',
-      tenantId: 'tenant-frankfurt',
-      entityType: 'guardbook',
-      action: 'CREATE',
-      payload: { title: 'Notausgang-Prüfung Tiefgarage West', category: 'Kontrollgang', siteName: 'Finanzturm Alpha' },
-      createdAt: new Date(Date.now() - 1000 * 60 * 12).toLocaleTimeString(),
-      retryCount: 0,
-      status: 'synced'
-    }
-  ],
+  syncQueue: [],
 
-  enqueueOfflineAction: (item) => {
+  /**
+   * 2. Zuverlässige Outbox-Speicherung:
+   * Wartet auf transaktionssichere Bestätigung der IndexedDB.
+   */
+  enqueueOfflineAction: async (item) => {
     const queueEntry: OfflineQueueItem = {
       ...item,
       id: `queue-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -386,43 +312,157 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       status: 'pending'
     };
 
-    if (typeof offlineStorage !== 'undefined' && offlineStorage.enqueueOffline) {
-      offlineStorage.enqueueOffline({
+    try {
+      await offlineVault.enqueueMutation({
         id: queueEntry.id,
         tenantId: queueEntry.tenantId,
-        storeName: queueEntry.entityType,
+        userId: get().currentUserId,
+        entityType: queueEntry.entityType as any,
         action: queueEntry.action,
-        data: queueEntry.payload,
-        timestamp: queueEntry.createdAt,
-        synced: false
-      }).catch(console.error);
-    }
+        payload: queueEntry.payload,
+        occurredAt: new Date().toISOString(),
+        baseVersion: 1
+      });
 
-    set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
+      set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
+    } catch (err: any) {
+      console.error('[OUTBOX WRITE FAILED]', err);
+      get().addNotification(
+        'Lokaler Speicherfehler',
+        `Konnte Eintrag nicht lokal sichern: ${err?.message || 'Unbekannter IndexedDB Fehler'}`,
+        'alert'
+      );
+      throw err;
+    }
   },
 
+  /**
+   * 1. Echte Synchronisation mit Mutex und Serverquittierung:
+   * Überträgt ausstehende Mutationen an POST /api/v1/sync/push.
+   * Ein Eintrag wird ERST nach bestätigter Serverantwort als SYNCED markiert!
+   * Bei Netzwerkfehlern bleiben alle Einträge unversehrt in der Outbox.
+   */
   triggerManualSync: async () => {
-    const { syncQueue, isOnline } = get();
+    const { isOnline, currentTenantId, syncQueue } = get();
+
     if (!isOnline) {
-      return { success: 0, failed: syncQueue.filter(q => q.status === 'pending').length };
+      return { success: 0, failed: syncQueue.filter((q) => q.status === 'pending').length, conflicts: 0 };
     }
+
+    // Mutex verhindert parallele Synchronisationsläufe
+    if (isSyncRunningMutex) {
+      console.warn('[SYNC MUTEX] Synchronisation läuft bereits. Paralleler Aufruf abgewiesen.');
+      return { success: 0, failed: 0, conflicts: 0 };
+    }
+
+    isSyncRunningMutex = true;
+    set({ isSyncing: true });
 
     let successCount = 0;
     let failedCount = 0;
+    let conflictCount = 0;
 
-    const updated = syncQueue.map((item) => {
-      if (item.status === 'pending') {
-        successCount++;
-        if (typeof offlineStorage !== 'undefined' && offlineStorage.markSynced) {
-          offlineStorage.markSynced(item.id).catch(console.error);
-        }
-        return { ...item, status: 'synced' as SyncStatus };
+    try {
+      // 1. Hole alle ausstehenden Mutationen aus IndexedDB
+      const pendingItems = await offlineVault.getPendingOutbox(currentTenantId);
+
+      if (pendingItems.length === 0) {
+        set({ isSyncing: false, lastSyncTime: new Date().toLocaleTimeString() });
+        isSyncRunningMutex = false;
+        return { success: 0, failed: 0, conflicts: 0 };
       }
-      return item;
-    });
 
-    set({ syncQueue: updated });
-    return { success: successCount, failed: failedCount };
+      // 2. An echten Backend-Endpunkt POST /api/v1/sync/push übertragen
+      const syncPayload = {
+        deviceId: offlineVault.getDeviceId(),
+        mutations: pendingItems.map((p) => ({
+          clientUuid: p.id,
+          entityType: p.entityType,
+          action: p.action,
+          clientTimestamp: p.occurredAt,
+          baseVersion: p.baseVersion,
+          payload: p.payload
+        }))
+      };
+
+      let serverResponse: any = null;
+      try {
+        serverResponse = await apiClient.post('/sync/push', syncPayload);
+      } catch (networkErr) {
+        // Netzwerkfehler: Keine Mutationen löschen oder als synchronisiert markieren!
+        console.warn('[SYNC PUSH NETWORK FAILED] Verbindung fehlgeschlagen, Outbox bleibt erhalten:', networkErr);
+        for (const item of pendingItems) {
+          await offlineVault.updateMutationStatus(item.id, 'FAILED', {
+            errorMessage: 'Netzwerkfehler während Übertragung'
+          });
+        }
+        set({ isSyncing: false });
+        isSyncRunningMutex = false;
+        return { success: 0, failed: pendingItems.length, conflicts: 0 };
+      }
+
+      // 3. Nur mit bestätigter Serverquittung Status aktualisieren
+      if (serverResponse && Array.isArray(serverResponse)) {
+        for (const receipt of serverResponse) {
+          if (receipt.status === 'SYNCED') {
+            successCount++;
+            // Reale Bestätigung liegt vor -> Aus lokaler Outbox entfernen
+            await offlineVault.markSynced(receipt.clientUuid);
+          } else if (receipt.status === 'CONFLICT') {
+            conflictCount++;
+            // Konflikte MÜSSEN erhalten bleiben und dürfen nicht gelöscht werden!
+            await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', {
+              conflictDetails: receipt.conflictData
+            });
+          } else {
+            failedCount++;
+            await offlineVault.updateMutationStatus(receipt.clientUuid, 'FAILED', {
+              errorMessage: receipt.message || 'Server hat Mutation abgewiesen'
+            });
+          }
+        }
+      }
+
+      // Aktualisiere Store-Zustand
+      const remainingPending = await offlineVault.getPendingOutbox(currentTenantId);
+      set({
+        syncQueue: remainingPending.map((p) => ({
+          id: p.id,
+          tenantId: p.tenantId,
+          entityType: p.entityType as any,
+          action: p.action,
+          payload: p.payload,
+          createdAt: p.occurredAt,
+          retryCount: p.retryCount,
+          status: p.status === 'CONFLICT' ? 'conflict' : 'pending'
+        })),
+        isSyncing: false,
+        lastSyncTime: new Date().toLocaleTimeString()
+      });
+
+      if (successCount > 0) {
+        get().addNotification(
+          'Synchronisation erfolgreich',
+          `${successCount} Einträge erfolgreich mit PostgreSQL synchronisiert.`,
+          'info'
+        );
+      }
+
+      if (conflictCount > 0) {
+        get().addNotification(
+          'Synchronisationskonflikt erkannt',
+          `${conflictCount} Eintrag/Einträge erfordern manuelle Überprüfung im Sync-Manager.`,
+          'warning'
+        );
+      }
+    } catch (err: any) {
+      console.error('[CRITICAL SYNC ERROR]', err);
+    } finally {
+      isSyncRunningMutex = false;
+      set({ isSyncing: false });
+    }
+
+    return { success: successCount, failed: failedCount, conflicts: conflictCount };
   },
 
   resolveConflict: (queueId) => {
@@ -491,33 +531,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     set((state) => ({ notifications: state.notifications.filter((n) => n.id !== id) })),
 
   addNotification: (title, message, type) => {
-    const currentTenant = get().currentTenantId;
-    const severityMap: Record<string, NotificationDelivery['severity']> = {
-      info: 'INFO',
-      warning: 'WARNUNG',
-      alert: 'ALARM'
-    };
-
-    const newDelivery: NotificationDelivery = {
-      id: `nd-${Date.now()}`,
-      tenantId: currentTenant,
-      title,
-      message,
-      channel: 'IN_APP',
-      severity: severityMap[type] || 'INFO',
-      status: 'DELIVERED',
-      createdAt: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      deliveredAt: new Date().toISOString().replace('T', ' ').substring(0, 19),
-      read: false,
-      sourceModule: 'Automations'
-    };
-
     set((state) => ({
       notifications: [
         { id: `notif-${Date.now()}`, title, message, type, time: 'Gerade eben' },
         ...state.notifications
-      ],
-      notificationDeliveries: [newDelivery, ...state.notificationDeliveries]
+      ]
     }));
   },
 
@@ -591,229 +609,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     return 2;
   },
 
-  reportDefinitions: initialReportDefinitions,
-
-  addReportDefinition: (rep) => {
-    const newDef: ReportDefinition = {
-      ...rep,
-      id: `rep-${Date.now()}`,
-      tenantId: get().currentTenantId,
-      createdAt: new Date().toISOString().split('T')[0]
-    };
-    set((state) => ({ reportDefinitions: [newDef, ...state.reportDefinitions] }));
-  },
-
-  deleteReportDefinition: (id) => {
-    set((state) => ({
-      reportDefinitions: state.reportDefinitions.filter((r) => r.id !== id)
-    }));
-  },
-
-  calculateTenantKPIs: (): ControllingKPIs => {
-    const clients = get().getTenantClients();
-    const sites = get().getTenantSites();
-    const employees = get().getTenantEmployees();
-    const shifts = get().getTenantShifts();
-    const guardBook = get().getTenantGuardBook();
-    const tasks = get().getTenantTasks();
-    const keys = get().getTenantKeys();
-
-    const activeClientsCount = clients.length;
-    const activeSitesCount = sites.length;
-    const activeEmployeesCount = employees.filter((e) => e.status === 'Aktiv').length;
-
-    let totalPlannedHours = 0;
-    let totalActualHours = 0;
-
-    shifts.forEach((sh) => {
-      const hours = 12;
-      totalPlannedHours += hours;
-      if (sh.status === 'Besetzt') {
-        totalActualHours += hours;
-      }
-    });
-
-    const planFulfillmentRate = totalPlannedHours > 0
-      ? Math.round((totalActualHours / totalPlannedHours) * 100)
-      : 100;
-
-    const openCriticalIncidentsCount = guardBook.filter(
-      (g) => (g.priority === 'Kritisch' || g.priority === 'Dringend') && !g.resolved
-    ).length;
-
-    const overdueTasksCount = tasks.filter((t) => t.status !== 'Erledigt').length;
-
-    const expiringContractsCount = clients.filter((c) => {
-      const end = new Date(c.contractEnd).getTime();
-      const daysLeft = (end - Date.now()) / (1000 * 3600 * 24);
-      return daysLeft <= 90;
-    }).length;
-
-    const expiringQualificationsCount = employees.flatMap((emp) =>
-      emp.qualifications.filter((q) => {
-        const exp = new Date(q.expiryDate).getTime();
-        const daysLeft = (exp - Date.now()) / (1000 * 3600 * 24);
-        return daysLeft <= 30;
-      })
-    ).length;
-
-    const activeAlarmsCount = sites.reduce((sum, s) => sum + s.activeAlarms, 0);
-
-    const overdueKeysCount = keys.filter(
-      (k) => k.isOverdue || (k.status === 'Ausgegeben' && k.expectedReturn && new Date(k.expectedReturn).getTime() < Date.now())
-    ).length;
-
-    let score = 100;
-    score -= openCriticalIncidentsCount * 10;
-    score -= overdueKeysCount * 5;
-    score -= expiringQualificationsCount * 12;
-    const din77200ComplianceScore = Math.max(0, Math.min(100, score));
-
-    return {
-      activeClientsCount,
-      activeSitesCount,
-      activeEmployeesCount,
-      totalPlannedHours,
-      totalActualHours,
-      planFulfillmentRate,
-      openCriticalIncidentsCount,
-      overdueTasksCount,
-      expiringContractsCount,
-      expiringQualificationsCount,
-      activeAlarmsCount,
-      overdueKeysCount,
-      din77200ComplianceScore
-    };
-  },
-
-  // Mobile App State
-  shiftSwaps: initialShiftSwaps,
-  patrolScans: initialPatrolScans,
-  shiftHandovers: [],
-
-  addShiftSwapRequest: (req) => {
-    const { currentTenantId, isOnline, enqueueOfflineAction, addNotification } = get();
-    const newSwap: ShiftSwapRequest = {
-      ...req,
-      id: `swap-${Date.now()}`,
-      tenantId: currentTenantId,
-      status: 'ANGEFRAGT',
-      requestedAt: new Date().toISOString().replace('T', ' ').substring(0, 16)
-    };
-
-    set((state) => ({ shiftSwaps: [newSwap, ...state.shiftSwaps] }));
-
-    addNotification(
-      'Diensttausch-Anfrage eingereicht',
-      `Anfrage für Schicht an ${req.targetEmployeeName} übermittelt.`,
-      'info'
-    );
-
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'shift',
-        action: 'UPDATE',
-        payload: newSwap
-      });
-    }
-  },
-
-  approveShiftSwap: (swapId, approved) => {
-    const { currentUserName, addNotification } = get();
-    set((state) => ({
-      shiftSwaps: state.shiftSwaps.map((s) =>
-        s.id === swapId
-          ? {
-              ...s,
-              status: approved ? 'BESTAETIGT' : 'ABGELEHNT',
-              decidedAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
-              decidedByName: currentUserName
-            }
-          : s
-      )
-    }));
-
-    addNotification(
-      `Diensttausch ${approved ? 'bestätigt' : 'abgelehnt'}`,
-      `Entscheidung durch ${currentUserName} im Dienstplan protokolliert.`,
-      approved ? 'info' : 'warning'
-    );
-  },
-
-  addPatrolScan: (scan) => {
-    const { currentTenantId, isOnline, enqueueOfflineAction, addAuditLog } = get();
-    const scanId = `scan-${Date.now()}`;
-    const newScan: PatrolScanEvent = {
-      ...scan,
-      id: scanId,
-      tenantId: currentTenantId,
-      scannedAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
-      offlineCaptured: !isOnline
-    };
-
-    set((state) => ({ patrolScans: [newScan, ...state.patrolScans] }));
-
-    addAuditLog({
-      actorEmail: 'guard-mobile@secops.local',
-      actorRole: 'Wachdienstmitarbeiter',
-      actionType: 'INCIDENT_MOD',
-      severity: 'INFO',
-      targetEntity: `Checkpoint ${scan.checkpointCode}`,
-      details: `Kontrollpunkt ${scan.checkpointName} (${scan.method}) am Objekt ${scan.siteName} abgetastet.`,
-      ipAddress: '127.0.0.1'
-    });
-
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'patrol',
-        action: 'CREATE',
-        payload: newScan
-      });
-    }
-  },
-
-  submitShiftHandover: (handover) => {
-    const { currentTenantId, isOnline, enqueueOfflineAction, addAuditLog, addNotification } = get();
-    const handoverId = `ho-${Date.now()}`;
-    const protocol: ShiftHandoverProtocol = {
-      ...handover,
-      id: handoverId,
-      tenantId: currentTenantId,
-      handoverTime: new Date().toISOString().replace('T', ' ').substring(0, 16),
-      offlineCaptured: !isOnline
-    };
-
-    set((state) => ({ shiftHandovers: [protocol, ...state.shiftHandovers] }));
-
-    addAuditLog({
-      actorEmail: 'guard-mobile@secops.local',
-      actorRole: 'Wachdienstmitarbeiter',
-      actionType: 'INCIDENT_MOD',
-      severity: 'INFO',
-      targetEntity: `ShiftHandover ${handover.siteName}`,
-      details: `Schichtübergabe von ${handover.relievedGuardName} an ${handover.relievingGuardName} ordnungsgemäß quittiert.`,
-      ipAddress: '127.0.0.1'
-    });
-
-    addNotification(
-      'Schichtübergabe bestätigt',
-      `Übergabeprotokoll für ${handover.siteName} digital archiviert.`,
-      'info'
-    );
-
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'handover',
-        action: 'CREATE',
-        payload: protocol
-      });
-    }
-  },
-
-  // Datasets
   clients: initialClients,
   sites: initialSites,
   employees: initialEmployees,
@@ -881,18 +676,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     const { notificationDeliveries, currentTenantId } = get();
     return (notificationDeliveries || []).filter((nd) => nd.tenantId === currentTenantId);
   },
-  getTenantReportDefinitions: () => {
-    const { reportDefinitions, currentTenantId } = get();
-    return (reportDefinitions || []).filter((r) => r.tenantId === currentTenantId);
-  },
-  getTenantShiftSwaps: () => {
-    const { shiftSwaps, currentTenantId } = get();
-    return (shiftSwaps || []).filter((s) => s.tenantId === currentTenantId);
-  },
-  getTenantPatrolScans: () => {
-    const { patrolScans, currentTenantId } = get();
-    return (patrolScans || []).filter((p) => p.tenantId === currentTenantId);
-  },
 
   addClient: (c) => {
     const { currentTenantId } = get();
@@ -913,18 +696,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   addEmployee: (e) => {
-    const { currentTenantId, isOnline, enqueueOfflineAction } = get();
+    const { currentTenantId } = get();
     const newEmp: Employee = { ...e, tenantId: currentTenantId, id: `e-${Date.now()}` };
     set((state) => ({ employees: [newEmp, ...state.employees] }));
-
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'employee',
-        action: 'CREATE',
-        payload: newEmp
-      });
-    }
   },
 
   updateEmployee: (id, updates) =>
@@ -939,7 +713,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   assignShiftEmployee: (shiftId, employeeId, employeeName) => {
-    const { isOnline, currentTenantId, enqueueOfflineAction, employees, shifts } = get();
+    const { employees } = get();
     const emp = employees.find((e) => e.id === employeeId);
 
     let conflictReason: string | undefined = undefined;
@@ -963,18 +737,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           : sh
       )
     }));
-
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'shift',
-        action: 'UPDATE',
-        payload: { shiftId, employeeId, employeeName, status, conflictReason }
-      });
-    }
   },
 
-  addGuardBookEntry: (entry) => {
+  /**
+   * Wachbucheintrag erfassen:
+   * Wartet zwingend auf erfolgreiche lokale Speicherung in IndexedDB,
+   * bevor die Erfolgsmeldung in der UI angezeigt wird!
+   */
+  addGuardBookEntry: async (entry) => {
     const { currentTenantId, isOnline, enqueueOfflineAction, addTask, addNotification, addAuditLog } = get();
     const entryId = `gb-${Date.now()}`;
     const newEntry: GuardBookEntry = {
@@ -993,6 +763,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         }
       ]
     };
+
+    // Vor UI-Erfolg zwingend in IndexedDB sichern
+    await enqueueOfflineAction({
+      tenantId: currentTenantId,
+      entityType: 'guardbook',
+      action: 'CREATE',
+      payload: newEntry
+    });
 
     if (entry.priority === 'Kritisch' || entry.priority === 'Dringend') {
       const taskId = `t-inc-${Date.now()}`;
@@ -1030,13 +808,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       ipAddress: '194.25.101.44'
     });
 
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'guardbook',
-        action: 'CREATE',
-        payload: newEntry
-      });
+    // Wenn online: Direkt Hintergrund-Sync anstoßen
+    if (isOnline) {
+      get().triggerManualSync().catch(console.error);
     }
   },
 
@@ -1115,26 +889,15 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     })),
 
   addTask: (t) => {
-    const { currentTenantId, isOnline, enqueueOfflineAction } = get();
+    const { currentTenantId } = get();
     const newTask: TaskItem = {
       ...t,
       id: `t-${Date.now()}`,
-      tenantId: currentTenantId,
-      offlineCreated: !isOnline
+      tenantId: currentTenantId
     };
-
     set((state) => ({
       tasks: [newTask, ...state.tasks]
     }));
-
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'task',
-        action: 'CREATE',
-        payload: newTask
-      });
-    }
   },
 
   toggleTaskStatus: (taskId) =>
@@ -1152,9 +915,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       ...doc,
       id: `doc-${Date.now()}`,
       tenantId: currentTenantId,
-      uploadedAt: new Date().toISOString().replace('T', ' ').substring(0, 16),
-      sha256Hash: 'a7b1c3d4e5f60123456789abcdef0123456789abcdef0123456789abcdef0123',
-      scannedClean: true
+      uploadedAt: new Date().toISOString().replace('T', ' ').substring(0, 16)
     };
     set((state) => ({ documents: [newDoc, ...state.documents] }));
   },
