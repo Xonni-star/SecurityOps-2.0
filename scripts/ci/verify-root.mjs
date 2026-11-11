@@ -73,10 +73,10 @@ if (backendScript === 'npm run dev --prefix frontend/backend') {
   fail(`dev-backend zeigt nicht auf "frontend/backend": "${backendScript}"`);
 }
 
-if (/--prefix\s+backend(\s|$)/.test(backendScript)) {
-  fail(`dev-backend verwendet noch das Google-Cloud-Proxy-Verzeichnis: "${backendScript}"`);
+if (fs.existsSync('backend/server.js') || fs.existsSync('backend/package.json')) {
+  fail('Das entfernte Root-Backend ist weiterhin vorhanden.');
 } else {
-  ok('dev-backend verwendet nicht das Google-Cloud-Proxy-Verzeichnis');
+  ok('Kein zusätzliches Root-Backend oder externer KI-Proxy vorhanden');
 }
 
 // 4. Keine unbeabsichtigten Abhängigkeiten auf das Proxy-Backend

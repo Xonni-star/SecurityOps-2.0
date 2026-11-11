@@ -1,4 +1,6 @@
 # SecurityOps 2.0 – Systemaudit und Priorität-1-Teilintegration
+> **Historischer Snapshot:** Dieses Audit stammt aus einem früheren Entwicklungsstand. Darin erwähnte KI-/Proxy-Funktionen sind in Schritt 5R.3.4 aus dem Produkt entfernt worden und stellen keinen aktuellen Bestand dar.
+
 
 **Stand:** 2026-11-11
 **Code-Commit:** `25f820869ff2aa391a3ef38be2c133991f9ebd3c`

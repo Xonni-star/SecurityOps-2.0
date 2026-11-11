@@ -348,4 +348,27 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect((tasksResponse.body.data as Array<{ id: string }>).some((row) => row.id === createdTaskId)).toBe(false);
   });
 
+  test('8. Wachbucheinträge können weiterhin manuell über die geschützte API gespeichert und geladen werden', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    const title = `Manueller Regressionseintrag ${Date.now()}`;
+    const create = await request(app)
+      .post('/api/v1/logbook')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        siteId: 'b1111111-1111-1111-1111-111111111111',
+        guardId: 'e1111111-1111-1111-1111-111111111111',
+        category: 'Vorkommnis',
+        priority: 'Normal',
+        title,
+        description: 'Manuell dokumentierter Regressionstest des Wachbuchs.',
+        policeInvolved: false
+      });
+    expect(create.status).toBe(201);
+    expect(create.body.data.title).toBe(title);
+
+    const list = await request(app).get('/api/v1/logbook').set('Authorization', `Bearer ${token}`);
+    expect(list.status).toBe(200);
+    expect(list.body.data).toEqual(expect.arrayContaining([expect.objectContaining({ title })]));
+  });
+
 });

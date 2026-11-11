@@ -10,7 +10,6 @@ import * as clientController from './controllers/clientController';
 import * as guardbookController from './controllers/guardbookController';
 import * as syncController from './controllers/syncController';
 import * as resourceController from './controllers/resourceController';
-import * as aiController from './controllers/aiController';
 
 export const app = express();
 
@@ -35,29 +34,7 @@ const corsOptions: CorsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use((req, res, next) => {
-  const limit = req.path.startsWith('/api/v1/ai/') ? '20kb' : '15mb';
-  express.json({ limit })(req, res, next);
-});
-
-// KI-Aufrufe sind kostenpflichtige externe Requests: maximal 10 je Benutzer/IP pro Minute.
-const aiRequestTimes = new Map<string, number[]>();
-function limitAiRequests(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  const declaredLength = Number(req.headers['content-length'] || 0);
-  const bodyLength = Buffer.byteLength(JSON.stringify(req.body ?? {}), 'utf8');
-  if (declaredLength > 20 * 1024 || bodyLength > 20 * 1024) {
-    res.status(413).json({ success: false, message: 'KI-Anfrage ist zu groß.' }); return;
-  }
-  const key = req.user?.userId || req.ip || 'unknown';
-  const now = Date.now();
-  const recent = (aiRequestTimes.get(key) || []).filter((time) => now - time < 60_000);
-  if (recent.length >= 10) { res.status(429).json({ success: false, message: 'Zu viele KI-Anfragen. Bitte später erneut versuchen.' }); return; }
-  recent.push(now); aiRequestTimes.set(key, recent);
-  if (aiRequestTimes.size > 2_000) {
-    for (const [id, times] of aiRequestTimes) if (times.every((time) => now - time >= 60_000)) aiRequestTimes.delete(id);
-  }
-  next();
-}
+app.use(express.json({ limit: '15mb' }));
 
 // Health- & Readiness-Endpunkt
 app.get('/api/v1/health', async (req, res) => {
@@ -110,10 +87,6 @@ app.patch('/api/v1/employees/:id', authenticateJwt, requirePermission('employees
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
 app.post('/api/v1/logbook/revisions', authenticateJwt, requirePermission('logbook:create'), guardbookController.addGuardbookRevision);
-
-// KI liest ausschließlich vom Request gelieferte Inhalte, leitet Mandant und Berechtigung aber aus dem JWT ab.
-app.post('/api/v1/ai/incident-analysis', authenticateJwt, requirePermission('logbook:read'), limitAiRequests, aiController.analyzeIncident);
-app.post('/api/v1/ai/copilot', authenticateJwt, requirePermission('logbook:read'), limitAiRequests, aiController.copilot);
 
 // Offline-Synchronisations-Endpunkte
 app.post('/api/v1/sync/push', authenticateJwt, requirePermission('logbook:create'), syncController.pushSyncMutations);

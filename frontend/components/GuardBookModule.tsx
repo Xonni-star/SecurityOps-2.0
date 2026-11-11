@@ -7,7 +7,6 @@ import {
   Filter,
   CheckCircle2,
   Clock,
-  Sparkles,
   ShieldCheck,
   Camera,
   MapPin,
@@ -19,7 +18,6 @@ import {
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
 import { GuardBookEntry } from '../types';
-import { generateIncidentAnalysis, IncidentAnalysisResult } from '../geminiService';
 import { offlineVault } from '../services/indexedDbService';
 
 export const GuardBookModule: React.FC = () => {
@@ -52,9 +50,6 @@ export const GuardBookModule: React.FC = () => {
   const [policeInvolved, setPoliceInvolved] = useState(false);
   const [photoPreview, setPhotoPreview] = useState<string | null>(null);
 
-  // AI Assistant in modal
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [aiAnalysis, setAiAnalysis] = useState<IncidentAnalysisResult | null>(null);
 
   const filteredLogs = guardBook.filter((entry) => {
     const matchesCategory = categoryFilter === 'ALL' || entry.category === categoryFilter;
@@ -80,32 +75,6 @@ export const GuardBookModule: React.FC = () => {
       setPhotoPreview(uploadEvent.target?.result as string);
     };
     reader.readAsDataURL(file);
-  };
-
-  const handleAIAssist = async () => {
-    if (!description.trim()) {
-      alert('Bitte geben Sie zuerst einige Stichpunkte zum Vorfall in das Beschreibungsfeld ein.');
-      return;
-    }
-    setIsAnalyzing(true);
-    const siteObj = sites.find((s) => s.id === selectedSiteId);
-    const guardObj = employees.find((e) => e.id === selectedGuardId);
-
-    try {
-      const result = await generateIncidentAnalysis(
-        description,
-        siteObj?.name || 'Sicherheitsobjekt',
-        guardObj ? `${guardObj.firstName} ${guardObj.lastName}` : 'Wachkraft'
-      );
-      setAiAnalysis(result);
-      // Nur den noch nicht gespeicherten Entwurf befüllen; die KI schreibt nie selbst ins Wachbuch.
-      setTitle(result.formalTitle);
-      setDescription(result.formalReportDraft);
-    } catch {
-      alert('Die KI-Analyse ist derzeit nicht verfügbar. Bitte versuchen Sie es später erneut.');
-    } finally {
-      setIsAnalyzing(false);
-    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -459,20 +428,7 @@ export const GuardBookModule: React.FC = () => {
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-slate-400 font-medium">Detaillierter Sachverhalt *</label>
-                  {isOnline && (
-                    <button
-                      type="button"
-                      onClick={handleAIAssist}
-                      disabled={isAnalyzing}
-                      className="flex items-center gap-1.5 text-blue-400 hover:text-blue-300 text-xs font-semibold px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 transition disabled:opacity-50"
-                    >
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>{isAnalyzing ? 'KI formuliert...' : 'KI-Vorschlag erstellen (fachlich prüfen)'}</span>
-                    </button>
-                  )}
-                </div>
+                <label className="block text-slate-400 font-medium mb-1">Detaillierter Sachverhalt *</label>
                 <textarea
                   rows={4}
                   value={description}

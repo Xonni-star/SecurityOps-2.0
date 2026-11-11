@@ -1,7 +1,6 @@
 import React from 'react';
 import {
   Shield,
-  Sparkles,
   Bell,
   Search,
   Wifi,
@@ -19,7 +18,6 @@ import { useSecurityStore } from '../store';
 import { UserRole } from '../types';
 
 interface NavbarProps {
-  onOpenCopilot: () => void;
   onOpenNotifications: () => void;
   onOpenSyncManager: () => void;
   onOpenModuleManager: () => void;
@@ -28,7 +26,6 @@ interface NavbarProps {
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
-  onOpenCopilot,
   onOpenNotifications,
   onOpenSyncManager,
   onOpenModuleManager,
@@ -182,14 +179,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </button>
         </div>
-
-        <button
-          onClick={onOpenCopilot}
-          className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-blue-600/20 to-purple-600/20 hover:from-blue-600/30 hover:to-purple-600/30 border border-blue-500/40 text-blue-300 text-xs font-semibold shadow-sm transition-all"
-        >
-          <Sparkles className="w-3.5 h-3.5 text-blue-400" />
-          <span className="hidden md:inline">KI-Assistent</span>
-        </button>
 
         <button
           onClick={onOpenNotifications}

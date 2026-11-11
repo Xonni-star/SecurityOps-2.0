@@ -21,7 +21,6 @@ import { E2EAcceptanceCenter } from './components/E2EAcceptanceCenter';
 import { BackendLiveConsole } from './components/BackendLiveConsole';
 import { MobileAppShell } from './components/MobileAppShell';
 import { IllustratedUserGuide } from './components/IllustratedUserGuide';
-import { AICopilotModal } from './components/AICopilotModal';
 import { SyncManagerModal } from './components/SyncManagerModal';
 import { ModuleManager } from './components/ModuleManager';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
@@ -94,7 +93,6 @@ export default function App(): React.ReactNode {
     isLoadingData,
     dataLoadError
   } = useSecurityStore();
-  const [isCopilotOpen, setIsCopilotOpen] = useState(false);
   const [isNotifCenterOpen, setIsNotifCenterOpen] = useState(false);
   const [isSyncManagerOpen, setIsSyncManagerOpen] = useState(false);
   const [isModuleManagerOpen, setIsModuleManagerOpen] = useState(false);
@@ -178,7 +176,6 @@ export default function App(): React.ReactNode {
       <div className="min-h-screen bg-[#0a0f1d] dark:bg-[#0a0f1d] text-slate-100 flex flex-col font-sans transition-colors selection:bg-blue-600 selection:text-white">
         {/* Top Header */}
         <Navbar
-          onOpenCopilot={() => setIsCopilotOpen(true)}
           onOpenNotifications={() => setIsNotifCenterOpen(true)}
           onOpenSyncManager={() => setIsSyncManagerOpen(true)}
           onOpenModuleManager={() => setIsModuleManagerOpen(true)}
@@ -230,7 +227,6 @@ export default function App(): React.ReactNode {
         </div>
 
         <GlobalSearchModal isOpen={isGlobalSearchOpen} onClose={() => setIsGlobalSearchOpen(false)} />
-        <AICopilotModal isOpen={isCopilotOpen} onClose={() => setIsCopilotOpen(false)} />
         <SyncManagerModal isOpen={isSyncManagerOpen} onClose={() => setIsSyncManagerOpen(false)} />
         <ModuleManager isOpen={isModuleManagerOpen} onClose={() => setIsModuleManagerOpen(false)} />
         <NotificationCenterModal isOpen={isNotifCenterOpen} onClose={() => setIsNotifCenterOpen(false)} />

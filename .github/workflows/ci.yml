@@ -53,7 +53,6 @@ jobs:
       JWT_SECRET: ${{ secrets.JWT_SECRET }}
       JWT_EXPIRES_IN: 8h
       CORS_ORIGIN: http://localhost:3000
-      GEMINI_API_KEY: ''
       DATABASE_MIGRATION_URL: ${{ secrets.DATABASE_MIGRATION_URL || 'postgresql://secops_admin@127.0.0.1:5432/securityops_v2' }}
       DATABASE_URL: ${{ secrets.DATABASE_URL || 'postgresql://secops_app_user@127.0.0.1:5432/securityops_v2' }}
 
@@ -128,10 +127,10 @@ jobs:
       - name: Produktions-Build erzeugen
         run: npm run build
 
-      - name: Frontend-Build auf direkte Gemini-Verbindungen und Schlüssel prüfen
+      - name: Frontend-Build auf verbliebene Modell-API-Verbindungen und Schlüssel prüfen
         run: |
-          if grep -R -E 'generativelanguage\.googleapis\.com|process\.env\.API_KEY|AIza[0-9A-Za-z_-]{30,}' dist; then
-            echo 'Gemini-Endpunkt oder API-Schlüsselindikator im Frontend-Build gefunden.' >&2
+          if grep -R -E 'generativelanguage\.googleapis\.com|aiplatform\.(googleapis|clients6)\.com|api\.openai\.com|process\.env\.(API_KEY|GEMINI_API_KEY)|AIza[0-9A-Za-z_-]{30,}' dist; then
+            echo 'Modell-API-Endpunkt oder API-Schlüsselindikator im Frontend-Build gefunden.' >&2
             exit 1
           fi
 
@@ -171,7 +170,6 @@ jobs:
       JWT_SECRET: ${{ secrets.JWT_SECRET }}
       JWT_EXPIRES_IN: 8h
       CORS_ORIGIN: http://localhost:3000
-      GEMINI_API_KEY: ''
       DATABASE_MIGRATION_URL: ${{ secrets.DATABASE_MIGRATION_URL || 'postgresql://secops_admin@127.0.0.1:5432/securityops_v2' }}
       DATABASE_URL: ${{ secrets.DATABASE_URL || 'postgresql://secops_app_user@127.0.0.1:5432/securityops_v2' }}
 

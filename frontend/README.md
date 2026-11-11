@@ -8,7 +8,7 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 - **Frontend**: `frontend/` (bzw. Root-Verzeichnis bei flachem Checkout). React 18+/19 SPA mit Tailwind CSS, Zustand Store, IndexedDB Vault und Vitest-Testumgebung.
 - **SecurityOps TypeScript-Backend**: `frontend/backend/` (bzw. `backend/` bei flacher Monorepo-Struktur). Enthält die vollwertige Node.js/Express/TypeScript REST-API (`/api/v1`), PostgreSQL RLS-Transaktionen und die Idempotenz-Engine.
-- **WICHTIGER HINWEIS**: Das separate Root-Verzeichnis `backend/` (sofern im Repository vorhanden) ist ein eigenständiges Google-Cloud-Proxy-Backend und **nicht** das SecurityOps-Datenbank- und Anwendungsbackend! Alle SecurityOps-Backend-Befehle werden unter `frontend/backend/` ausgeführt.
+- Es gibt kein separates Root-Proxy-Backend. Alle SecurityOps-Backend-Befehle werden unter `frontend/backend/` ausgeführt.
 
 ---
 

@@ -1,4 +1,6 @@
 # SecurityOps 2.0 – Entwicklungsschritt 5R.3.2
+> **Historischer Snapshot:** Dieser Bericht hält den Stand vor Schritt 5R.3.4 fest. Damals erwähnte KI-/Proxy-Funktionen wurden in Schritt 5R.3.4 vollständig aus dem Produkt entfernt; die folgenden Angaben sind kein aktueller Funktions- oder Architekturstatus.
+
 ## Produktionsdeployment vollständig auf das TypeScript-Backend umstellen
 
 **Durchgeführt am:** 2026-11-11  

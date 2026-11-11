@@ -49,7 +49,7 @@ Alle Abbildungen sind im zentralen Dokumentationsverzeichnis `docs/handbuch/imag
 1. Öffnen Sie das **Digitale Wachbuch** über die Navigation oder mit dem Tastenkürzel **Ctrl+K**.
 2. Klicken Sie auf **Ereignis erfassen**.
 3. Wählen Sie das Schutzobjekt, die Wachkraft, Kategorie und Priorität (`Normal`, `Dringend`, `Kritisch`).
-4. **KI-Unterstützung**: Tippen Sie kurze Stichpunkte ein und klicken Sie auf **Mit KI behördensicher formulieren**. Die integrierte Gemini 2.5 Flash Engine formuliert den Bericht revisionssicher und nach DIN 77200.
+4. **Manuelle Dokumentation**: Erfassen Sie Titel und Sachverhalt selbst. Prüfen Sie die Angaben auf Vollständigkeit, Sachlichkeit sowie korrekte Zeiten und Beteiligte, bevor Sie den Eintrag speichern.
 5. **Append-Only Sicherung**: Korrekturen werden als unzerstörbare Revisionen (`LogbookRevisionEntry`) angehängt.
 
 ---

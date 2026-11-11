@@ -1,4 +1,6 @@
 # SecurityOps 2.0 – Schritt 5R.3.3 Bericht
+> **Historischer Snapshot:** Dieser Bericht dokumentiert einen Zwischenstand. Sämtliche darin beschriebenen KI-Funktionen wurden im Folgeschritt 5R.3.4 entfernt; die Angaben beschreiben nicht den aktuellen Produktumfang.
+
 
 ## Geänderte Dateien
 

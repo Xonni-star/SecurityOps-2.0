@@ -1,4 +1,6 @@
 # SecurityOps 2.0 - Abschlussbericht Schritt 5R.2.9
+> **Historischer Snapshot:** Dieser frühere Bericht referenziert ein separates Root-Proxy-Backend. Dieses wurde in Schritt 5R.3.4 vollständig aus dem Repository entfernt.
+
 ## Vitest-Frontend-Testkonfiguration & Verzeichnis-Klarstellung
 
 ### 1. Ausgeführte Arbeiten & Korrekturen

@@ -1,4 +1,6 @@
 # SecurityOps 2.0 – Schritt 5R.2.20
+> **Historischer Snapshot:** Dieser frühere Bericht referenziert ein separates Root-Proxy-Backend. Dieses wurde in Schritt 5R.3.4 vollständig aus dem Repository entfernt.
+
 ## Root-Projekt in CI integrieren und Gesamtstart absichern
 
 **Ausgangsstand:** `main` @ `e54b897`

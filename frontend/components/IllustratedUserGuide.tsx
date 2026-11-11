@@ -116,7 +116,7 @@ export const IllustratedUserGuide: React.FC = () => {
       title: '3. Digitales Wachbuch & Vorfallsmanagement (DIN 77200)',
       badge: 'Operativ / Wachdienst',
       category: 'Einsatz & Mobil',
-      summary: 'Revisionssichere Erfassung von Kontrollgängen, Schichtübergaben und Vorkommnissen mit KI-Rechtswürdigung und Append-Only Historie.',
+      summary: 'Manuelle Erfassung von Kontrollgängen, Schichtübergaben und Vorkommnissen mit Append-Only Historie.',
       svgDiagramType: 'guardbook_entry',
       steps: [
         {
@@ -133,9 +133,9 @@ export const IllustratedUserGuide: React.FC = () => {
         },
         {
           stepNumber: 3,
-          title: 'KI-Assistent zur Formulierung nutzen',
-          description: 'Geben Sie Stichpunkte ein und klicken Sie auf "Mit KI behördensicher formulieren". Die Gemini-KI erstellt einen rechtskonformen Bericht nach StGB / BGB.',
-          calloutTarget: 'KI-Button'
+          title: 'Bericht manuell formulieren',
+          description: 'Dokumentieren Sie den beobachteten Sachverhalt in eigenen Worten. Prüfen Sie Angaben, Zeiten und Beteiligte vor dem Speichern.',
+          calloutTarget: 'Sachverhaltsfeld'
         },
         {
           stepNumber: 4,

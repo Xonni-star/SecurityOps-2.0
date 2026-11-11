@@ -1,4 +1,6 @@
 # SecurityOps 2.0 - Phase 1: Echtes Backend & PostgreSQL-Datenbank
+> **Historischer Snapshot:** Dokumentation des früheren Phase-1-Stands. Die damals erwähnte optionale KI-Integration wurde im Schritt 5R.3.4 aus der Software entfernt.
+
 
 ## 1. Bestandsaufnahme des bestehenden Projekts
 

@@ -391,5 +391,11 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
       .get('/api/v1/customers')
       .set('Authorization', `Bearer ${adminToken}`);
     expect(res.status).toBe(403);
+
+    const logbookRes = await request(app)
+      .post('/api/v1/logbook')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({});
+    expect(logbookRes.status).toBe(403);
   });
 });

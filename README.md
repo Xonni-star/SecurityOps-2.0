@@ -14,9 +14,7 @@ Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 7720
 |---|---|
 | `frontend/` | React-19-SPA mit Vite, TypeScript, Zustand-Store, IndexedDB-Outbox und Vitest |
 | `frontend/backend/` | Node.js/Express/TypeScript-REST-API (`/api/v1`) mit PostgreSQL 16+ Row-Level-Security, JWT und Argon2id |
-| `backend/` | Separater Google-Cloud-/Vertex-AI-Proxy — **nicht** das SecurityOps-Anwendungsbackend |
-
-> **Wichtig:** Alle SecurityOps-Backend-Befehle (Migrationen, Seed, Tests) laufen unter `frontend/backend/`, nicht unter dem Root-`backend/`.
+Es gibt kein separates Root-Proxy-Backend. Alle SecurityOps-Backend-Befehle (Migrationen, Seed, Tests) laufen unter `frontend/backend/`.
 
 ---
 

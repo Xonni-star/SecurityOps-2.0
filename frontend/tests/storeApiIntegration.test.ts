@@ -25,6 +25,7 @@ vi.mock('../services/apiClient', () => {
 
 import { useSecurityStore } from '../store';
 import { apiClient } from '../services/apiClient';
+import { offlineVault } from '../services/indexedDbService';
 
 const mockedApi = apiClient as unknown as {
   get: ReturnType<typeof vi.fn>;
@@ -156,6 +157,63 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
 
     expect(state.isLoadingData).toBe(false);
     expect(state.dataLoadError).toBeNull();
+  });
+
+  test('Wachbucheintrag bleibt manuell erfassbar und wird offline in der mandantengebundenen Outbox gesichert', async () => {
+    const mutationWrite = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
+    useSecurityStore.setState({
+      isOnline: false,
+      currentTenantId: 'tenant-frankfurt',
+      currentUserId: 'user-regression'
+    });
+
+    await useSecurityStore.getState().addGuardBookEntry({
+      siteId: siteRow.id,
+      siteName: siteRow.name,
+      guardId: employeeRow.id,
+      guardName: 'Erika Muster',
+      category: 'Vorkommnis',
+      priority: 'Normal',
+      stage: 'Erfasst',
+      title: 'Manuell erfasster Vorfall',
+      description: 'Sachverhalt wurde von der Wachkraft selbst eingetragen.',
+      policeInvolved: false,
+      resolved: false
+    });
+
+    const state = useSecurityStore.getState();
+    expect(state.guardBook).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'Manuell erfasster Vorfall', description: 'Sachverhalt wurde von der Wachkraft selbst eingetragen.' })
+    ]));
+    expect(state.syncQueue[0]).toMatchObject({
+      tenantId: 'tenant-frankfurt',
+      entityType: 'guardbook',
+      action: 'CREATE',
+      status: 'pending'
+    });
+    expect(mutationWrite).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: 'tenant-frankfurt', entityType: 'guardbook', action: 'CREATE'
+    }));
+  });
+
+  test('Regelbasierte Automatisierungsregeln bleiben tenantbezogen steuerbar', () => {
+    useSecurityStore.setState({ currentTenantId: 'tenant-frankfurt', automations: [] });
+    useSecurityStore.getState().addAutomationRule({
+      name: 'Wachbuch-Regression',
+      description: 'Regelbasierter Test ohne externen Dienst',
+      trigger: 'LOGBOOK_ENTRY_CREATED',
+      conditions: [{ field: 'priority', operator: 'equals', value: 'Kritisch' }],
+      actions: [{ type: 'NOTIFY_MANAGER' }],
+      active: true,
+      category: 'Wachbuch',
+      actionsTriggeredCount: 0
+    });
+    const rule = useSecurityStore.getState().getTenantAutomations()[0];
+    expect(rule.tenantId).toBe('tenant-frankfurt');
+    expect(useSecurityStore.getState().testRunRule(rule.id)).toMatchObject({ matched: true, actions: ['NOTIFY_MANAGER'] });
+
+    useSecurityStore.getState().toggleAutomationRule(rule.id);
+    expect(useSecurityStore.getState().getTenantAutomations()[0].active).toBe(false);
   });
 
   test('2. addClient persistiert über POST /customers und übernimmt die Server-ID', async () => {
