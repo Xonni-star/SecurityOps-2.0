@@ -6,20 +6,24 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "react": "latest",
-    "react-dom": "latest",
     "@google/genai": "latest",
     "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
     "recharts": "latest",
     "zustand": "latest"
   },
   "devDependencies": {
     "@types/node": "latest",
     "@vitejs/plugin-react": "latest",
+    "jsdom": "^31.0.0",
     "typescript": "latest",
-    "vite": "latest"
+    "vite": "latest",
+    "vitest": "^5.1.0"
   }
 }
