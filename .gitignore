@@ -1,0 +1,4 @@
+# Nicht ins Repo
+backend/.env.local
+docker-compose.yml
+**/docker-compose.yml
