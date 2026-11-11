@@ -283,9 +283,9 @@ interface SecurityOpsStore {
 
   // Actions
   addClient: (client: Omit<Client, 'id' | 'tenantId'>) => Promise<void>;
-  addSite: (site: Omit<Site, 'id' | 'tenantId'>) => void;
-  addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => void;
-  updateEmployee: (id: string, updates: Partial<Employee>) => void;
+  addSite: (site: Omit<Site, 'id' | 'tenantId'>) => Promise<void>;
+  addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => Promise<void>;
+  updateEmployee: (id: string, updates: Partial<Employee>) => Promise<void>;
   addShift: (shift: Omit<Shift, 'id' | 'tenantId'>) => void;
   assignShiftEmployee: (shiftId: string, employeeId: string, employeeName: string) => void;
   addGuardBookEntry: (entry: Omit<GuardBookEntry, 'id' | 'timestamp' | 'tenantId'>) => Promise<void>;
@@ -1087,22 +1087,136 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
-  addSite: (s) => {
+  addSite: async (s) => {
     const { currentTenantId } = get();
-    const newSite: Site = { ...s, tenantId: currentTenantId, id: `s-${Date.now()}` };
-    set((state) => ({ sites: [newSite, ...state.sites] }));
+
+    try {
+      const created = await apiClient.post<any>('/sites', {
+        clientId: s.clientId,
+        siteCode: s.siteCode,
+        name: s.name,
+        address: s.address,
+        securityLevel: s.securityLevel,
+        requiredGuardsDay: s.requiredGuardsDay,
+        requiredGuardsNight: s.requiredGuardsNight,
+        alarmSystem: s.alarmSystem,
+        accessRules: s.accessRules
+      });
+
+      const newSite = mapSiteRow(
+        {
+          ...created,
+          client_name: s.clientName,
+          site_code: s.siteCode,
+          name: s.name,
+          address: s.address,
+          security_level: s.securityLevel,
+          required_guards_day: s.requiredGuardsDay,
+          required_guards_night: s.requiredGuardsNight,
+          alarm_system: s.alarmSystem,
+          access_rules: s.accessRules
+        },
+        currentTenantId
+      );
+
+      set((state) => ({ sites: [newSite, ...state.sites] }));
+      get().addNotification('Objekt gespeichert', `${s.name} wurde in PostgreSQL gespeichert.`, 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Objekt nicht gespeichert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
+        'alert'
+      );
+    }
   },
 
-  addEmployee: (e) => {
+  addEmployee: async (e) => {
     const { currentTenantId } = get();
-    const newEmp: Employee = { ...e, tenantId: currentTenantId, id: `e-${Date.now()}` };
-    set((state) => ({ employees: [newEmp, ...state.employees] }));
+
+    try {
+      const created = await apiClient.post<any>('/employees', {
+        personnelNumber: e.personnelNumber,
+        firstName: e.firstName,
+        lastName: e.lastName,
+        email: e.email,
+        phone: e.phone,
+        role: String(e.role),
+        status: e.status,
+        weeklyHours: e.weeklyHours,
+        hourlyRate: e.hourlyRate,
+        dateOfJoining: e.dateOfJoining
+      });
+
+      const newEmp = mapEmployeeRow(
+        {
+          ...created,
+          personnel_number: e.personnelNumber,
+          first_name: e.firstName,
+          last_name: e.lastName,
+          email: e.email,
+          phone: e.phone,
+          role: String(e.role),
+          status: e.status,
+          weekly_hours: e.weeklyHours,
+          hourly_rate: e.hourlyRate,
+          date_of_joining: e.dateOfJoining
+        },
+        currentTenantId
+      );
+
+      set((state) => ({ employees: [newEmp, ...state.employees] }));
+      get().addNotification(
+        'Mitarbeiter gespeichert',
+        `${e.firstName} ${e.lastName} wurde in PostgreSQL gespeichert.`,
+        'info'
+      );
+    } catch (error: any) {
+      get().addNotification(
+        'Mitarbeiter nicht gespeichert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
+        'alert'
+      );
+    }
   },
 
-  updateEmployee: (id, updates) =>
-    set((state) => ({
-      employees: state.employees.map((emp) => (emp.id === id ? { ...emp, ...updates } : emp))
-    })),
+  updateEmployee: async (id, updates) => {
+    const payload: Record<string, unknown> = {};
+    const allowed: Array<keyof Employee> = [
+      'personnelNumber',
+      'firstName',
+      'lastName',
+      'email',
+      'phone',
+      'role',
+      'status',
+      'weeklyHours',
+      'hourlyRate',
+      'dateOfJoining'
+    ];
+
+    for (const key of allowed) {
+      const value = updates[key];
+      if (value !== undefined) {
+        payload[key as string] = key === 'role' ? String(value) : value;
+      }
+    }
+
+    try {
+      await apiClient.patch(`/employees/${id}`, payload);
+      set((state) => ({
+        employees: state.employees.map((emp) =>
+          emp.id === id ? { ...emp, ...updates, synced: true } : emp
+        )
+      }));
+      get().addNotification('Mitarbeiter aktualisiert', 'Die Änderung wurde in PostgreSQL gespeichert.', 'info');
+    } catch (error: any) {
+      get().addNotification(
+        'Mitarbeiter nicht aktualisiert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
+        'alert'
+      );
+    }
+  },
 
   addShift: (s) => {
     const { currentTenantId } = get();

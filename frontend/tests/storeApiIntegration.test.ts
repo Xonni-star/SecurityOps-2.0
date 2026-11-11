@@ -29,6 +29,7 @@ import { apiClient } from '../services/apiClient';
 const mockedApi = apiClient as unknown as {
   get: ReturnType<typeof vi.fn>;
   post: ReturnType<typeof vi.fn>;
+  patch: ReturnType<typeof vi.fn>;
   setToken: ReturnType<typeof vi.fn>;
 };
 
@@ -235,4 +236,99 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(state.clients).toHaveLength(1);
     expect(state.guardBook).toHaveLength(1);
   });
+
+  test('5. addSite persistiert ein Objekt über POST /sites', async () => {
+    mockedApi.post.mockResolvedValueOnce({
+      id: '66666666-6666-6666-6666-666666666666',
+      client_id: '11111111-1111-1111-1111-111111111111',
+      site_code: 'OBJ-API-2',
+      name: 'Persistiertes Objekt',
+      address: 'Objektweg 2',
+      security_level: 'Hoch (KRITIS / BSI)',
+      required_guards_day: 2,
+      required_guards_night: 1,
+      alarm_system: 'EMA',
+      access_rules: 'Zutrittskontrolle'
+    });
+
+    await useSecurityStore.getState().addSite({
+      clientId: '11111111-1111-1111-1111-111111111111',
+      clientName: 'API Test GmbH',
+      siteCode: 'OBJ-API-2',
+      name: 'Persistiertes Objekt',
+      address: 'Objektweg 2',
+      securityLevel: 'Hoch (KRITIS / BSI)',
+      siteManagerId: '',
+      siteManagerName: 'Nicht zugewiesen',
+      requiredGuardsDay: 2,
+      requiredGuardsNight: 1,
+      checkpoints: [],
+      alarmSystem: 'EMA',
+      instructionsCount: 0,
+      accessRules: 'Zutrittskontrolle',
+      activeAlarms: 0
+    });
+
+    expect(mockedApi.post).toHaveBeenCalledWith(
+      '/sites',
+      expect.objectContaining({ siteCode: 'OBJ-API-2', name: 'Persistiertes Objekt' })
+    );
+
+    const state = useSecurityStore.getState();
+    expect(state.sites[0].id).toBe('66666666-6666-6666-6666-666666666666');
+    expect(state.sites[0].name).toBe('Persistiertes Objekt');
+    expect(state.notifications[0].title).toBe('Objekt gespeichert');
+  });
+
+  test('6. addEmployee und updateEmployee persistieren über POST/PATCH', async () => {
+    mockedApi.post.mockResolvedValueOnce({
+      id: '77777777-7777-7777-7777-777777777777',
+      personnel_number: 'MA-API-2',
+      first_name: 'Erika',
+      last_name: 'Muster',
+      email: 'erika@test.de',
+      phone: '+49 171 123',
+      role: 'Wachdienstmitarbeiter',
+      status: 'Aktiv',
+      weekly_hours: 40,
+      hourly_rate: 19.5,
+      date_of_joining: '2026-01-01'
+    });
+
+    await useSecurityStore.getState().addEmployee({
+      personnelNumber: 'MA-API-2',
+      firstName: 'Erika',
+      lastName: 'Muster',
+      email: 'erika@test.de',
+      phone: '+49 171 123',
+      role: 'Wachdienstmitarbeiter' as any,
+      status: 'Aktiv',
+      weeklyHours: 40,
+      qualifications: [],
+      assignedSiteIds: [],
+      hourlyRate: 19.5,
+      dateOfJoining: '2026-01-01'
+    });
+
+    expect(mockedApi.post).toHaveBeenCalledWith(
+      '/employees',
+      expect.objectContaining({ personnelNumber: 'MA-API-2', status: 'Aktiv' })
+    );
+
+    mockedApi.patch.mockResolvedValueOnce({});
+
+    await useSecurityStore.getState().updateEmployee('77777777-7777-7777-7777-777777777777', {
+      status: 'Urlaub'
+    });
+
+    expect(mockedApi.patch).toHaveBeenCalledWith(
+      '/employees/77777777-7777-7777-7777-777777777777',
+      expect.objectContaining({ status: 'Urlaub' })
+    );
+
+    const state = useSecurityStore.getState();
+    expect(state.employees[0].status).toBe('Urlaub');
+    expect(state.notifications[0].title).toBe('Mitarbeiter aktualisiert');
+  });
+
 });

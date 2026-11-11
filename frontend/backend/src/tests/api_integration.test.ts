@@ -8,6 +8,10 @@ const SEED_USER_EMAIL = 'a.schmidt@ffm-sec.de';
 const BAVARIA_USER_EMAIL = 'api.bavaria@secops.local';
 const TENANT_BAVARIA_ID = '22222222-2222-2222-2222-222222222222';
 const clientNumber = `API-TEST-${Date.now()}`;
+const siteCode = `API-SITE-${Date.now()}`;
+const personnelNumber = `API-MA-${Date.now()}`;
+let createdSiteId: string | undefined;
+let createdEmployeeId: string | undefined;
 
 async function login(email: string): Promise<string> {
   const response = await request(app)
@@ -48,6 +52,8 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await migrationPool.query('DELETE FROM employees WHERE id = $1 OR personnel_number = $2', [createdEmployeeId ?? null, personnelNumber]);
+  await migrationPool.query('DELETE FROM sites WHERE id = $1 OR site_code = $2', [createdSiteId ?? null, siteCode]);
   await migrationPool.query('DELETE FROM clients WHERE client_number = $1', [clientNumber]);
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = $1)', [
     BAVARIA_USER_EMAIL
@@ -124,4 +130,96 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(employeesResponse.status).toBe(200);
     expect(Array.isArray(employeesResponse.body.data)).toBe(true);
   });
+
+  test('4. Objekt und Mitarbeiter werden gespeichert, nach erneutem Login geladen und aktualisiert', async () => {
+    const token = await login(SEED_USER_EMAIL);
+
+    const customersResponse = await request(app)
+      .get('/api/v1/customers')
+      .set('Authorization', `Bearer ${token}`);
+    expect(customersResponse.status).toBe(200);
+    const clientId = customersResponse.body.data[0].id as string;
+
+    const siteResponse = await request(app)
+      .post('/api/v1/sites')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        clientId,
+        siteCode,
+        name: 'API Testobjekt',
+        address: 'Testweg 1, 60311 Frankfurt',
+        securityLevel: 'Hoch (KRITIS / BSI)',
+        requiredGuardsDay: 2,
+        requiredGuardsNight: 1,
+        alarmSystem: 'EMA Test',
+        accessRules: 'Ausweispflicht'
+      });
+    expect(siteResponse.status).toBe(201);
+    createdSiteId = siteResponse.body.data.id;
+
+    const employeeResponse = await request(app)
+      .post('/api/v1/employees')
+      .set('Authorization', `Bearer ${token}`)
+      .send({
+        personnelNumber,
+        firstName: 'API',
+        lastName: 'Mitarbeiter',
+        email: 'api.mitarbeiter@secops.local',
+        phone: '+49 69 999',
+        role: 'Wachdienstmitarbeiter',
+        status: 'Aktiv',
+        weeklyHours: 40,
+        hourlyRate: 19.5,
+        dateOfJoining: '2026-01-01'
+      });
+    expect(employeeResponse.status).toBe(201);
+    createdEmployeeId = employeeResponse.body.data.id;
+
+    const updateResponse = await request(app)
+      .patch(`/api/v1/employees/${createdEmployeeId}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send({ status: 'Urlaub' });
+    expect(updateResponse.status).toBe(200);
+
+    const secondToken = await login(SEED_USER_EMAIL);
+
+    const sitesResponse = await request(app)
+      .get('/api/v1/sites')
+      .set('Authorization', `Bearer ${secondToken}`);
+    expect(sitesResponse.body.data).toEqual(
+      expect.arrayContaining([expect.objectContaining({ site_code: siteCode, name: 'API Testobjekt' })])
+    );
+
+    const employeesResponse = await request(app)
+      .get('/api/v1/employees')
+      .set('Authorization', `Bearer ${secondToken}`);
+    expect(employeesResponse.body.data).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ personnel_number: personnelNumber, status: 'Urlaub' })
+      ])
+    );
+  });
+
+  test('5. Mandant B sieht die neu angelegten Objekte und Mitarbeiter nicht', async () => {
+    const bavariaToken = await login(BAVARIA_USER_EMAIL);
+
+    const sitesResponse = await request(app)
+      .get('/api/v1/sites')
+      .set('Authorization', `Bearer ${bavariaToken}`);
+    const employeesResponse = await request(app)
+      .get('/api/v1/employees')
+      .set('Authorization', `Bearer ${bavariaToken}`);
+
+    expect(sitesResponse.status).toBe(200);
+    expect(employeesResponse.status).toBe(200);
+
+    const siteCodes = (sitesResponse.body.data as Array<{ site_code: string }>).map((row) => row.site_code);
+    const personnelNumbers = (employeesResponse.body.data as Array<{ personnel_number: string }>).map(
+      (row) => row.personnel_number
+    );
+
+    expect(siteCodes).not.toContain(siteCode);
+    expect(personnelNumbers).not.toContain(personnelNumber);
+  });
+
 });

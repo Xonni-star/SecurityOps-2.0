@@ -60,7 +60,12 @@ app.get('/api/v1/customers', authenticateJwt, requirePermission('customers:read'
 app.post('/api/v1/customers', authenticateJwt, requirePermission('customers:create'), clientController.createClient);
 
 app.get('/api/v1/sites', authenticateJwt, requirePermission('sites:read'), resourceController.listSites);
+app.post('/api/v1/sites', authenticateJwt, requirePermission('sites:create'), resourceController.createSite);
+app.patch('/api/v1/sites/:id', authenticateJwt, requirePermission('sites:create'), resourceController.updateSite);
+
 app.get('/api/v1/employees', authenticateJwt, requirePermission('employees:read'), resourceController.listEmployees);
+app.post('/api/v1/employees', authenticateJwt, requirePermission('employees:manage'), resourceController.createEmployee);
+app.patch('/api/v1/employees/:id', authenticateJwt, requirePermission('employees:manage'), resourceController.updateEmployee);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
