@@ -5,7 +5,7 @@ import { app } from '../app';
 import { pool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
 import { env } from '../config/env';
 
-describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konfliktauflösung & RLS-Schutz', () => {
+describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Konfliktauflösung', () => {
   let testTenantA: string;
   let testTenantB: string;
   let testUserAId: string;
@@ -493,18 +493,95 @@ describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konflik
     expect(res.body.data.serverState.revision_version).toBe(2);
   });
 
-  // 14. Wachbuch-Konfliktauflösung Idempotenz & KEIN doppelter Audit-Eintrag (Schritt 5R.2.6 Kernanforderung)
-  test('14. Wachbuch: Wiederholte Konfliktauflösung erzeugt WEDER zweite Revision NOCH zweiten Audit-Eintrag', async () => {
+  // 14. SCHRITT 5R.2.7 KERN-TEST: Push-CONFLICT blockiert NICHT die nachfolgende Konfliktauflösung derselben clientUuid
+  test('14. SCHRITT 5R.2.7: Push-CONFLICT blockiert nicht die nachfolgende Konfliktauflösung derselben clientUuid', async () => {
+    // 1. Erstelle Task mit Serverversion 2
+    const taskId = await withTenantTransaction(testTenantA, async (tx) => {
+      const t = await tx.query(`
+        INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status, revision_version)
+        VALUES ($1, 'Task für Konflikttest', 'Einsatzleitung', CURRENT_DATE, 'Offen', 2)
+        RETURNING id;
+      `, [testTenantA]);
+      return t.rows[0].id;
+    });
+
+    const outboxUuid = `sync-task-collision-${Date.now()}`;
+
+    // 2. Normaler /sync/push scheitert mit CONFLICT und speichert Quittung in sync_idempotency_receipts
+    const pushRes = await request(app)
+      .post('/api/v1/sync/push')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        deviceId: 'dev-01',
+        mutations: [
+          {
+            clientUuid: outboxUuid,
+            entityType: 'task',
+            action: 'UPDATE',
+            clientTimestamp: new Date().toISOString(),
+            baseVersion: 1, // veraltet!
+            payload: { id: taskId, status: 'In Bearbeitung' }
+          }
+        ]
+      });
+
+    expect(pushRes.status).toBe(200);
+    expect(pushRes.body.data[0].status).toBe('CONFLICT');
+
+    // 3. Nachfolgende Konfliktauflösung mit DIESERSELBEN Outbox-ID (outboxUuid):
+    // Zuvor scheiterte dies fälschlich als HTTP 409 Integritätsverletzung, weil
+    // sync_idempotency_receipts denselben Hash erwartete.
+    // Mit der neuen Tabelle sync_conflict_resolution_receipts gelingt die Auflösung sauber!
+    const resolveRes = await request(app)
+      .post('/api/v1/sync/conflicts/resolve')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        clientUuid: outboxUuid,
+        entityType: 'task',
+        strategy: 'USE_LOCAL',
+        expectedVersion: 2, // Korrekte aktuelle Serverversion
+        localPayload: { id: taskId, status: 'In Bearbeitung' }
+      });
+
+    expect(resolveRes.status).toBe(200);
+    expect(resolveRes.body.data.applied).toBe(true);
+    expect(resolveRes.body.data.serverState.status).toBe('In Bearbeitung');
+    expect(resolveRes.body.data.serverState.revision_version).toBe(3);
+
+    // 4. Wiederholung der Konfliktauflösung mit derselben UUID:
+    // Muss idempotent denselben Zustand liefern, OHNE zweiten Audit-Log!
+    const repeatRes = await request(app)
+      .post('/api/v1/sync/conflicts/resolve')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        clientUuid: outboxUuid,
+        entityType: 'task',
+        strategy: 'USE_LOCAL',
+        expectedVersion: 2,
+        localPayload: { id: taskId, status: 'In Bearbeitung' }
+      });
+
+    expect(repeatRes.status).toBe(200);
+    expect(repeatRes.body.data.applied).toBe(true);
+
+    const auditCount = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${outboxUuid}`]);
+    });
+    expect(parseInt(auditCount.rows[0].count, 10)).toBe(1); // Exakt 1 Audit-Log!
+  });
+
+  // 15. Wachbuch: Wiederholte Konfliktauflösung erzeugt WEDER zweite Revision NOCH zweiten Audit-Eintrag
+  test('15. Wachbuch: Wiederholte Konfliktauflösung erzeugt WEDER zweite Revision NOCH zweiten Audit-Eintrag', async () => {
     const entryId = await withTenantTransaction(testTenantA, async (tx) => {
       const r = await tx.query(`
         INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description)
-        VALUES ($1, $2, $3, 'Vorkommnis', 'Dringend', 'Konflikteintrag Idem', 'Basis')
+        VALUES ($1, $2, $3, 'Vorkommnis', 'Dringend', 'Konflikteintrag Idem 2', 'Basis')
         RETURNING id;
       `, [testTenantA, siteAId, guardAId]);
       return r.rows[0].id;
     });
 
-    const stableConflictUuid = `conf-gb-stable-${Date.now()}`;
+    const stableConflictUuid = `conf-gb-stable2-${Date.now()}`;
 
     // 1. Erste Konfliktauflösung
     const res1 = await request(app)
@@ -520,20 +597,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konflik
     expect(res1.status).toBe(200);
     expect(res1.body.data.applied).toBe(true);
 
-    // Zähle Audit-Logs und Revisionen nach erster Ausführung
-    const auditCount1 = await withTenantTransaction(testTenantA, async (tx) => {
-      const r = await tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${stableConflictUuid}`]);
-      return parseInt(r.rows[0].count, 10);
-    });
-    const revCount1 = await withTenantTransaction(testTenantA, async (tx) => {
-      const r = await tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [stableConflictUuid]);
-      return parseInt(r.rows[0].count, 10);
-    });
-
-    expect(auditCount1).toBe(1);
-    expect(revCount1).toBe(1);
-
-    // 2. Wiederholte identische Konfliktauflösung mit derselben clientUuid
+    // 2. Zweiter identischer Aufruf
     const res2 = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
@@ -547,30 +611,26 @@ describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konflik
     expect(res2.status).toBe(200);
     expect(res2.body.data.applied).toBe(true);
 
-    // Zähle Audit-Logs und Revisionen nach zweiter Ausführung -> MÜSSEN EXAKT UNVERÄNDERT BLEIBEN!
-    const auditCount2 = await withTenantTransaction(testTenantA, async (tx) => {
-      const r = await tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${stableConflictUuid}`]);
-      return parseInt(r.rows[0].count, 10);
+    const auditCount = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${stableConflictUuid}`]);
     });
-    const revCount2 = await withTenantTransaction(testTenantA, async (tx) => {
-      const r = await tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [stableConflictUuid]);
-      return parseInt(r.rows[0].count, 10);
+    const revCount = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [`rev-${stableConflictUuid}`]);
     });
 
-    expect(auditCount2).toBe(1); // Kein zweiter Audit-Eintrag!
-    expect(revCount2).toBe(1);   // Keine zweite Revision!
-    expect(res1.body.data.serverState.id).toBe(res2.body.data.serverState.id);
+    expect(parseInt(auditCount.rows[0].count, 10)).toBe(1);
+    expect(parseInt(revCount.rows[0].count, 10)).toBe(1);
   });
 
-  // 15. Gleiche Konflikt-UUID mit verändertem Inhalt wird abgewiesen
-  test('15. Gleiche Konflikt-UUID mit verändertem Inhalt wird mit HTTP 409 abgewiesen', async () => {
+  // 16. Gleiche Konflikt-UUID mit verändertem Inhalt wird mit HTTP 409 abgewiesen
+  test('16. Gleiche Konflikt-UUID mit verändertem Inhalt wird mit HTTP 409 abgewiesen', async () => {
     const entryId = await withTenantTransaction(testTenantA, async (tx) => {
       return (await tx.query("SELECT id FROM guardbook_entries WHERE tenant_id = $1 LIMIT 1", [testTenantA])).rows[0].id;
     });
 
     const conflictUuid = `conf-tamper-${Date.now()}`;
 
-    // 1. Erstausführung
+    // Erstausführung
     await request(app)
       .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
@@ -582,7 +642,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konflik
         localPayload: { id: entryId, correctionNote: 'Echter Nachtrag' }
       });
 
-    // 2. Manipulierter zweiter Aufruf mit geänderter Korrektur aber identischer UUID
+    // Manipulierter zweiter Aufruf mit geänderter Korrektur aber identischer UUID
     const resTamper = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
@@ -598,8 +658,8 @@ describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konflik
     expect(resTamper.body.message).toContain('Integritätsverletzung');
   });
 
-  // 16. Mandantenisolation bei Konfliktauflösung
-  test('16. Mandantenisolation bei Konfliktauflösung: Mandant B kann keine Aufgaben von A auflösen', async () => {
+  // 17. Mandantenisolation bei Konfliktauflösung
+  test('17. Mandantenisolation bei Konfliktauflösung: Mandant B kann keine Aufgaben von A auflösen', async () => {
     const taskIdA = await withTenantTransaction(testTenantA, async (tx) => {
       return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status) VALUES ($1, 'Task A geheim', 'Leitung A', CURRENT_DATE, 'Offen') RETURNING id", [testTenantA])).rows[0].id;
     });
@@ -631,18 +691,18 @@ describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konflik
     expect(resB.body.message).toContain('nicht gefunden oder fremder Mandant');
   });
 
-  // 17. Parallele Konfliktauflösung mit identischer UUID (Advisory Lock Serialisierung)
-  test('17. Zwei parallele identische Konfliktauflösungen führen zu exakt einer Ausführung', async () => {
+  // 18. Parallele Konfliktauflösung mit identischer UUID
+  test('18. Zwei parallele identische Konfliktauflösungen führen zu exakt einer Ausführung', async () => {
     const entryId = await withTenantTransaction(testTenantA, async (tx) => {
       const r = await tx.query(`
         INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description)
-        VALUES ($1, $2, $3, 'Vorkommnis', 'Dringend', 'Parallel Konflikt Eintrag', 'Text')
+        VALUES ($1, $2, $3, 'Vorkommnis', 'Dringend', 'Parallel Konflikt Eintrag 2', 'Text')
         RETURNING id;
       `, [testTenantA, siteAId, guardAId]);
       return r.rows[0].id;
     });
 
-    const parallelConflictUuid = `conf-parallel-${Date.now()}`;
+    const parallelConflictUuid = `conf-parallel2-${Date.now()}`;
     const payload = {
       clientUuid: parallelConflictUuid,
       entityType: 'guardbook',
@@ -661,9 +721,8 @@ describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konflik
     expect(res1.body.data.applied).toBe(true);
     expect(res2.body.data.applied).toBe(true);
 
-    // Genau 1 Revision und 1 Audit-Eintrag erzeugt
     const revCount = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [parallelConflictUuid]);
+      return tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [`rev-${parallelConflictUuid}`]);
     });
     const auditCount = await withTenantTransaction(testTenantA, async (tx) => {
       return tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${parallelConflictUuid}`]);

@@ -66,9 +66,7 @@ export function computePayloadHash(payload: Record<string, any>): string {
 
 /**
  * POST /api/v1/sync/push
- * - PostgreSQL Transaction Advisory Lock pro Mutation-ID schützt vor Race Conditions
- * - Kanonischer SHA-256 Payload-Hash erkennt veränderte Wiederverwendungen
- * - Atomare fachliche Ausführung und Quittungsspeicherung in derselben Transaktion
+ * Verarbeitet Push-Mutationen und speichert Quittungen in sync_idempotency_receipts
  */
 export async function pushSyncMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -83,13 +81,11 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
       for (const mut of body.mutations) {
         const payloadHash = computePayloadHash(mut.payload);
 
-        // ----------------------------------------------------------------------
-        // 0. ATOMARE TRANSACTION ADVISORY LOCKS GEGEN PARALLELE RACE CONDITIONS
-        // ----------------------------------------------------------------------
-        const lockKey = `${tenantId}:${mut.clientUuid}`;
+        // Transaction Advisory Lock zur Verhinderung paralleler Race Conditions
+        const lockKey = `${tenantId}:push:${mut.clientUuid}`;
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
 
-        // Prüfen, ob bereits eine fertige Quittung vorliegt (idempotente Deduplizierung)
+        // Prüfen auf bereits vorhandene Push-Quittung
         const receiptRes = await client.query(
           `SELECT client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json
            FROM sync_idempotency_receipts
@@ -117,9 +113,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
         let itemResult: SyncResultItem;
 
-        // ======================================================================
-        // 1. GUARDBOOK (DIGITALES WACHBUCH - APPEND-ONLY)
-        // ======================================================================
+        // 1. GUARDBOOK
         if (mut.entityType === 'guardbook') {
           if (mut.action === 'DELETE') {
             itemResult = {
@@ -228,9 +222,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           }
         }
 
-        // ======================================================================
-        // 2. SHIFTS (DIENSTPLANUNG MIT ATOMAREM VERSIONSSCHUTZ)
-        // ======================================================================
+        // 2. SHIFTS
         else if (mut.entityType === 'shift') {
           if (mut.action === 'CREATE') {
             const insRes = await client.query(
@@ -352,9 +344,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           }
         }
 
-        // ======================================================================
-        // 3. TASKS (AUFGABEN MIT ATOMAREM VERSIONSSCHUTZ)
-        // ======================================================================
+        // 3. TASKS
         else if (mut.entityType === 'task') {
           if (mut.action === 'CREATE') {
             const insTask = await client.query(
@@ -480,9 +470,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           }
         }
 
-        // ======================================================================
-        // 4. KEYS (SCHLÜSSELDEPOT MIT VERSIONIERUNG)
-        // ======================================================================
+        // 4. KEYS
         else if (mut.entityType === 'key') {
           const keyId = mut.payload.id;
 
@@ -546,9 +534,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           }
         }
 
-        // ======================================================================
-        // 5. PATROL (KONTROLLGANG-SCANS - UNVERÄNDERLICH)
-        // ======================================================================
+        // 5. PATROL
         else if (mut.entityType === 'patrol') {
           if (mut.action === 'CREATE') {
             const insPatrol = await client.query(
@@ -592,9 +578,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           }
         }
 
-        // ======================================================================
-        // 6. HANDOVER (SCHICHTÜBERGABEN - UNVERÄNDERLICH)
-        // ======================================================================
+        // 6. HANDOVER
         else if (mut.entityType === 'handover') {
           if (mut.action === 'CREATE') {
             const insHandover = await client.query(
@@ -646,7 +630,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         }
 
         // ----------------------------------------------------------------------
-        // ATOMARE PERSISTIERUNG DER IDEMPOTENZ-QUITTUNG IN DERSELBEN TRANSAKTION
+        // ATOMARE PERSISTIERUNG IN sync_idempotency_receipts
         // ----------------------------------------------------------------------
         await client.query(
           `INSERT INTO sync_idempotency_receipts (tenant_id, client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json)
@@ -685,11 +669,13 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 /**
  * POST /api/v1/sync/conflicts/resolve
  * Reale, vollständig idempotente Server-Auflösung von Synchronisationskonflikten:
- * - Nutzt PostgreSQL Transaction Advisory Lock
- * - Prüft sync_idempotency_receipts auf bereits vorhandene Quittung
+ * - WICHTIG (Schritt 5R.2.7): Verwendet eine DEDIZIERTE Tabelle `sync_conflict_resolution_receipts`.
+ *   Dadurch blockiert eine vorangegangene Push-Quittung (Status: CONFLICT) NIEMALS die nachfolgende,
+ *   legitime Konfliktauflösung derselben client_mutation_id!
+ * - Nutzt PostgreSQL Transaction Advisory Lock `${tenantId}:conflict_resolve:${body.clientUuid}`
  * - Bei wiederholtem Aufruf: Gibt reproduzierbar dasselbe Ergebnis zurück OHNE neue Revision oder Audit-Eintrag!
- * - Bei manipulierter Wiederholung: Abweisung mit HTTP 409
- * - Liefert standardisiertes ResponseEnvelope mit data: { applied, clientUuid, entityType, strategy, serverState }
+ * - Bei veränderter Payload mit gleicher ID: Abweisung mit HTTP 409
+ * - Liefert ResponseEnvelope mit data: { applied, clientUuid, entityType, strategy, serverState }
  */
 export async function resolveSyncConflict(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -709,13 +695,13 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
 
     await withTenantTransaction(tenantId, async (client) => {
       // 1. Transaction Advisory Lock zur Serialisierung paralleler Anfragen
-      const lockKey = `${tenantId}:conflict:${body.clientUuid}`;
+      const lockKey = `${tenantId}:conflict_resolve:${body.clientUuid}`;
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
 
-      // 2. Idempotenzprüfung via sync_idempotency_receipts
+      // 2. Idempotenzprüfung in der DEDIZIERTEN Konflikt-Quittungstabelle
       const receiptRes = await client.query(
-        `SELECT client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json
-         FROM sync_idempotency_receipts
+        `SELECT client_mutation_id, entity_type, strategy, payload_hash, server_id, server_version, response_json
+         FROM sync_conflict_resolution_receipts
          WHERE tenant_id = $1 AND client_mutation_id = $2`,
         [tenantId, body.clientUuid]
       );
@@ -876,7 +862,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         }
       }
 
-      // D. GUARDBOOK (DIN 77200 APPEND-ONLY MIT IDEMPOTENTER REVISION)
+      // D. GUARDBOOK (DIN 77200 APPEND-ONLY MIT DEDIZIERTEM REVISIONS-BEZEICHNER)
       else if (body.entityType === 'guardbook') {
         const entryId = body.localPayload?.id || body.clientUuid;
         const gbCheck = await client.query(
@@ -892,11 +878,13 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
 
         if (body.strategy === 'USE_LOCAL') {
           const note = body.localPayload?.correctionNote || 'Korrektur aus manueller Konfliktauflösung';
+          // Eindeutiger Revisions-Key gebunden an die Konflikt-Mutation-ID
+          const revisionMutationId = `rev-${body.clientUuid}`;
           await client.query(
             `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note, client_mutation_id)
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`,
-            [tenantId, entryId, userEmail, note, body.clientUuid]
+            [tenantId, entryId, userEmail, note, revisionMutationId]
           );
 
           const revs = await client.query(
@@ -934,15 +922,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         serverState: actualServerData
       };
 
-      // 5. Quittung atomar in derselben Transaktion abspeichern
+      // 5. Quittung atomar in der DEDIZIERTEN Konflikt-Tabelle speichern
       await client.query(
-        `INSERT INTO sync_idempotency_receipts (tenant_id, client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json)
-         VALUES ($1, $2, $3, 'RESOLVE', $4, 'SYNCED', $5, $6, $7)
+        `INSERT INTO sync_conflict_resolution_receipts (tenant_id, client_mutation_id, entity_type, strategy, payload_hash, server_id, server_version, response_json)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`,
         [
           tenantId,
           body.clientUuid,
           body.entityType,
+          body.strategy,
           payloadHash,
           String(actualServerData?.id || body.clientUuid),
           Number(actualServerData?.revision_version || 1),

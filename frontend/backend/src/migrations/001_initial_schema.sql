@@ -1,5 +1,5 @@
 -- ==============================================================================
--- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 5R.2.1 KORRIGIERT)
+-- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 5R.2.7 KORRIGIERT)
 -- Least-Privilege Rollentrennung, Idempotenz-Quittungen, Versionsschutz & RLS
 -- ==============================================================================
 
@@ -320,7 +320,7 @@ CREATE TABLE IF NOT EXISTS shift_handovers (
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
--- 10. ZENTRALE IDEMPOTENZ-QUITTUNGEN (SCHRITT 5R.2.1)
+-- 10. ZENTRALE PUSH-IDEMPOTENZ-QUITTUNGEN
 CREATE TABLE IF NOT EXISTS sync_idempotency_receipts (
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     client_mutation_id VARCHAR(64) NOT NULL,
@@ -335,7 +335,21 @@ CREATE TABLE IF NOT EXISTS sync_idempotency_receipts (
     PRIMARY KEY (tenant_id, client_mutation_id)
 );
 
--- 11. AUDIT PROTOKOLLE
+-- 11. ZENTRALE KONFLIKTAUFLÖSUNGS-QUITTUNGEN (SCHRITT 5R.2.7)
+CREATE TABLE IF NOT EXISTS sync_conflict_resolution_receipts (
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    client_mutation_id VARCHAR(64) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    strategy VARCHAR(20) NOT NULL,
+    payload_hash VARCHAR(64) NOT NULL,
+    server_id VARCHAR(64) NOT NULL,
+    server_version INT NOT NULL,
+    response_json JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, client_mutation_id)
+);
+
+-- 12. AUDIT PROTOKOLLE
 CREATE TABLE IF NOT EXISTS audit_logs (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -370,6 +384,7 @@ DECLARE
         'patrol_scans',
         'shift_handovers',
         'sync_idempotency_receipts',
+        'sync_conflict_resolution_receipts',
         'audit_logs'
     ];
 BEGIN
@@ -448,7 +463,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_revision_tampering();
 REVOKE ALL ON SCHEMA public FROM secops_app_user;
 GRANT USAGE ON SCHEMA public TO secops_app_user;
 
-GRANT SELECT, INSERT, UPDATE ON clients, sites, employees, employee_qualifications, shifts, guardbook_entries, keys, tasks, patrol_scans, shift_handovers, sync_idempotency_receipts, audit_logs, users, user_sessions, user_roles, roles, permissions, role_permissions, tenants TO secops_app_user;
+GRANT SELECT, INSERT, UPDATE ON clients, sites, employees, employee_qualifications, shifts, guardbook_entries, keys, tasks, patrol_scans, shift_handovers, sync_idempotency_receipts, sync_conflict_resolution_receipts, audit_logs, users, user_sessions, user_roles, roles, permissions, role_permissions, tenants TO secops_app_user;
 
 GRANT SELECT, INSERT ON guardbook_revisions TO secops_app_user;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO secops_app_user;
