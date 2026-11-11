@@ -1,11 +1,13 @@
+import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useSecurityStore } from '../store';
 import { apiClient, ApiError } from '../services/apiClient';
 import { offlineVault } from '../services/indexedDbService';
 
-describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.6)', () => {
+describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.8 - Vitest)', () => {
   const queueId = `test-q-${Date.now()}`;
 
   beforeEach(() => {
+    // Initialisiere Testzustand im Store
     useSecurityStore.setState({
       syncQueue: [
         {
@@ -37,11 +39,11 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
   });
 
   afterEach(() => {
-    jest.restoreAllMocks();
+    vi.restoreAllMocks();
   });
 
   test('1. Gültige Konfliktantwort mit data, applied: true und serverState entfernt Outbox und aktualisiert Store', async () => {
-    jest.spyOn(apiClient, 'post').mockResolvedValueOnce({
+    vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
       applied: true,
       clientUuid: queueId,
       entityType: 'task',
@@ -54,12 +56,14 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
       }
     });
 
-    jest.spyOn(offlineVault, 'markSynced').mockResolvedValueOnce(undefined);
+    vi.spyOn(offlineVault, 'markSynced').mockResolvedValueOnce(undefined);
 
     await useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL');
 
     const state = useSecurityStore.getState();
+    // Outbox wurde erst nach Bestätigung entfernt
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeUndefined();
+    // Store wurde mit vollständigem serverState aktualisiert
     const task = state.tasks.find((t) => t.id === 'task-123');
     expect(task?.status).toBe('In Bearbeitung');
     expect(task?.title).toBe('Testaufgabe aktualisiert');
@@ -67,20 +71,21 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
   });
 
   test('2. API liefert kein data-Objekt: Outbox bleibt unverändert erhalten, Fehler wird geworfen', async () => {
-    jest.spyOn(apiClient, 'post').mockResolvedValueOnce(null as any);
-    const markSyncedSpy = jest.spyOn(offlineVault, 'markSynced');
+    vi.spyOn(apiClient, 'post').mockResolvedValueOnce(null as any);
+    const markSyncedSpy = vi.spyOn(offlineVault, 'markSynced');
 
     await expect(
       useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL')
     ).rejects.toThrow('Ungültige Serverantwort');
 
     const state = useSecurityStore.getState();
+    // Outbox MUSS erhalten bleiben
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
     expect(markSyncedSpy).not.toHaveBeenCalled();
   });
 
   test('3. API liefert applied: false: Outbox bleibt erhalten', async () => {
-    jest.spyOn(apiClient, 'post').mockResolvedValueOnce({
+    vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
       applied: false,
       clientUuid: queueId,
       entityType: 'task',
@@ -97,7 +102,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
   });
 
   test('4. API liefert keinen serverState: Outbox bleibt erhalten', async () => {
-    jest.spyOn(apiClient, 'post').mockResolvedValueOnce({
+    vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
       applied: true,
       clientUuid: queueId,
       entityType: 'task',
@@ -114,7 +119,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
   });
 
   test('5. Netzwerkfehler während Konfliktauflösung: Outbox bleibt erhalten und wirft Fehler', async () => {
-    jest.spyOn(apiClient, 'post').mockRejectedValueOnce(new Error('Network connection lost'));
+    vi.spyOn(apiClient, 'post').mockRejectedValueOnce(new Error('Network connection lost'));
 
     await expect(
       useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL')
@@ -125,7 +130,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
   });
 
   test('6. HTTP-Fehler 409 Conflict: Outbox bleibt erhalten', async () => {
-    jest.spyOn(apiClient, 'post').mockRejectedValueOnce(new ApiError(409, 'Versionskonflikt'));
+    vi.spyOn(apiClient, 'post').mockRejectedValueOnce(new ApiError(409, 'Versionskonflikt'));
 
     await expect(
       useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL')

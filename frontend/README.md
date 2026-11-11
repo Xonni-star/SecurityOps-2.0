@@ -4,66 +4,52 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ---
 
-## 1. Architektur & Sicherheitsgrundlagen (Schritt 3 Finale)
+## 1. Verzeichnisstruktur
 
-- **Backend**: Node.js & TypeScript mit Express REST-API (`/api/v1`).
-- **Least-Privilege Datenbank**: PostgreSQL 16+ mit unprivilegiertem Benutzer `secops_app_user` (`NOSUPERUSER NOBYPASSRLS`).
-- **Mandantentrennung & RLS**:
-  - `tenant_id` als UUID auf allen mandantenspezifischen Tabellen.
-  - Physische Durchsetzung von **PostgreSQL Row-Level Security (RLS)** via `ENABLE ROW LEVEL SECURITY` und `FORCE ROW LEVEL SECURITY`.
-  - Transaktionssichere Mandantenbindung via `SET LOCAL app.current_tenant`. Ohne gesetzten Mandantenkontext werden physisch 0 Datensätze geliefert.
-  - Composite Foreign Keys `(parent_id, tenant_id)` verhindern mandantenübergreifende Fremdschlüsselverknüpfungen (z. B. Schichten auf fremde Mitarbeiter oder Schlüssel an fremde Inhaber).
-- **Append-Only Revisionssicherheit**:
-  - PostgreSQL-Trigger `prevent_guardbook_tampering()` und `prevent_revision_tampering()` blockieren nachträgliche Manipulationen und Löschungen physisch auf Datenbankebene.
-- **Authentifizierung & Sessions**:
-  - Passwort-Hashing mit **Argon2id**.
-  - Persistente Sitzungsverwaltung und Token-Widerruf über `user_sessions`.
-  - Atomarer Brute-Force Schutz gegen Race Conditions.
-  - Eindeutige Mandantenauswahl bei Mehrfachzugehörigkeiten.
-  - Granulare serverseitige Rollen- und Rechteprüfung (RBAC) **ohne pauschale Systemadministrator-Bypasses**.
-  - Atomare Wachbuch-Idempotenz via `INSERT ... ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`.
+- **Frontend**: Root-Verzeichnis (`./`), React 18+/19 SPA mit Tailwind CSS, Zustand Store und IndexedDB Vault.
+- **SecurityOps TypeScript-Backend**: `backend/` (bzw. `frontend/backend/` bei relativer Monorepo-Verschachtelung). Enthält die vollwertige Express/TypeScript REST-API (`/api/v1`), PostgreSQL RLS-Transaktionen und die Idempotenz-Engine.
+- **Hinweis**: Das Root-Verzeichnis `backend/` bzw. `frontend/backend/` enthält das eigentliche Anwendungsbackend mit `package.json`, `src/app.ts`, `src/migrations/`, etc.
 
 ---
 
-## 2. Installations- und Startanleitung
+## 2. Installations-, Build- und Testbefehle
 
-### 2.1 Voraussetzungen
-- Node.js >= 18.0.0
-- Docker & Docker Compose v2
-- PostgreSQL 16+
-
-### 2.2 Schnellstart
+### 2.1 Backend (Node.js & TypeScript REST-API)
 ```bash
-# 1. Repository klonen
-git clone https://github.com/Xonni-star/SecurityOps-2.0.git
-cd SecurityOps-2.0
+# Abhängigkeiten installieren
+npm --prefix backend ci
 
-# 2. Abhängigkeiten installieren
-npm install --prefix backend
+# TypeScript Build
+npm --prefix backend run build
+
+# Datenbankmigrationen ausführen (erfordert PostgreSQL 16+ Verbindung)
+npm --prefix backend run migrate
+
+# Testdaten anlegen
+npm --prefix backend run seed
+
+# Backend- und PostgreSQL RLS-Integrationstests ausführen
+npm --prefix backend test -- --runInBand
+```
+
+### 2.2 Frontend (React & Zustand Store)
+```bash
+# Abhängigkeiten installieren
 npm install
 
-# 3. Umgebungsvariablen anlegen
-cp backend/.env.example backend/.env
-# In backend/.env sichere Passwörter, JWT_SECRET und CORS_ORIGIN eintragen!
+# Frontend Store- und Outbox-Vertragstests ausführen (Vitest)
+npm test
 
-# 4. PostgreSQL-Container starten (gebunden an 127.0.0.1)
-POSTGRES_PASSWORD=MeinGeheimesPasswort docker compose -f deploy/docker-compose.yml up -d db
-
-# 5. Datenbankmigrationen und Seed ausführen
-npm run migrate --prefix backend
-npm run seed --prefix backend
-
-# 6. Automatisierte Integrationstests ausführen
-npm test --prefix backend
-
-# 7. Backend-Server starten (Port 8000)
-npm run dev --prefix backend
+# Frontend TypeScript Build
+npm run build
 ```
 
 ---
 
-## 3. Testdurchführung
-```bash
-# Führt alle 13 Sicherheits-, RLS-, Append-Only- und Idempotenz-Tests aus:
-npm test --prefix backend
-```
+## 3. Architektur & Sicherheitsgarantien
+1. **RLS & Mandantenisolation**: PostgreSQL 16+ erzwingt `FORCE ROW LEVEL SECURITY`. Ohne gesetzten Transaktionskontext (`SET LOCAL app.current_tenant`) sind 0 Datensätze sichtbar.
+2. **Offline-Sync & Idempotenz**:
+   - `POST /api/v1/sync/push` verarbeitet Mutationen atomar via Advisory Locks und Quittungsspeicherung in `sync_idempotency_receipts`.
+   - `POST /api/v1/sync/conflicts/resolve` trennt Konfliktentscheidungen in `sync_conflict_resolution_receipts`.
+   - Das Frontend entfernt Mutationen erst nach bestätigtem Servererfolg; bei Fehlern bleibt die Outbox unversehrt.
+3. **Least-Privilege**: Die Anwendung verbindet sich ausschließlich als unprivilegierter Benutzer `secops_app_user` (ohne Superuser- oder BYPASSRLS-Rechte).
