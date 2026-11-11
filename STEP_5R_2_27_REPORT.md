@@ -121,12 +121,20 @@ Die CI/CD-Struktur wurde nicht verändert. Der Backend-Job führt den Schritt �
 
 | Workflow | Run-ID | Job | Ergebnis |
 |---|---|---|---|
-| SecurityOps 2.0 CI | _wird ergänzt_ | Root | _wird ergänzt_ |
-| SecurityOps 2.0 CI | _wird ergänzt_ | Frontend | _wird ergänzt_ |
-| SecurityOps 2.0 CI | _wird ergänzt_ | Backend (inkl. 40 Migrationstests) | _wird ergänzt_ |
-| SecurityOps 2.0 CD | _wird ergänzt_ | Release-Paket | _wird ergänzt_ |
+| SecurityOps 2.0 CI | [`43052862901`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43052862901) | Root – npm ci, Strukturprüfung, Gesamtstart | **success** (42 s) |
+| SecurityOps 2.0 CI | [`43052862901`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43052862901) | Frontend – npm ci, Vitest, Produktions-Build | **success** (17 s) |
+| SecurityOps 2.0 CI | [`43052862901`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43052862901) | Backend – PostgreSQL 16, Migration, Build, Jest | **success** (1 m 27 s) |
+| SecurityOps 2.0 CD | [`43053123814`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43053123814) | Release-Paket aus CI-Artefakten bauen | **success** |
 
-Artefaktgrößen werden nach dem Lauf über die GitHub-API geprüft.
+Der Schritt **„Migrationshistorie & Baseline (Integrationstests)“** wurde im Backend-Job mit **success** abgeschlossen. Damit liefen alle 40 Migrationstests – einschließlich der neuen Baseline-Typ-Tests – tatsächlich gegen den PostgreSQL-16-Servicecontainer.
+
+### Artefakte (über GitHub-API geprüft)
+
+| Run | Artefakt | Größe | Status |
+|---|---|---|---|
+| CI `43052862901` | `frontend-dist` | 337.989 Bytes | vorhanden, nicht abgelaufen |
+| CI `43052862901` | `backend-dist` | 50.268 Bytes | vorhanden, nicht abgelaufen |
+| CD `43053123814` | `securityops-release-532c9f375d6b97573f1f89aae6b1cdc76685bd9e` | 388.815 Bytes | vorhanden, nicht abgelaufen |
 
 ---
 
