@@ -205,3 +205,21 @@ jobs:
           path: frontend/backend/dist
           if-no-files-found: error
           retention-days: 7
+
+  docker-production:
+    name: Produktions-Docker – Konfiguration & Image-Builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Compose-Konfiguration validieren (ohne Secret-Interpolation)
+        run: docker compose -f frontend/deploy/docker-compose.production.yml config --no-interpolate --quiet
+
+      - name: Backend-Image bauen
+        run: docker build -f frontend/deploy/Dockerfile.backend -t securityops-backend:ci frontend
+
+      - name: Frontend-Image bauen
+        run: docker build -f frontend/deploy/Dockerfile.frontend -t securityops-frontend:ci frontend

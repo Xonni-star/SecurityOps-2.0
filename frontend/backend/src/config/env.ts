@@ -7,7 +7,9 @@ const envSchema = z.object({
   PORT: z.string().default('8000').transform((val) => parseInt(val, 10)),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   DATABASE_URL: z.string().min(10, 'DATABASE_URL muss zwingend konfiguriert sein (für secops_app_user).'),
-  DATABASE_MIGRATION_URL: z.string().min(10, 'DATABASE_MIGRATION_URL muss konfiguriert sein (für secops_admin).'),
+  // Nur der Migrationsrunner benötigt die administrative Verbindung.
+  // Der normale API-Server läuft ausschließlich mit secops_app_user.
+  DATABASE_MIGRATION_URL: z.string().min(10, 'DATABASE_MIGRATION_URL muss für Migrationen konfiguriert sein.').optional(),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET muss mindestens 32 Zeichen lang sein.'),
   // Nur Einheiten, die auch parseDurationToMs() versteht (siehe authController.ts),
   // damit JWT-Ablauf und Sitzungs-Ablaufzeit garantiert identisch sind.

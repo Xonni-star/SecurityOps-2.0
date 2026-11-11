@@ -1714,6 +1714,12 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
   const migrationsDir = options.migrationsDir ?? __dirname;
   const connectionString = options.connectionString ?? env.DATABASE_MIGRATION_URL;
 
+  if (!connectionString) {
+    throw new Error(
+      'DATABASE_MIGRATION_URL muss für Migrationen gesetzt sein (administrative Rolle secops_admin).'
+    );
+  }
+
   const migrations = loadMigrations(migrationsDir);
   assertBaselineMigrationSet(migrations);
 

@@ -1,46 +1,44 @@
-# SecurityOps 2.0 - Hardened Multi-Stage Dockerfile (BSI TR-02102)
-# Stage 1: Build & Dependencies
-FROM python:3.11-slim-bookworm AS builder
+# syntax=docker/dockerfile:1
+# SecurityOps 2.0 - TypeScript/Express Backend (PostgreSQL 16, RLS, JWT)
+# Build context: frontend/ (repository path: frontend/deploy/Dockerfile.backend)
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
-
-WORKDIR /install
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
-    curl \
+FROM node:24-bookworm-slim AS deps
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
+COPY backend/package.json backend/package-lock.json ./
+RUN npm ci
 
-COPY deploy/requirements.txt /install/
-RUN pip install --no-cache-dir --prefix=/install/deps -r /install/requirements.txt
+FROM deps AS build
+COPY backend/tsconfig.json ./
+COPY backend/src ./src
+RUN npm run build \
+    && mkdir -p dist/migrations \
+    && cp src/migrations/*.sql dist/migrations/
 
-# Stage 2: Runtime Container (Unprivileged non-root user UID 10001)
-FROM python:3.11-slim-bookworm AS runtime
+FROM node:24-bookworm-slim AS prod-deps
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+COPY backend/package.json backend/package-lock.json ./
+RUN npm ci --omit=dev && npm cache clean --force
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="/app/deps/bin:$PATH" \
-    PYTHONPATH="/app:/app/deps/lib/python3.11/site-packages"
-
+FROM node:24-bookworm-slim AS runtime
+ENV NODE_ENV=production \
+    PORT=8000
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq5 \
-    curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && groupadd -g 10001 secops \
-    && useradd -u 10001 -g secops -d /app -s /bin/false -M secops \
-    && mkdir -p /var/lib/securityops/storage \
-    && chown -R secops:secops /app /var/lib/securityops/storage
+COPY --from=prod-deps /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY backend/package.json ./
 
-COPY --from=builder /install/deps /app/deps
-COPY --chown=secops:secops backend/ /app/backend/
-COPY --chown=secops:secops alembic/ /app/alembic/
-
-USER 10001:10001
+USER node
 
 EXPOSE 8000
 
-CMD ["uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4", "--proxy-headers", "--forwarded-allow-ips", "*"]
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=3 \
+  CMD ["node", "-e", "fetch('http://127.0.0.1:8000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+
+CMD ["node", "dist/server.js"]

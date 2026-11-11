@@ -1,25 +1,33 @@
-# SecurityOps 2.0 - Production Reverse Proxy & TLS Configuration
+# SecurityOps 2.0 - Production Reverse Proxy & TLS (Caddy)
+# API requests are forwarded to the TypeScript/Express backend.
+# The frontend is served from the static production build in /srv.
+
+{
+    admin off
+}
+
 {$DOMAIN:localhost} {
     encode gzip zstd
 
-    # Strict BSI / OWASP Security Headers
     header {
         Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
-        X-XSS-Protection "1; mode=block"
         Referrer-Policy "strict-origin-when-cross-origin"
-        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://www.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https://generativelanguage.googleapis.com; frame-ancestors 'none';"
+        # CSP entspricht den tatsächlich genutzten Ressourcen:
+        # - Tailwind CDN + Inline-Konfiguration im Frontend
+        # - Gemini-API für den bestehenden Browser-Copilot
+        # - data:/blob: für Bildvorschauen
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://generativelanguage.googleapis.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';"
         Permissions-Policy "camera=(self), microphone=(), geolocation=(), payment=()"
         -Server
     }
 
-    # Max upload limit (15MB according to DIN 77200 spec)
     request_body {
         max_size 15MB
     }
 
-    # API and OpenAPI Docs -> FastAPI Backend
+    # SecurityOps TypeScript/Express API
     handle /api/* {
         reverse_proxy backend:8000 {
             header_up Host {host}
@@ -29,16 +37,10 @@
         }
     }
 
-    handle /docs* {
-        reverse_proxy backend:8000
+    # React Single-Page-Application (Vite production build)
+    handle {
+        root * /srv
+        try_files {path} /index.html
+        file_server
     }
-
-    handle /openapi.json* {
-        reverse_proxy backend:8000
-    }
-
-    # PWA Static Assets & Frontend Routing
-    root * /var/www/html
-    file_server
-    try_files {path} /index.html
 }

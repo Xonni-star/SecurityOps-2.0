@@ -13,8 +13,15 @@ const createdDatabases: string[] = [];
 const tempDirs: string[] = [];
 const noopLogger = () => {};
 
+function migrationUrl(): string {
+  if (!env.DATABASE_MIGRATION_URL) {
+    throw new Error('DATABASE_MIGRATION_URL fehlt in der Testumgebung.');
+  }
+  return env.DATABASE_MIGRATION_URL;
+}
+
 function withDatabaseName(name: string): string {
-  const url = new URL(env.DATABASE_MIGRATION_URL);
+  const url = new URL(migrationUrl());
   url.pathname = `/${name}`;
   return url.toString();
 }

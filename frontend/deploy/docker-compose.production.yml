@@ -1,7 +1,16 @@
-# SecurityOps 2.0 - Production Docker Compose Orchestration (DIN 77200 / BSI TR-02102)
-# Internal network isolation: PostgreSQL & Redis NEVER expose ports publicly!
+# SecurityOps 2.0 - Production Docker Compose (TypeScript backend + PostgreSQL 16)
+#
+# Architecture:
+#   proxy (Caddy, public 80/443) -> backend (Express/TS, internal 8000) -> db (PostgreSQL 16)
+#   migrate (one-shot, secops_admin) -> db-init (one-shot, sets app password) -> backend
+#
+# Required .env values (see .env.example):
+#   DOMAIN, POSTGRES_PASSWORD, POSTGRES_APP_PASSWORD, JWT_SECRET,
+#   CORS_ORIGIN, BACKUP_ENCRYPTION_KEY
+#
+# PostgreSQL and the backend never publish host ports.
 
-version: '3.8'
+name: securityops
 
 networks:
   secops_internal:
@@ -13,175 +22,155 @@ networks:
 volumes:
   secops_pgdata:
     driver: local
-  secops_storage:
-    driver: local
   secops_backups:
-    driver: local
-  secops_redisdata:
     driver: local
   caddy_data:
   caddy_config:
 
 services:
-  # 1. PostgreSQL 16+ Database with Row-Level Security
   db:
-    image: postgres:16.2-alpine
+    image: postgres:16-alpine
     container_name: secops_prod_db
     restart: unless-stopped
-    user: postgres
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-securityops_v2}
-      POSTGRES_USER: ${POSTGRES_USER:-secops_admin}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Fehler: POSTGRES_PASSWORD muss gesetzt sein!}
+      POSTGRES_USER: secops_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD muss gesetzt sein}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - secops_pgdata:/var/lib/postgresql/data
     networks:
       - secops_internal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -U secops_admin -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
       start_period: 15s
     deploy:
       resources:
         limits:
           cpus: '2.0'
           memory: 2048M
-        reservations:
-          memory: 512M
 
-  # 2. Redis Message Broker & Worker Queue
-  redis:
-    image: redis:7.2-alpine
-    container_name: secops_prod_redis
-    restart: unless-stopped
-    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Fehler: REDIS_PASSWORD muss gesetzt sein!}", "--appendonly", "yes"]
-    volumes:
-      - secops_redisdata:/data
+  # Runs DDL migrations with the administrative role. Never starts the HTTP server.
+  migrate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    image: securityops-backend:latest
+    container_name: secops_prod_migrate
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_MIGRATION_URL: postgresql://secops_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-securityops_v2}
+      DATABASE_URL: postgresql://secops_app_user:${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD muss gesetzt sein}@db:5432/${POSTGRES_DB:-securityops_v2}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET muss gesetzt sein}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN muss gesetzt sein}
+    command: ["node", "dist/migrations/runner.js"]
     networks:
       - secops_internal
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
 
-  # 3. FastAPI REST Backend Engine
+  # Sets the password of the least-privilege application role after migrations.
+  db-init:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.backend
+    image: securityops-backend:latest
+    container_name: secops_prod_dbinit
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_MIGRATION_URL: postgresql://secops_admin:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-securityops_v2}
+      POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD muss gesetzt sein}
+    command: ["node", "dist/scripts/setAppPassword.js"]
+    networks:
+      - secops_internal
+
+  # Application backend: uses exclusively secops_app_user.
   backend:
     build:
       context: ..
       dockerfile: deploy/Dockerfile.backend
+    image: securityops-backend:latest
     container_name: secops_prod_backend
     restart: unless-stopped
-    user: "10001:10001"
     depends_on:
       db:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
     environment:
-      ENV: production
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-secops_admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-securityops_v2}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
-      SECRET_KEY: ${SECRET_KEY:?Fehler: SECRET_KEY muss gesetzt sein!}
-      STORAGE_ROOT: /var/lib/securityops/storage
-    volumes:
-      - secops_storage:/var/lib/securityops/storage
+      NODE_ENV: production
+      PORT: 8000
+      DATABASE_URL: postgresql://secops_app_user:${POSTGRES_APP_PASSWORD}@db:5432/${POSTGRES_DB:-securityops_v2}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET muss gesetzt sein}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
+      CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN muss gesetzt sein}
     networks:
       - secops_internal
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/v1/health"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8000/api/v1/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 25s
     deploy:
       resources:
         limits:
           cpus: '1.5'
           memory: 1024M
 
-  # 4. Celery / Background Task Worker (Automations, Deadlines & Cleanup)
-  worker:
+  # Public TLS reverse proxy and static frontend.
+  proxy:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.backend
-    container_name: secops_prod_worker
+      dockerfile: deploy/Dockerfile.frontend
+    image: securityops-frontend:latest
+    container_name: secops_prod_proxy
     restart: unless-stopped
-    user: "10001:10001"
-    command: ["python", "-m", "backend.worker"]
     depends_on:
       backend:
         condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      ENV: production
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-secops_admin}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-securityops_v2}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
-      STORAGE_ROOT: /var/lib/securityops/storage
-    volumes:
-      - secops_storage:/var/lib/securityops/storage
-    networks:
-      - secops_internal
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: 512M
-
-  # 5. Reverse Proxy with Automated TLS (Caddy)
-  proxy:
-    image: caddy:2.7-alpine
-    container_name: secops_prod_proxy
-    restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      - "${PROXY_HTTP_PORT:-80}:80"
+      - "${PROXY_HTTPS_PORT:-443}:443"
     environment:
       DOMAIN: ${DOMAIN:-localhost}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../public:/var/www/html:ro
       - caddy_data:/data
       - caddy_config:/config
     networks:
       - secops_internal
       - secops_public
-    depends_on:
-      backend:
-        condition: service_healthy
     deploy:
       resources:
         limits:
           cpus: '0.5'
           memory: 256M
 
-  # 6. Automated Backup Engine (Encrypted pg_dump & storage sync)
+  # Encrypted PostgreSQL backups (24h interval, 30-day retention).
   backup:
-    image: postgres:16.2-alpine
+    image: postgres:16-bookworm
     container_name: secops_prod_backup
     restart: unless-stopped
-    user: postgres
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-securityops_v2}
-      POSTGRES_USER: ${POSTGRES_USER:-secops_admin}
+      POSTGRES_USER: secops_admin
       PGPASSWORD: ${POSTGRES_PASSWORD}
-      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY}
+      BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?BACKUP_ENCRYPTION_KEY muss gesetzt sein}
     volumes:
       - secops_backups:/var/backups
-      - secops_storage:/var/lib/securityops/storage:ro
       - ./backup_cron.sh:/usr/local/bin/backup_cron.sh:ro
     entrypoint: ["/bin/sh", "/usr/local/bin/backup_cron.sh"]
     networks:
       - secops_internal
-    depends_on:
-      db:
-        condition: service_healthy

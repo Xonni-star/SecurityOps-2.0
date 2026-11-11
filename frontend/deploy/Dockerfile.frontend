@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# SecurityOps 2.0 - Frontend Production Build served by Caddy
+# Build context: frontend/ (repository path: frontend/deploy/Dockerfile.frontend)
+
+FROM node:24-bookworm-slim AS build
+WORKDIR /app
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+FROM caddy:2-alpine AS runtime
+
+COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY --from=build /app/dist /srv
+
+EXPOSE 80 443

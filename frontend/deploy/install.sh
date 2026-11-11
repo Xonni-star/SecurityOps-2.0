@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# SecurityOps 2.0 - Production CLI Installer (DIN 77200 Enterprise Edition)
-# Idempotent execution: Safely verifies prerequisites, initializes environment,
-# runs Alembic migrations, and configures initial administrator & tenant.
+# SecurityOps 2.0 - Production Installer (TypeScript backend + PostgreSQL 16)
 # ==============================================================================
-
 set -euo pipefail
 
 COLOR_INFO="\033[0;34m"
@@ -18,103 +15,103 @@ log_success() { echo -e "${COLOR_SUCCESS}[SUCCESS]${COLOR_RESET} $1"; }
 log_warn() { echo -e "${COLOR_WARN}[WARN]${COLOR_RESET} $1"; }
 log_err() { echo -e "${COLOR_ERR}[ERROR]${COLOR_RESET} $1"; }
 
-echo "=========================================================="
-echo "    SECURITYOPS 2.0 - ENTERPRISE PRODUKTIONS-INSTALLER    "
-echo "    BSI IT-Grundschutz & DIN 77200 Zertifizierungsgrad    "
-echo "=========================================================="
-
-# 1. System Requirements & Dependency Checks
-log_info "1/7: Überprüfe Systemvoraussetzungen..."
-
-if ! command -v docker &> /dev/null; then
-    log_err "Docker ist nicht installiert! Bitte installieren Sie Docker Engine >= 24.0."
-    exit 1
-fi
-
-if ! docker compose version &> /dev/null; then
-    log_err "Docker Compose Plugin v2 ist nicht verfügbar! Bitte installieren."
-    exit 1
-fi
-
-# Check free disk space (> 5GB required for DB & logs)
-FREE_DISK_KB=$(df -k . | awk 'NR==2 {print $4}')
-if [ "$FREE_DISK_KB" -lt 5242880 ]; then
-    log_warn "Warnung: Weniger als 5 GB freier Speicherplatz verfügbar!"
-fi
-
-# Check availability of Ports 80 and 443
-for port in 80 443; do
-    if ss -tuln | grep -q ":$port "; then
-        log_warn "Port $port wird möglicherweise bereits belegt! Bitte prüfen Sie etwaige Webserver."
-    fi
-done
-
-log_success "Systemvoraussetzungen erfolgreich validiert."
-
-# 2. Secure Secret Generation & .env Setup
-log_info "2/7: Konfiguriere kryptografische Geheimnisse (.env)..."
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$SCRIPT_DIR/docker-compose.production.yml"
 ENV_FILE="$SCRIPT_DIR/.env"
 
+echo "=========================================================="
+echo "    SECURITYOPS 2.0 - PRODUKTIONSINSTALLATION             "
+echo "    TypeScript-Backend / PostgreSQL 16 / Caddy TLS        "
+echo "=========================================================="
+
+log_info "1/7: Prüfe Systemvoraussetzungen..."
+if ! command -v docker >/dev/null 2>&1; then
+    log_err "Docker ist nicht installiert (>= 24.0 erforderlich)."
+    exit 1
+fi
+if ! docker compose version >/dev/null 2>&1; then
+    log_err "Docker Compose Plugin v2 ist nicht verfügbar."
+    exit 1
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+    log_err "openssl wird zum Erzeugen der Secrets benötigt."
+    exit 1
+fi
+
+FREE_DISK_KB=$(df -k "$SCRIPT_DIR" | awk 'NR==2 {print $4}')
+if [ "$FREE_DISK_KB" -lt 5242880 ]; then
+    log_warn "Weniger als 5 GB freier Speicherplatz verfügbar."
+fi
+
+for port in 80 443; do
+    if ss -tuln 2>/dev/null | grep -q ":$port "; then
+        log_warn "Port $port ist bereits belegt. Caddy kann nicht starten."
+    fi
+done
+log_success "Systemvoraussetzungen geprüft."
+
+log_info "2/7: Konfiguriere .env und erzeuge Secrets..."
 if [ ! -f "$ENV_FILE" ]; then
-    log_info "Erstelle neue Produktions-Konfigurationsdatei (.env)..."
     cp "$SCRIPT_DIR/.env.example" "$ENV_FILE"
     chmod 600 "$ENV_FILE"
 
-    # Generate secure random cryptographic secrets
-    GEN_PG_PW=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9')
-    GEN_REDIS_PW=$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9')
-    GEN_SECRET_KEY=$(openssl rand -hex 64)
-    GEN_BACKUP_KEY=$(openssl rand -hex 32)
+    GEN_PG_PW=$(openssl rand -hex 24)
+    GEN_APP_PW=$(openssl rand -hex 24)
+    GEN_JWT=$(openssl rand -hex 32)
+    GEN_BACKUP=$(openssl rand -hex 32)
 
-    sed -i "s/CHANGEME_SECURE_POSTGRES_PW_2025/$GEN_PG_PW/" "$ENV_FILE"
-    sed -i "s/CHANGEME_SECURE_REDIS_PW_2025/$GEN_REDIS_PW/" "$ENV_FILE"
-    sed -i "s/CHANGEME_HEX64_SECRET_KEY_FOR_JWT_AUTHENTICATION/$GEN_SECRET_KEY/" "$ENV_FILE"
-    sed -i "s/CHANGEME_AES256_BACKUP_VAULT_KEY/$GEN_BACKUP_KEY/" "$ENV_FILE"
-    log_success ".env mit kryptografisch starken Geheimnissen erzeugt (Berechtigung 600)."
+    sed -i "s|CHANGEME_POSTGRES_ADMIN_PASSWORD|$GEN_PG_PW|" "$ENV_FILE"
+    sed -i "s|CHANGEME_APP_USER_PASSWORD|$GEN_APP_PW|" "$ENV_FILE"
+    sed -i "s|CHANGEME_JWT_SECRET_MIN_32_CHARS|$GEN_JWT|" "$ENV_FILE"
+    sed -i "s|CHANGEME_BACKUP_ENCRYPTION_KEY|$GEN_BACKUP|" "$ENV_FILE"
+
+    read -r -p "Öffentliche Domain [securityops.example]: " INPUT_DOMAIN
+    INPUT_DOMAIN=${INPUT_DOMAIN:-securityops.example}
+    sed -i "s|^DOMAIN=.*|DOMAIN=$INPUT_DOMAIN|" "$ENV_FILE"
+    sed -i "s|^CORS_ORIGIN=.*|CORS_ORIGIN=https://$INPUT_DOMAIN|" "$ENV_FILE"
+
+    log_success ".env erzeugt (Modus 600) und Secrets generiert."
 else
-    log_info "Bestehende .env gefunden. Keine Überschreibung vorgenommen."
+    log_info "Bestehende .env gefunden; keine Überschreibung."
 fi
 
-# 3. Pull & Build Docker Images
-log_info "3/7: Baue gehärtete Docker-Images..."
-docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" build backend worker
+log_info "3/7: Baue Produktionsimages..."
+docker compose -f "$COMPOSE_FILE" build
 
-# 4. Start Core Storage & Database Services
-log_info "4/7: Starte PostgreSQL 16+ und Redis Broker..."
-docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" up -d db redis
+log_info "4/7: Starte PostgreSQL, Migration und Backend..."
+docker compose -f "$COMPOSE_FILE" up -d
 
-log_info "Warte auf Datenbank-Bereitschaft (Healthcheck)..."
-until docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" ps db | grep -q "(healthy)"; do
+log_info "5/7: Warte auf Backend-Healthcheck..."
+BACKEND_HEALTHY=0
+for _ in $(seq 1 60); do
+    if docker compose -f "$COMPOSE_FILE" ps backend 2>/dev/null | grep -q "(healthy)"; then
+        BACKEND_HEALTHY=1
+        break
+    fi
     sleep 2
-    echo -n "."
 done
-echo ""
-log_success "PostgreSQL läuft und akzeptiert interne Verbindungen."
 
-# 5. Database Migrations (Alembic)
-log_info "5/7: Führe PostgreSQL Alembic-Migrationen & RLS-Policies aus..."
-docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" run --rm backend python -m alembic upgrade head
-log_success "Datenbankmigrationen (Alembic 0001_initial_schema) erfolgreich angewendet."
-
-# 6. Start Remaining Services (Backend, Worker, Reverse Proxy, Backup Cron)
-log_info "6/7: Starte API-Backend, Worker, Reverse Proxy & Backup-Dienst..."
-docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" up -d backend worker proxy backup
-
-# 7. Verification Healthcheck
-log_info "7/7: Verifiziere System-Gesundheit..."
-sleep 5
-HEALTH_STATUS=$(docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" exec backend curl -s http://127.0.0.1:8000/api/v1/health || true)
-
-if echo "$HEALTH_STATUS" | grep -q "OPERATIONAL"; then
-    log_success "Healthcheck erfolgreich: SecurityOps 2.0 ist einsatzbereit!"
-else
-    log_warn "Healthcheck antwortete noch nicht vollständig. Bitte 'docker compose logs backend' prüfen."
+if [ "$BACKEND_HEALTHY" -ne 1 ]; then
+    log_err "Backend wurde nicht healthy. Logs prüfen:"
+    docker compose -f "$COMPOSE_FILE" logs --tail=100 backend migrate db-init
+    exit 1
 fi
+log_success "Backend läuft und ist healthy."
 
+log_info "6/7: Prüfe API- und Datenbankstatus..."
+docker compose -f "$COMPOSE_FILE" exec -T backend node -e \
+  "fetch('http://127.0.0.1:8000/api/v1/health').then(async r=>{console.log(await r.text());process.exit(r.ok?0:1)}).catch(e=>{console.error(e);process.exit(1)})"
+
+log_info "7/7: Statusübersicht..."
+docker compose -f "$COMPOSE_FILE" ps
+
+DOMAIN_VALUE=$(grep '^DOMAIN=' "$ENV_FILE" | cut -d= -f2-)
 echo ""
 echo "=========================================================="
-echo "    INSTALLATION ERFOLGREICH ABGESCHLOSSEN!               "
-echo "    Web-Zugriff: https://${DOMAIN:-localhost}            "
-echo "    Dokumentation: deploy/DEPLOYMENT_ARCHITECTURE.md     "
+echo "    INSTALLATION ABGESCHLOSSEN"
+echo "    URL: https://$DOMAIN_VALUE"
+echo "    Health: https://$DOMAIN_VALUE/api/v1/health"
+echo ""
+echo "    Optionaler Demo-Seed (nicht für Produktion):"
+echo "    docker compose -f $COMPOSE_FILE run --rm --entrypoint node backend dist/seeds/seed.js"
 echo "=========================================================="
