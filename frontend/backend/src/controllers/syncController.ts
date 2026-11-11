@@ -21,6 +21,7 @@ const conflictResolveSchema = z.object({
   clientUuid: z.string().min(8).max(64),
   entityType: z.enum(['task', 'shift', 'key', 'guardbook']),
   strategy: z.enum(['USE_LOCAL', 'USE_SERVER']),
+  expectedVersion: z.number().int().positive('expectedVersion muss eine positive Ganzzahl sein.'),
   localPayload: z.record(z.any()).optional()
 });
 
@@ -33,16 +34,33 @@ export interface SyncResultItem {
   message?: string;
 }
 
-function computePayloadHash(payload: Record<string, any>): string {
-  const jsonStr = JSON.stringify(payload, Object.keys(payload).sort());
-  return crypto.createHash('sha256').update(jsonStr).digest('hex');
+/**
+ * Kanonische, rekursive Serialisierung:
+ * Sortiert alle Schlüssel verschachtelter Objekte und normalisiert Arrays deterministisch,
+ * damit identische Datenstrukturen unabhängig von Key-Reihenfolgen denselben SHA-256-Hash erzeugen.
+ */
+export function canonicalStringify(data: any): string {
+  if (data === null || typeof data !== 'object') {
+    return JSON.stringify(data);
+  }
+  if (Array.isArray(data)) {
+    return '[' + data.map(canonicalStringify).join(',') + ']';
+  }
+  const keys = Object.keys(data).sort();
+  const entries = keys.map((key) => `${JSON.stringify(key)}:${canonicalStringify(data[key])}`);
+  return '{' + entries.join(',') + '}';
+}
+
+export function computePayloadHash(payload: Record<string, any>): string {
+  const canonical = canonicalStringify(payload);
+  return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
 }
 
 /**
  * POST /api/v1/sync/push
- * - Atomare Idempotenz via sync_idempotency_receipts
- * - Wachbuchkorrekturen referenzieren entryId
- * - Atomarer Versionsschutz im SQL UPDATE / DELETE
+ * - PostgreSQL Transaction Advisory Lock pro Mutation-ID schützt vor Race Conditions
+ * - Kanonischer SHA-256 Payload-Hash erkennt veränderte Wiederverwendungen
+ * - Atomare fachliche Ausführung und Quittungsspeicherung in derselben Transaktion
  */
 export async function pushSyncMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -58,8 +76,14 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         const payloadHash = computePayloadHash(mut.payload);
 
         // ----------------------------------------------------------------------
-        // 0. ZENTRALE IDEMPOTENZ-PRÜFUNG VIA sync_idempotency_receipts
+        // 0. ATOMARE TRANSACTION ADVISORY LOCKS GEGEN PARALLELE RACE CONDITIONS
         // ----------------------------------------------------------------------
+        // Sperrt den Schlüssel (tenant_id + client_mutation_id) transaktionsweit.
+        // Ein konkurrierender paralleler Request wartet, bis dieser Block committed ist.
+        const lockKey = `${tenantId}:${mut.clientUuid}`;
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
+
+        // Prüfen, ob bereits eine fertige Quittung vorliegt (idempotente Deduplizierung)
         const receiptRes = await client.query(
           `SELECT client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json
            FROM sync_idempotency_receipts
@@ -70,19 +94,19 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         if (receiptRes.rows.length > 0) {
           const receipt = receiptRes.rows[0];
 
-          // Falls dieselbe ID mit verändertem Inhalt übermittelt wird -> Streng REJECTED!
+          // Falls dieselbe Mutation-ID mit abweichendem Inhalt gesendet wurde -> REJECTED!
           if (receipt.payload_hash !== payloadHash) {
             results.push({
               clientUuid: mut.clientUuid,
               serverId: receipt.server_id,
               status: 'REJECTED',
               serverVersion: receipt.server_version,
-              message: 'Mutation-ID wurde mit verändertem Payload wiederverwendet (Integritätsverletzung).'
+              message: 'Integritätsverletzung: Mutation-ID wurde mit abweichendem Inhalt wiederverwendet.'
             });
             continue;
           }
 
-          // Identische Quittung idempotent wiedergeben
+          // Identisches Quittungsergebnis idempotent zurückgeben
           results.push(receipt.response_json as SyncResultItem);
           continue;
         }
@@ -139,7 +163,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               };
             }
           } else if (mut.action === 'UPDATE') {
-            // Korrektur: Identifiziert den ursprünglichen Eintrag zwingend über entryId
             const targetEntryId = mut.payload.entryId;
 
             if (!targetEntryId) {
@@ -148,7 +171,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverId: 'none',
                 status: 'REJECTED',
                 serverVersion: mut.baseVersion,
-                message: 'Wachbuch-Korrektur erfordert Angabe von payload.entryId.'
+                message: 'Wachbuch-Korrektur erfordert die ursprüngliche entryId in payload.entryId.'
               };
             } else {
               const entryCheck = await client.query(
@@ -167,7 +190,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               } else {
                 const note = mut.payload.correctionNote || 'Korrektur aus Offline-Synchronisation';
 
-                // Revision atomar mit eigener client_mutation_id einfügen
+                // Revision atomar mit eigener client_mutation_id einfügen (Deduplizierung)
                 await client.query(
                   `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note, client_mutation_id)
                    VALUES ($1, $2, $3, $4, $5)
@@ -240,7 +263,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           } else if (mut.action === 'UPDATE') {
             const shiftId = mut.payload.id;
 
-            // Atomares Update mit direktem Vergleich von revision_version = baseVersion
+            // Atomares Update mit direktem Vergleich: revision_version = baseVersion
             const updateRes = await client.query(
               `UPDATE shifts 
                SET employee_id = COALESCE($1, employee_id),
@@ -260,7 +283,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverVersion: updateRes.rows[0].revision_version
               };
             } else {
-              // Prüfe ob Datensatz existiert (Konflikt) oder nicht gefunden
               const curRes = await client.query('SELECT id, revision_version, status FROM shifts WHERE id = $1 AND tenant_id = $2', [shiftId, tenantId]);
               if (curRes.rows.length > 0) {
                 itemResult = {
@@ -269,7 +291,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                   status: 'CONFLICT',
                   serverVersion: curRes.rows[0].revision_version,
                   conflictData: { serverStatus: curRes.rows[0].status, serverVersion: curRes.rows[0].revision_version },
-                  message: 'Versionskonflikt bei Schichtaktualisierung.'
+                  message: 'Atomarer Versionskonflikt bei Schichtaktualisierung.'
                 };
               } else {
                 itemResult = {
@@ -365,7 +387,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           } else if (mut.action === 'UPDATE') {
             const taskId = mut.payload.id;
 
-            // ATOMARER VERSIONSSCHUTZ DIREKT IM SQL:
+            // ATOMARER VERSIONSSCHUTZ: Prüfung von revision_version = baseVersion direkt in SQL
             const updateRes = await client.query(
               `UPDATE tasks 
                SET status = $1, revision_version = revision_version + 1
@@ -400,7 +422,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                     clientStatus: mut.payload.status,
                     clientVersion: mut.baseVersion
                   },
-                  message: 'Parallele Bearbeitung festgestellt. Atomarer Versionskonflikt.'
+                  message: 'Atomarer Versionskonflikt: Aufgabe wurde zwischenzeitlich verändert.'
                 };
               } else {
                 itemResult = {
@@ -465,7 +487,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           const keyId = mut.payload.id;
 
           if (mut.action === 'UPDATE') {
-            // Atomares Update von Status, Inhaber und Zeiten mit revision_version
             const keyRes = await client.query(
               `UPDATE keys 
                SET status = $1,
@@ -614,10 +635,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               message: 'Schichtübergabeprotokolle sind unveränderliche Dokumente (UPDATE/DELETE unzulässig).'
             };
           }
-        }
-
-        // Nicht unterstützter Typ
-        else {
+        } else {
           itemResult = {
             clientUuid: mut.clientUuid,
             serverId: 'none',
@@ -628,7 +646,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         }
 
         // ----------------------------------------------------------------------
-        // ATOMARE PERSISTIERUNG DER IDEMPOTENZ-QUITTUNG
+        // ATOMARE PERSISTIERUNG DER IDEMPOTENZ-QUITTUNG IN DERSELBEN TRANSAKTION
         // ----------------------------------------------------------------------
         await client.query(
           `INSERT INTO sync_idempotency_receipts (tenant_id, client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json)
@@ -667,8 +685,9 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 /**
  * POST /api/v1/sync/conflicts/resolve
  * Reale Server-Auflösung von Synchronisationskonflikten:
- * - USE_LOCAL: Übernimmt den lokalen Stand atomar und erhöht revision_version
- * - USE_SERVER: Gibt den echten, aktuellen Serverstand zurück
+ * - USE_LOCAL: Übernimmt den lokalen Stand atomar nur nach Überprüfung von expectedVersion
+ * - USE_SERVER: Liefert den tatsächlichen, vollständigen Serverstand zurück
+ * Revisionssichere Protokollierung in audit_logs.
  */
 export async function resolveSyncConflict(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -680,54 +699,156 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     let actualServerData: any = null;
 
     await withTenantTransaction(tenantId, async (client) => {
+      // 1. ENTITY: TASK
       if (body.entityType === 'task') {
         const taskId = body.localPayload?.id || body.clientUuid;
-        const taskCheck = await client.query('SELECT id, status, revision_version, title FROM tasks WHERE id = $1 AND tenant_id = $2', [taskId, tenantId]);
+        const taskCheck = await client.query(
+          'SELECT id, title, assigned_to_name, site_name, due_date, priority, status, category, revision_version FROM tasks WHERE id = $1 AND tenant_id = $2',
+          [taskId, tenantId]
+        );
 
         if (taskCheck.rows.length === 0) {
-          throw new Error('Aufgabe für Konfliktauflösung nicht gefunden.');
+          throw new Error('Aufgabe für Konfliktauflösung nicht gefunden oder fremder Mandant.');
         }
 
         const currentTask = taskCheck.rows[0];
 
-        if (body.strategy === 'USE_LOCAL' && body.localPayload?.status) {
+        if (body.strategy === 'USE_LOCAL') {
+          // Atomare Versionsprüfung: Darf nur übernehmen, wenn Serverversion exakt expectedVersion entspricht!
           const updRes = await client.query(
             `UPDATE tasks 
-             SET status = $1, revision_version = revision_version + 1
-             WHERE id = $2 AND tenant_id = $3
-             RETURNING id, status, revision_version`,
-            [body.localPayload.status, taskId, tenantId]
+             SET status = COALESCE($1, status),
+                 revision_version = revision_version + 1
+             WHERE id = $2 AND tenant_id = $3 AND revision_version = $4
+             RETURNING id, title, assigned_to_name, site_name, due_date, priority, status, category, revision_version`,
+            [body.localPayload?.status || null, taskId, tenantId, body.expectedVersion]
           );
+
+          if (updRes.rows.length === 0) {
+            throw new Error(`Versionskonflikt: Server-Version (${currentTask.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+          }
+
           actualServerData = updRes.rows[0];
           updated = true;
         } else if (body.strategy === 'USE_SERVER') {
           actualServerData = currentTask;
           updated = true;
         }
-      } else if (body.entityType === 'shift') {
+      }
+
+      // 2. ENTITY: SHIFT
+      else if (body.entityType === 'shift') {
         const shiftId = body.localPayload?.id || body.clientUuid;
-        const shiftCheck = await client.query('SELECT id, status, revision_version, employee_id FROM shifts WHERE id = $1 AND tenant_id = $2', [shiftId, tenantId]);
+        const shiftCheck = await client.query(
+          'SELECT id, site_id, employee_id, shift_date, start_time, end_time, type, status, required_qualification, conflict_reason, revision_version FROM shifts WHERE id = $1 AND tenant_id = $2',
+          [shiftId, tenantId]
+        );
 
         if (shiftCheck.rows.length === 0) {
-          throw new Error('Schicht für Konfliktauflösung nicht gefunden.');
+          throw new Error('Schicht für Konfliktauflösung nicht gefunden oder fremder Mandant.');
         }
 
         const currentShift = shiftCheck.rows[0];
 
-        if (body.strategy === 'USE_LOCAL' && body.localPayload) {
+        if (body.strategy === 'USE_LOCAL') {
           const updRes = await client.query(
             `UPDATE shifts 
              SET status = COALESCE($1, status),
                  employee_id = COALESCE($2, employee_id),
+                 conflict_reason = $3,
                  revision_version = revision_version + 1
-             WHERE id = $3 AND tenant_id = $4
-             RETURNING id, status, revision_version`,
-            [body.localPayload.status || null, body.localPayload.employeeId || null, shiftId, tenantId]
+             WHERE id = $4 AND tenant_id = $5 AND revision_version = $6
+             RETURNING id, site_id, employee_id, shift_date, start_time, end_time, type, status, required_qualification, conflict_reason, revision_version`,
+            [body.localPayload?.status || null, body.localPayload?.employeeId || null, body.localPayload?.conflictReason || null, shiftId, tenantId, body.expectedVersion]
           );
+
+          if (updRes.rows.length === 0) {
+            throw new Error(`Versionskonflikt: Server-Version (${currentShift.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+          }
+
           actualServerData = updRes.rows[0];
           updated = true;
         } else if (body.strategy === 'USE_SERVER') {
           actualServerData = currentShift;
+          updated = true;
+        }
+      }
+
+      // 3. ENTITY: KEY
+      else if (body.entityType === 'key') {
+        const keyId = body.localPayload?.id || body.clientUuid;
+        const keyCheck = await client.query(
+          'SELECT id, site_id, key_number, label, type, status, current_holder_id, issued_at, expected_return, revision_version FROM keys WHERE id = $1 AND tenant_id = $2',
+          [keyId, tenantId]
+        );
+
+        if (keyCheck.rows.length === 0) {
+          throw new Error('Schlüssel für Konfliktauflösung nicht gefunden oder fremder Mandant.');
+        }
+
+        const currentKey = keyCheck.rows[0];
+
+        if (body.strategy === 'USE_LOCAL') {
+          const updRes = await client.query(
+            `UPDATE keys 
+             SET status = $1,
+                 current_holder_id = $2,
+                 issued_at = $3,
+                 expected_return = $4,
+                 revision_version = revision_version + 1
+             WHERE id = $5 AND tenant_id = $6 AND revision_version = $7
+             RETURNING id, site_id, key_number, label, type, status, current_holder_id, issued_at, expected_return, revision_version`,
+            [
+              body.localPayload?.status || currentKey.status,
+              body.localPayload?.currentHolderId || null,
+              body.localPayload?.issuedAt || null,
+              body.localPayload?.expectedReturn || null,
+              keyId,
+              tenantId,
+              body.expectedVersion
+            ]
+          );
+
+          if (updRes.rows.length === 0) {
+            throw new Error(`Versionskonflikt: Server-Version (${currentKey.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+          }
+
+          actualServerData = updRes.rows[0];
+          updated = true;
+        } else if (body.strategy === 'USE_SERVER') {
+          actualServerData = currentKey;
+          updated = true;
+        }
+      }
+
+      // 4. ENTITY: GUARDBOOK (DIN 77200 APPEND-ONLY)
+      else if (body.entityType === 'guardbook') {
+        const entryId = body.localPayload?.id || body.clientUuid;
+        const gbCheck = await client.query(
+          'SELECT id, site_id, guard_id, entry_timestamp, category, priority, stage, title, description, police_involved, resolved FROM guardbook_entries WHERE id = $1 AND tenant_id = $2',
+          [entryId, tenantId]
+        );
+
+        if (gbCheck.rows.length === 0) {
+          throw new Error('Wachbucheintrag nicht gefunden.');
+        }
+
+        const currentGb = gbCheck.rows[0];
+
+        if (body.strategy === 'USE_LOCAL') {
+          // Revisionssicheres Ergänzen als neue Revision!
+          const note = body.localPayload?.correctionNote || 'Korrektur aus manueller Konfliktauflösung';
+          await client.query(
+            `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note, client_mutation_id)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`,
+            [tenantId, entryId, userEmail, note, `rev-conf-${Date.now()}`]
+          );
+
+          actualServerData = currentGb;
+          updated = true;
+        } else if (body.strategy === 'USE_SERVER') {
+          actualServerData = currentGb;
           updated = true;
         }
       } else {

@@ -93,7 +93,7 @@ interface SecurityOpsStore {
   syncQueue: OfflineQueueItem[];
   enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'>) => Promise<void>;
   triggerManualSync: () => Promise<{ success: number; failed: number; conflicts: number }>;
-  resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => void;
+  resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => Promise<void>;
   clearCompletedSyncs: () => void;
 
   // Plugins
@@ -271,6 +271,24 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       }
     });
 
+    getTenantKeys().forEach((k) => {
+      if (k.label.toLowerCase().includes(q) || k.keyNumber.toLowerCase().includes(q)) {
+        results.push({ id: k.id, title: `${k.label} (${k.keyNumber})`, subtitle: `Status: ${k.status} • ${k.siteName}`, category: 'Schlüssel', targetTab: 'keys' });
+      }
+    });
+
+    getTenantTasks().forEach((t) => {
+      if (t.title.toLowerCase().includes(q) || t.assignedToName.toLowerCase().includes(q)) {
+        results.push({ id: t.id, title: t.title, subtitle: `Frist: ${t.dueDate} • ${t.assignedToName}`, category: 'Aufgabe', targetTab: 'tasks' });
+      }
+    });
+
+    getTenantDocuments().forEach((d) => {
+      if (d.title.toLowerCase().includes(q) || d.fileName.toLowerCase().includes(q)) {
+        results.push({ id: d.id, title: d.title, subtitle: `${d.category} • v${d.version}`, category: 'Dokument', targetTab: 'documents' });
+      }
+    });
+
     return results;
   },
 
@@ -299,10 +317,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
   syncQueue: [],
 
-  /**
-   * 2. Zuverlässige Outbox-Speicherung:
-   * Wartet auf transaktionssichere Bestätigung der IndexedDB.
-   */
   enqueueOfflineAction: async (item) => {
     const queueEntry: OfflineQueueItem = {
       ...item,
@@ -336,12 +350,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
-  /**
-   * 1. Echte Synchronisation mit Mutex und Serverquittierung:
-   * Überträgt ausstehende Mutationen an POST /api/v1/sync/push.
-   * Ein Eintrag wird ERST nach bestätigter Serverantwort als SYNCED markiert!
-   * Bei Netzwerkfehlern bleiben alle Einträge unversehrt in der Outbox.
-   */
   triggerManualSync: async () => {
     const { isOnline, currentTenantId, syncQueue } = get();
 
@@ -349,7 +357,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       return { success: 0, failed: syncQueue.filter((q) => q.status === 'pending').length, conflicts: 0 };
     }
 
-    // Mutex verhindert parallele Synchronisationsläufe
     if (isSyncRunningMutex) {
       console.warn('[SYNC MUTEX] Synchronisation läuft bereits. Paralleler Aufruf abgewiesen.');
       return { success: 0, failed: 0, conflicts: 0 };
@@ -363,7 +370,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     let conflictCount = 0;
 
     try {
-      // 1. Hole alle ausstehenden Mutationen aus IndexedDB
       const pendingItems = await offlineVault.getPendingOutbox(currentTenantId);
 
       if (pendingItems.length === 0) {
@@ -372,7 +378,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         return { success: 0, failed: 0, conflicts: 0 };
       }
 
-      // 2. An echten Backend-Endpunkt POST /api/v1/sync/push übertragen
       const syncPayload = {
         deviceId: offlineVault.getDeviceId(),
         mutations: pendingItems.map((p) => ({
@@ -389,8 +394,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       try {
         serverResponse = await apiClient.post('/sync/push', syncPayload);
       } catch (networkErr) {
-        // Netzwerkfehler: Keine Mutationen löschen oder als synchronisiert markieren!
-        console.warn('[SYNC PUSH NETWORK FAILED] Verbindung fehlgeschlagen, Outbox bleibt erhalten:', networkErr);
+        console.warn('[SYNC PUSH NETWORK FAILED] Outbox bleibt unversehrt:', networkErr);
         for (const item of pendingItems) {
           await offlineVault.updateMutationStatus(item.id, 'FAILED', {
             errorMessage: 'Netzwerkfehler während Übertragung'
@@ -401,16 +405,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         return { success: 0, failed: pendingItems.length, conflicts: 0 };
       }
 
-      // 3. Nur mit bestätigter Serverquittung Status aktualisieren
       if (serverResponse && Array.isArray(serverResponse)) {
         for (const receipt of serverResponse) {
           if (receipt.status === 'SYNCED') {
             successCount++;
-            // Reale Bestätigung liegt vor -> Aus lokaler Outbox entfernen
             await offlineVault.markSynced(receipt.clientUuid);
           } else if (receipt.status === 'CONFLICT') {
             conflictCount++;
-            // Konflikte MÜSSEN erhalten bleiben und dürfen nicht gelöscht werden!
             await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', {
               conflictDetails: receipt.conflictData
             });
@@ -423,7 +424,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         }
       }
 
-      // Aktualisiere Store-Zustand
       const remainingPending = await offlineVault.getPendingOutbox(currentTenantId);
       set({
         syncQueue: remainingPending.map((p) => ({
@@ -465,12 +465,59 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     return { success: successCount, failed: failedCount, conflicts: conflictCount };
   },
 
-  resolveConflict: (queueId) => {
-    set((state) => ({
-      syncQueue: state.syncQueue.map((q) =>
-        q.id === queueId ? { ...q, status: 'synced' as SyncStatus, conflictDetails: undefined } : q
-      )
-    }));
+  /**
+   * Vollständige Konfliktauflösung im Frontend:
+   * Führt einen echten API-Aufruf an POST /api/v1/sync/conflicts/resolve durch.
+   * Erst nach bestätigter Serverquittung wird die Outbox-Mutation als erledigt markiert.
+   */
+  resolveConflict: async (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER'): Promise<void> => {
+    const { syncQueue } = get();
+    const item = syncQueue.find((q) => q.id === queueId);
+    if (!item) return;
+
+    try {
+      const response = await apiClient.post('/sync/conflicts/resolve', {
+        clientUuid: item.id,
+        entityType: item.entityType,
+        strategy: resolution,
+        expectedVersion: item.conflictDetails?.serverVersion || 2,
+        localPayload: item.payload
+      });
+
+      if (response && response.serverState) {
+        // Bei USE_SERVER: Übernehme den tatsächlichen Serverstand in den Store
+        if (item.entityType === 'task') {
+          set((state) => ({
+            tasks: state.tasks.map((t) => (t.id === response.serverState.id ? { ...t, status: response.serverState.status } : t))
+          }));
+        } else if (item.entityType === 'shift') {
+          set((state) => ({
+            shifts: state.shifts.map((s) => (s.id === response.serverState.id ? { ...s, status: response.serverState.status } : s))
+          }));
+        }
+      }
+
+      // Erst jetzt aus der Outbox entfernen!
+      await offlineVault.markSynced(queueId);
+
+      set((state) => ({
+        syncQueue: state.syncQueue.filter((q) => q.id !== queueId)
+      }));
+
+      get().addNotification(
+        'Konflikt aufgelöst',
+        `Konflikt ${queueId} wurde erfolgreich mit Strategie ${resolution} aufgelöst.`,
+        'info'
+      );
+    } catch (err: any) {
+      console.error('[CONFLICT RESOLUTION FAILED]', err);
+      get().addNotification(
+        'Fehler bei Konfliktauflösung',
+        `Server konnte Konflikt nicht auflösen: ${err?.message || 'Netzwerkfehler'}`,
+        'alert'
+      );
+      throw err;
+    }
   },
 
   clearCompletedSyncs: () => {
@@ -739,11 +786,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }));
   },
 
-  /**
-   * Wachbucheintrag erfassen:
-   * Wartet zwingend auf erfolgreiche lokale Speicherung in IndexedDB,
-   * bevor die Erfolgsmeldung in der UI angezeigt wird!
-   */
   addGuardBookEntry: async (entry) => {
     const { currentTenantId, isOnline, enqueueOfflineAction, addTask, addNotification, addAuditLog } = get();
     const entryId = `gb-${Date.now()}`;
@@ -764,7 +806,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       ]
     };
 
-    // Vor UI-Erfolg zwingend in IndexedDB sichern
     await enqueueOfflineAction({
       tenantId: currentTenantId,
       entityType: 'guardbook',
@@ -808,7 +849,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       ipAddress: '194.25.101.44'
     });
 
-    // Wenn online: Direkt Hintergrund-Sync anstoßen
     if (isOnline) {
       get().triggerManualSync().catch(console.error);
     }

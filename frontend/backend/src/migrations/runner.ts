@@ -3,18 +3,25 @@ import path from 'path';
 import { migrationPool } from '../config/database';
 
 /**
- * Führt Schema-Migrationen AUSSCHLIESSLICH über die administrative Verbindung aus.
- * Verwendet DATABASE_MIGRATION_URL (secops_admin).
+ * Führt alle DDL-Migrationen in aufsteigender Dateireihenfolge
+ * AUSSCHLIESSLICH über die administrative Verbindung (DATABASE_MIGRATION_URL) aus.
  */
 export async function runMigrations(): Promise<void> {
-  console.log('[MIGRATION] Starte PostgreSQL 16+ DDL Migration via secops_admin...');
-  const sqlPath = path.join(__dirname, '001_initial_schema.sql');
-  const sql = fs.readFileSync(sqlPath, 'utf8');
+  console.log('[MIGRATION] Starte PostgreSQL 16+ DDL Migrationen via secops_admin...');
+  const migrationsDir = path.join(__dirname);
+  const files = fs.readdirSync(migrationsDir)
+    .filter((file) => file.endsWith('.sql'))
+    .sort();
 
   const client = await migrationPool.connect();
   try {
-    await client.query(sql);
-    console.log('[MIGRATION SUCCESS] Alle 24 Tabellen, Trigger und RLS-Policies erfolgreich angelegt.');
+    for (const file of files) {
+      console.log(`[MIGRATION] Führe ${file} aus...`);
+      const sqlPath = path.join(migrationsDir, file);
+      const sql = fs.readFileSync(sqlPath, 'utf8');
+      await client.query(sql);
+    }
+    console.log('[MIGRATION SUCCESS] Alle Migrationen erfolgreich angewendet.');
   } catch (error) {
     console.error('[MIGRATION FAILED]', error);
     throw error;
