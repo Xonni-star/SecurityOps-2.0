@@ -3,10 +3,11 @@ import { useSecurityStore } from '../store';
 import { apiClient, ApiError } from '../services/apiClient';
 import { offlineVault } from '../services/indexedDbService';
 
-describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.12 - Vitest)', () => {
+describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.13 - Vitest)', () => {
   const queueId = `test-q-${Date.now()}`;
 
   beforeEach(() => {
+    // Initialisiere realen Testzustand im Store
     useSecurityStore.setState({
       syncQueue: [
         {
@@ -41,6 +42,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     vi.restoreAllMocks();
   });
 
+  // Szenario 1: Gültige Serverantwort
   test('1. Gültige Konfliktantwort mit data, applied: true und serverState entfernt Outbox und aktualisiert Store', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
       applied: true,
@@ -60,13 +62,16 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     await useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL');
 
     const state = useSecurityStore.getState();
+    // Outbox wurde erst nach erfolgreicher Serverquittung entfernt
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeUndefined();
+    // Store wurde mit vollständigem serverState aktualisiert
     const task = state.tasks.find((t) => t.id === 'task-123');
     expect(task?.status).toBe('In Bearbeitung');
     expect(task?.title).toBe('Testaufgabe aktualisiert');
     expect(task?.revisionVersion).toBe(3);
   });
 
+  // Szenario 2: Fehlendes Response-Objekt
   test('2. API liefert kein data-Objekt: Outbox bleibt unverändert erhalten, Fehler wird geworfen', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValueOnce(null as any);
     const markSyncedSpy = vi.spyOn(offlineVault, 'markSynced');
@@ -76,10 +81,12 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     ).rejects.toThrow('Ungültige Serverantwort');
 
     const state = useSecurityStore.getState();
+    // Outbox MUSS unversehrt erhalten bleiben
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
     expect(markSyncedSpy).not.toHaveBeenCalled();
   });
 
+  // Szenario 3: applied: false
   test('3. API liefert applied: false: Outbox bleibt erhalten', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
       applied: false,
@@ -97,6 +104,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
   });
 
+  // Szenario 4: Fehlender serverState
   test('4. API liefert keinen serverState: Outbox bleibt erhalten', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
       applied: true,
@@ -114,6 +122,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
   });
 
+  // Szenario 5: Netzwerkfehler
   test('5. Netzwerkfehler während Konfliktauflösung: Outbox bleibt erhalten und wirft Fehler', async () => {
     vi.spyOn(apiClient, 'post').mockRejectedValueOnce(new Error('Network connection lost'));
 
@@ -125,6 +134,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
   });
 
+  // Szenario 6: HTTP 409 Conflict
   test('6. HTTP-Fehler 409 Conflict: Outbox bleibt erhalten', async () => {
     vi.spyOn(apiClient, 'post').mockRejectedValueOnce(new ApiError(409, 'Versionskonflikt'));
 

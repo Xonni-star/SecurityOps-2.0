@@ -6,7 +6,7 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ## 1. Verzeichnisstruktur & Architekturtrennung
 
-- **Frontend**: `frontend/` (bzw. Root-Verzeichnis bei flachem Checkout). React 18+/19 SPA mit Tailwind CSS, Zustand Store und IndexedDB Vault.
+- **Frontend**: `frontend/` (bzw. Root-Verzeichnis bei flachem Checkout). React 18+/19 SPA mit Tailwind CSS, Zustand Store, IndexedDB Vault und Vitest-Testumgebung.
 - **SecurityOps TypeScript-Backend**: `frontend/backend/` (bzw. `backend/` bei flacher Monorepo-Struktur). Enthält die vollwertige Node.js/Express/TypeScript REST-API (`/api/v1`), PostgreSQL RLS-Transaktionen und die Idempotenz-Engine.
 - **WICHTIGER HINWEIS**: Das separate Root-Verzeichnis `backend/` (sofern im Repository vorhanden) ist ein eigenständiges Google-Cloud-Proxy-Backend und **nicht** das SecurityOps-Datenbank- und Anwendungsbackend! Alle SecurityOps-Backend-Befehle werden unter `frontend/backend/` ausgeführt.
 
@@ -14,7 +14,7 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ## 2. Installations-, Build- und Testbefehle
 
-### 2.1 Backend (SecurityOps TypeScript-Backend)
+### 2.1 Backend (SecurityOps TypeScript-Backend unter `frontend/backend/`)
 Aus dem Repository-Root auszuführen:
 ```bash
 # Abhängigkeiten installieren
@@ -33,10 +33,11 @@ npm --prefix frontend/backend run seed
 npm --prefix frontend/backend test -- --runInBand
 ```
 
-### 2.2 Frontend (React, Zustand Store & Vitest)
-Aus dem Frontend-Verzeichnis (`cd frontend` oder aus dem Root):
+### 2.2 Frontend (React, Zustand Store & Vitest unter `frontend/`)
+Aus dem Frontend-Verzeichnis (`cd frontend`):
 ```bash
 # Abhängigkeiten installieren
+cd frontend
 npm install
 
 # Frontend Store- und Outbox-Vertragstests ausführen (Vitest)
