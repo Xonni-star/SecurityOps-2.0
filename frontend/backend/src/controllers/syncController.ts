@@ -684,11 +684,12 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
 /**
  * POST /api/v1/sync/conflicts/resolve
- * Reale Server-Auflösung von Synchronisationskonflikten:
- * - Liefert standardisiertes ResponseEnvelope mit data: { applied: boolean, serverState: any, clientUuid: string, entityType: string, strategy: string }
- * - USE_LOCAL: Übernimmt den lokalen Stand atomar nur nach Überprüfung von expectedVersion
- * - USE_SERVER: Liefert den tatsächlichen, vollständigen Serverstand zurück
- * - Bei Versionsabweichung wird HTTP 409 Conflict geworfen (statt HTTP 500)
+ * Reale, vollständig idempotente Server-Auflösung von Synchronisationskonflikten:
+ * - Nutzt PostgreSQL Transaction Advisory Lock
+ * - Prüft sync_idempotency_receipts auf bereits vorhandene Quittung
+ * - Bei wiederholtem Aufruf: Gibt reproduzierbar dasselbe Ergebnis zurück OHNE neue Revision oder Audit-Eintrag!
+ * - Bei manipulierter Wiederholung: Abweisung mit HTTP 409
+ * - Liefert standardisiertes ResponseEnvelope mit data: { applied, clientUuid, entityType, strategy, serverState }
  */
 export async function resolveSyncConflict(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -696,11 +697,47 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     const userEmail = req.user!.email;
     const body = conflictResolveSchema.parse(req.body);
 
-    let updated = false;
-    let actualServerData: any = null;
+    const payloadHash = computePayloadHash({
+      clientUuid: body.clientUuid,
+      entityType: body.entityType,
+      strategy: body.strategy,
+      expectedVersion: body.expectedVersion,
+      localPayload: body.localPayload || {}
+    });
+
+    let conflictResponseData: any = null;
 
     await withTenantTransaction(tenantId, async (client) => {
-      // 1. ENTITY: TASK
+      // 1. Transaction Advisory Lock zur Serialisierung paralleler Anfragen
+      const lockKey = `${tenantId}:conflict:${body.clientUuid}`;
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
+
+      // 2. Idempotenzprüfung via sync_idempotency_receipts
+      const receiptRes = await client.query(
+        `SELECT client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json
+         FROM sync_idempotency_receipts
+         WHERE tenant_id = $1 AND client_mutation_id = $2`,
+        [tenantId, body.clientUuid]
+      );
+
+      if (receiptRes.rows.length > 0) {
+        const receipt = receiptRes.rows[0];
+
+        // Falls dieselbe UUID mit verändertem Inhalt gesendet wurde -> REJECT!
+        if (receipt.payload_hash !== payloadHash) {
+          throw new ConflictError('Integritätsverletzung: Konfliktauflösungs-ID wurde mit abweichendem Inhalt wiederverwendet.');
+        }
+
+        // Reproduzierbare Quittung zurückgeben OHNE erneute Revision oder erneutes Audit-Log!
+        conflictResponseData = receipt.response_json;
+        return;
+      }
+
+      let updated = false;
+      let actualServerData: any = null;
+
+      // 3. Fachliche Durchführung je Entitätstyp
+      // A. TASK
       if (body.entityType === 'task') {
         const taskId = body.localPayload?.id || body.clientUuid;
         const taskCheck = await client.query(
@@ -747,7 +784,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         }
       }
 
-      // 2. ENTITY: SHIFT
+      // B. SHIFT
       else if (body.entityType === 'shift') {
         const shiftId = body.localPayload?.id || body.clientUuid;
         const shiftCheck = await client.query(
@@ -792,7 +829,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         }
       }
 
-      // 3. ENTITY: KEY
+      // C. KEY
       else if (body.entityType === 'key') {
         const keyId = body.localPayload?.id || body.clientUuid;
         const keyCheck = await client.query(
@@ -839,7 +876,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         }
       }
 
-      // 4. ENTITY: GUARDBOOK (DIN 77200 APPEND-ONLY MIT IDEMPOTENTER CLIENT-UUID)
+      // D. GUARDBOOK (DIN 77200 APPEND-ONLY MIT IDEMPOTENTER REVISION)
       else if (body.entityType === 'guardbook') {
         const entryId = body.localPayload?.id || body.clientUuid;
         const gbCheck = await client.query(
@@ -848,7 +885,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         );
 
         if (gbCheck.rows.length === 0) {
-          throw new ConflictError('Wachbucheintrag nicht gefunden.');
+          throw new ConflictError('Wachbucheintrag nicht gefunden oder fremder Mandant.');
         }
 
         const currentGb = gbCheck.rows[0];
@@ -882,24 +919,42 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         throw new ConflictError(`Konfliktstrategie für Typ '${body.entityType}' nicht unterstützt.`);
       }
 
-      // Revisionssichere Protokollierung der Konfliktentscheidung
+      // 4. Revisionssichere Protokollierung der Konfliktentscheidung (nur beim ERSTEN Mal!)
       await client.query(
         `INSERT INTO audit_logs (tenant_id, user_email, role, action_type, severity, target_entity, details, ip_address)
          VALUES ($1, $2, 'Einsatzleitung', 'CONFLICT_RESOLVED', 'INFO', $3, $4, $5)`,
         [tenantId, userEmail, `Conflict:${body.clientUuid}`, `Konflikt aufgelöst: Strategie=${body.strategy}, Entity=${body.entityType}`, req.ip || '127.0.0.1']
+      );
+
+      conflictResponseData = {
+        applied: updated,
+        clientUuid: body.clientUuid,
+        entityType: body.entityType,
+        strategy: body.strategy,
+        serverState: actualServerData
+      };
+
+      // 5. Quittung atomar in derselben Transaktion abspeichern
+      await client.query(
+        `INSERT INTO sync_idempotency_receipts (tenant_id, client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json)
+         VALUES ($1, $2, $3, 'RESOLVE', $4, 'SYNCED', $5, $6, $7)
+         ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`,
+        [
+          tenantId,
+          body.clientUuid,
+          body.entityType,
+          payloadHash,
+          String(actualServerData?.id || body.clientUuid),
+          Number(actualServerData?.revision_version || 1),
+          JSON.stringify(conflictResponseData)
+        ]
       );
     });
 
     res.json({
       success: true,
       message: `Konflikt ${body.clientUuid} erfolgreich auf dem Server aufgelöst (${body.strategy}).`,
-      data: {
-        applied: updated,
-        clientUuid: body.clientUuid,
-        entityType: body.entityType,
-        strategy: body.strategy,
-        serverState: actualServerData
-      }
+      data: conflictResponseData
     });
   } catch (error) {
     next(error);

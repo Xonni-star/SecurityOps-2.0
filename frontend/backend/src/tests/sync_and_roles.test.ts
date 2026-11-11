@@ -5,7 +5,7 @@ import { app } from '../app';
 import { pool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
 import { env } from '../config/env';
 
-describe('SecurityOps 2.0 - Schritt 5R.2.5: Konflikttests, HTTP 409 Status & API-Vertrag', () => {
+describe('SecurityOps 2.0 - Schritt 5R.2.6: Vollständige Idempotenz der Konfliktauflösung & RLS-Schutz', () => {
   let testTenantA: string;
   let testTenantB: string;
   let testUserAId: string;
@@ -441,7 +441,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.5: Konflikttests, HTTP 409 Status & API
     expect(check.rows[0].revision_version).toBe(2);
   });
 
-  // 12. Konfliktauflösung: Veraltete Version liefert HTTP 409 Conflict (gehärtet)
+  // 12. Konfliktauflösung: Veraltete Version liefert HTTP 409 Conflict
   test('12. Konfliktauflösung: USE_LOCAL mit veralteter expectedVersion liefert HTTP 409 Conflict', async () => {
     const taskId = await withTenantTransaction(testTenantA, async (tx) => {
       return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status, revision_version) VALUES ($1, 'Task Veraltet', 'Leitung', CURRENT_DATE, 'Offen', 3) RETURNING id", [testTenantA])).rows[0].id;
@@ -454,11 +454,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.5: Konflikttests, HTTP 409 Status & API
         clientUuid: `res-loc-fail-${Date.now()}`,
         entityType: 'task',
         strategy: 'USE_LOCAL',
-        expectedVersion: 1, // Veraltet (Server ist bei 3)
+        expectedVersion: 1,
         localPayload: { id: taskId, status: 'In Bearbeitung' }
       });
 
-    // Erwartet HTTP 409 Conflict gemäß Schritt 5R.2.5 Vorgabe!
     expect(res.status).toBe(409);
     expect(res.body.success).toBe(false);
     expect(res.body.message).toContain('Versionskonflikt');
@@ -494,12 +493,12 @@ describe('SecurityOps 2.0 - Schritt 5R.2.5: Konflikttests, HTTP 409 Status & API
     expect(res.body.data.serverState.revision_version).toBe(2);
   });
 
-  // 14. Wachbuch-Konfliktauflösung Idempotenz
-  test('14. Wachbuch: Wiederholte Konfliktauflösung mit derselben clientUuid erzeugt keine zweite Revision', async () => {
+  // 14. Wachbuch-Konfliktauflösung Idempotenz & KEIN doppelter Audit-Eintrag (Schritt 5R.2.6 Kernanforderung)
+  test('14. Wachbuch: Wiederholte Konfliktauflösung erzeugt WEDER zweite Revision NOCH zweiten Audit-Eintrag', async () => {
     const entryId = await withTenantTransaction(testTenantA, async (tx) => {
       const r = await tx.query(`
         INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description)
-        VALUES ($1, $2, $3, 'Vorkommnis', 'Dringend', 'Konflikteintrag', 'Basis')
+        VALUES ($1, $2, $3, 'Vorkommnis', 'Dringend', 'Konflikteintrag Idem', 'Basis')
         RETURNING id;
       `, [testTenantA, siteAId, guardAId]);
       return r.rows[0].id;
@@ -521,7 +520,20 @@ describe('SecurityOps 2.0 - Schritt 5R.2.5: Konflikttests, HTTP 409 Status & API
     expect(res1.status).toBe(200);
     expect(res1.body.data.applied).toBe(true);
 
-    // 2. Wiederholte Konfliktauflösung mit identischer clientUuid
+    // Zähle Audit-Logs und Revisionen nach erster Ausführung
+    const auditCount1 = await withTenantTransaction(testTenantA, async (tx) => {
+      const r = await tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${stableConflictUuid}`]);
+      return parseInt(r.rows[0].count, 10);
+    });
+    const revCount1 = await withTenantTransaction(testTenantA, async (tx) => {
+      const r = await tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [stableConflictUuid]);
+      return parseInt(r.rows[0].count, 10);
+    });
+
+    expect(auditCount1).toBe(1);
+    expect(revCount1).toBe(1);
+
+    // 2. Wiederholte identische Konfliktauflösung mit derselben clientUuid
     const res2 = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
@@ -535,54 +547,55 @@ describe('SecurityOps 2.0 - Schritt 5R.2.5: Konflikttests, HTTP 409 Status & API
     expect(res2.status).toBe(200);
     expect(res2.body.data.applied).toBe(true);
 
-    // Prüfe: Exakt 1 Revision in guardbook_revisions
-    const revCount = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT count(*) as count FROM guardbook_revisions WHERE entry_id = $1', [entryId]);
+    // Zähle Audit-Logs und Revisionen nach zweiter Ausführung -> MÜSSEN EXAKT UNVERÄNDERT BLEIBEN!
+    const auditCount2 = await withTenantTransaction(testTenantA, async (tx) => {
+      const r = await tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${stableConflictUuid}`]);
+      return parseInt(r.rows[0].count, 10);
     });
-    expect(parseInt(revCount.rows[0].count, 10)).toBe(1);
+    const revCount2 = await withTenantTransaction(testTenantA, async (tx) => {
+      const r = await tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [stableConflictUuid]);
+      return parseInt(r.rows[0].count, 10);
+    });
+
+    expect(auditCount2).toBe(1); // Kein zweiter Audit-Eintrag!
+    expect(revCount2).toBe(1);   // Keine zweite Revision!
+    expect(res1.body.data.serverState.id).toBe(res2.body.data.serverState.id);
   });
 
-  // 15. Gleiche Mutation-ID mit verändertem Inhalt wird abgewiesen
-  test('15. Gleiche Mutation-ID mit verändertem Inhalt wird als REJECTED abgewiesen', async () => {
-    const reusableUuid = `tamper-id-${Date.now()}`;
+  // 15. Gleiche Konflikt-UUID mit verändertem Inhalt wird abgewiesen
+  test('15. Gleiche Konflikt-UUID mit verändertem Inhalt wird mit HTTP 409 abgewiesen', async () => {
+    const entryId = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query("SELECT id FROM guardbook_entries WHERE tenant_id = $1 LIMIT 1", [testTenantA])).rows[0].id;
+    });
 
+    const conflictUuid = `conf-tamper-${Date.now()}`;
+
+    // 1. Erstausführung
     await request(app)
-      .post('/api/v1/sync/push')
+      .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
       .send({
-        deviceId: 'dev-01',
-        mutations: [
-          {
-            clientUuid: reusableUuid,
-            entityType: 'guardbook',
-            action: 'CREATE',
-            clientTimestamp: new Date().toISOString(),
-            baseVersion: 1,
-            payload: { siteId: siteAId, guardId: guardAId, title: 'Originaler Titel', description: 'Original' }
-          }
-        ]
+        clientUuid: conflictUuid,
+        entityType: 'guardbook',
+        strategy: 'USE_LOCAL',
+        expectedVersion: 1,
+        localPayload: { id: entryId, correctionNote: 'Echter Nachtrag' }
       });
 
+    // 2. Manipulierter zweiter Aufruf mit geänderter Korrektur aber identischer UUID
     const resTamper = await request(app)
-      .post('/api/v1/sync/push')
+      .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
       .send({
-        deviceId: 'dev-01',
-        mutations: [
-          {
-            clientUuid: reusableUuid,
-            entityType: 'guardbook',
-            action: 'CREATE',
-            clientTimestamp: new Date().toISOString(),
-            baseVersion: 1,
-            payload: { siteId: siteAId, guardId: guardAId, title: 'Manipulierter Titel', description: 'Gefälscht' }
-          }
-        ]
+        clientUuid: conflictUuid,
+        entityType: 'guardbook',
+        strategy: 'USE_LOCAL',
+        expectedVersion: 1,
+        localPayload: { id: entryId, correctionNote: 'Manipulierter Nachtrag (Fälschung)' }
       });
 
-    expect(resTamper.status).toBe(200);
-    expect(resTamper.body.data[0].status).toBe('REJECTED');
-    expect(resTamper.body.data[0].message).toContain('Integritätsverletzung');
+    expect(resTamper.status).toBe(409);
+    expect(resTamper.body.message).toContain('Integritätsverletzung');
   });
 
   // 16. Mandantenisolation bei Konfliktauflösung
@@ -613,40 +626,50 @@ describe('SecurityOps 2.0 - Schritt 5R.2.5: Konflikttests, HTTP 409 Status & API
         localPayload: { id: taskIdA }
       });
 
-    // Abgewiesen mit HTTP 409
     expect(resB.status).toBe(409);
     expect(resB.body.success).toBe(false);
     expect(resB.body.message).toContain('nicht gefunden oder fremder Mandant');
   });
 
-  // 17. Parallele Übertragung derselben Mutation (Advisory Lock)
-  test('17. Parallele Übertragung derselben Mutation führt zu exakt einer Ausführung (Advisory Lock)', async () => {
-    const parallelUuid = `parallel-mut-${Date.now()}`;
+  // 17. Parallele Konfliktauflösung mit identischer UUID (Advisory Lock Serialisierung)
+  test('17. Zwei parallele identische Konfliktauflösungen führen zu exakt einer Ausführung', async () => {
+    const entryId = await withTenantTransaction(testTenantA, async (tx) => {
+      const r = await tx.query(`
+        INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description)
+        VALUES ($1, $2, $3, 'Vorkommnis', 'Dringend', 'Parallel Konflikt Eintrag', 'Text')
+        RETURNING id;
+      `, [testTenantA, siteAId, guardAId]);
+      return r.rows[0].id;
+    });
+
+    const parallelConflictUuid = `conf-parallel-${Date.now()}`;
     const payload = {
-      deviceId: 'dev-01',
-      mutations: [
-        {
-          clientUuid: parallelUuid,
-          entityType: 'task',
-          action: 'CREATE',
-          clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: { title: 'Paralleler Task', status: 'Offen' }
-        }
-      ]
+      clientUuid: parallelConflictUuid,
+      entityType: 'guardbook',
+      strategy: 'USE_LOCAL',
+      expectedVersion: 1,
+      localPayload: { id: entryId, correctionNote: 'Parallele Konfliktauflösung' }
     };
 
     const [res1, res2] = await Promise.all([
-      request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload),
-      request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload)
+      request(app).post('/api/v1/sync/conflicts/resolve').set('Authorization', `Bearer ${testTokenA}`).send(payload),
+      request(app).post('/api/v1/sync/conflicts/resolve').set('Authorization', `Bearer ${testTokenA}`).send(payload)
     ]);
 
-    expect(res1.body.data[0].status).toBe('SYNCED');
-    expect(res2.body.data[0].status).toBe('SYNCED');
+    expect(res1.status).toBe(200);
+    expect(res2.status).toBe(200);
+    expect(res1.body.data.applied).toBe(true);
+    expect(res2.body.data.applied).toBe(true);
 
-    const countCheck = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT count(*) as count FROM tasks WHERE client_mutation_id = $1', [parallelUuid]);
+    // Genau 1 Revision und 1 Audit-Eintrag erzeugt
+    const revCount = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query("SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1", [parallelConflictUuid]);
     });
-    expect(parseInt(countCheck.rows[0].count, 10)).toBe(1);
+    const auditCount = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query("SELECT count(*) as count FROM audit_logs WHERE target_entity = $1", [`Conflict:${parallelConflictUuid}`]);
+    });
+
+    expect(parseInt(revCount.rows[0].count, 10)).toBe(1);
+    expect(parseInt(auditCount.rows[0].count, 10)).toBe(1);
   });
 });
