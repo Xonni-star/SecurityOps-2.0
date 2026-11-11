@@ -664,7 +664,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
       }
     });
 
-    // Einheitsvertrag: ResponseEnvelope mit data-Array
     res.json({
       success: true,
       message: `${results.length} Synchronisationsoperation(en) verarbeitet`,
@@ -847,7 +846,6 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         const currentGb = gbCheck.rows[0];
 
         if (body.strategy === 'USE_LOCAL') {
-          // Revisionssicheres Ergänzen als neue Revision mit stabiler client_mutation_id aus body.clientUuid
           const note = body.localPayload?.correctionNote || 'Korrektur aus manueller Konfliktauflösung';
           await client.query(
             `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note, client_mutation_id)
@@ -856,7 +854,6 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
             [tenantId, entryId, userEmail, note, body.clientUuid]
           );
 
-          // Hole alle Revisionen des Eintrags
           const revs = await client.query(
             'SELECT id, timestamp, author_name, note FROM guardbook_revisions WHERE entry_id = $1 AND tenant_id = $2 ORDER BY created_at ASC',
             [entryId, tenantId]
@@ -885,7 +882,6 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       );
     });
 
-    // Einheitlicher Response-Vertrag: data-Envelope enthält applied und vollständigen serverState
     res.json({
       success: true,
       message: `Konflikt ${body.clientUuid} erfolgreich auf dem Server aufgelöst (${body.strategy}).`,

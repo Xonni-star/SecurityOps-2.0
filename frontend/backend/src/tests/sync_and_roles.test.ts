@@ -5,7 +5,7 @@ import { app } from '../app';
 import { pool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
 import { env } from '../config/env';
 
-describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz & Konfliktauflösung', () => {
+describe('SecurityOps 2.0 - Schritt 5R.2.4: Echte Konfliktauflösung, data-Envelope & atomarer Versionsschutz', () => {
   let testTenantA: string;
   let testTenantB: string;
   let testUserAId: string;
@@ -129,7 +129,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
 
   // 2. Wachbuch: UPDATE mit ursprünglicher entryId
   test('2. Wachbuch: UPDATE identifiziert Eintrag über entryId und hängt Revision an', async () => {
-    // Hole ID eines bestehenden Eintrags
     const entryId = await withTenantTransaction(testTenantA, async (tx) => {
       const r = await tx.query(`
         INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description)
@@ -162,7 +161,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('SYNCED');
 
-    // Revision in guardbook_revisions prüfen
     const revCheck = await withTenantTransaction(testTenantA, async (tx) => {
       return tx.query('SELECT * FROM guardbook_revisions WHERE entry_id = $1', [entryId]);
     });
@@ -194,11 +192,9 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
     const res1 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
     expect(res1.body.data[0].status).toBe('SYNCED');
 
-    // Erneuter Push derselben Mutation
     const res2 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
     expect(res2.body.data[0].status).toBe('SYNCED');
 
-    // Genau 1 Revision vorhanden
     const revCount = await withTenantTransaction(testTenantA, async (tx) => {
       return tx.query('SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1', [corrUuid]);
     });
@@ -207,7 +203,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
 
   // 4. Schichten: Versionskonflikt bei paralleler Änderung
   test('4. Schichten: Atomarer Versionskonflikt bei veralteter baseVersion', async () => {
-    // Schicht mit Version 1 anlegen
     const shiftId = await withTenantTransaction(testTenantA, async (tx) => {
       const s = await tx.query(`
         INSERT INTO shifts (tenant_id, site_id, employee_id, shift_date, start_time, end_time, required_qualification, revision_version)
@@ -217,7 +212,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
       return s.rows[0].id;
     });
 
-    // Client sendet UPDATE mit veralteter baseVersion = 1 -> Muss CONFLICT liefern!
     const conflictPayload = {
       deviceId: 'dev-01',
       mutations: [
@@ -314,7 +308,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
       return t.rows[0].id;
     });
 
-    // UPDATE
     const upPayload = {
       deviceId: 'dev-01',
       mutations: [
@@ -332,7 +325,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
     expect(resUp.body.data[0].status).toBe('SYNCED');
     expect(resUp.body.data[0].serverVersion).toBe(2);
 
-    // DELETE mit baseVersion = 2
     const delPayload = {
       deviceId: 'dev-01',
       mutations: [
@@ -418,10 +410,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
     expect(res.body.data[0].status).toBe('REJECTED');
   });
 
-  // 11. Konfliktauflösung: USE_LOCAL
-  test('11. Konfliktauflösung: USE_LOCAL übernimmt lokalen Stand atomar', async () => {
+  // 11. Konfliktauflösung: USE_LOCAL mit korrekter Version (data-Envelope Prüfung)
+  test('11. Konfliktauflösung: USE_LOCAL übernimmt lokalen Stand atomar im data-Envelope', async () => {
     const taskId = await withTenantTransaction(testTenantA, async (tx) => {
-      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status) VALUES ($1, 'Task L', 'Leitung', CURRENT_DATE, 'Offen') RETURNING id", [testTenantA])).rows[0].id;
+      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status, revision_version) VALUES ($1, 'Task L', 'Leitung', CURRENT_DATE, 'Offen', 1) RETURNING id", [testTenantA])).rows[0].id;
     });
 
     const res = await request(app)
@@ -431,22 +423,52 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
         clientUuid: `res-loc-${Date.now()}`,
         entityType: 'task',
         strategy: 'USE_LOCAL',
+        expectedVersion: 1,
         localPayload: { id: taskId, status: 'In Bearbeitung' }
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.applied).toBe(true);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toBeDefined();
+    expect(res.body.data.applied).toBe(true);
+    expect(res.body.data.serverState).toBeDefined();
+    expect(res.body.data.serverState.status).toBe('In Bearbeitung');
+    expect(res.body.data.serverState.revision_version).toBe(2);
 
     const check = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT status FROM tasks WHERE id = $1', [taskId]);
+      return tx.query('SELECT status, revision_version FROM tasks WHERE id = $1', [taskId]);
     });
     expect(check.rows[0].status).toBe('In Bearbeitung');
+    expect(check.rows[0].revision_version).toBe(2);
   });
 
-  // 12. Konfliktauflösung: USE_SERVER
-  test('12. Konfliktauflösung: USE_SERVER bestätigt aktuellen Serverstand', async () => {
+  // 12. Konfliktauflösung: USE_LOCAL mit veralteter expectedVersion wird abgewiesen
+  test('12. Konfliktauflösung: USE_LOCAL mit veralteter expectedVersion bricht ab', async () => {
     const taskId = await withTenantTransaction(testTenantA, async (tx) => {
-      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status) VALUES ($1, 'Task S', 'Leitung', CURRENT_DATE, 'Erledigt') RETURNING id", [testTenantA])).rows[0].id;
+      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status, revision_version) VALUES ($1, 'Task Veraltet', 'Leitung', CURRENT_DATE, 'Offen', 3) RETURNING id", [testTenantA])).rows[0].id;
+    });
+
+    const res = await request(app)
+      .post('/api/v1/sync/conflicts/resolve')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        clientUuid: `res-loc-fail-${Date.now()}`,
+        entityType: 'task',
+        strategy: 'USE_LOCAL',
+        expectedVersion: 1, // Veraltet (Server ist bei 3)
+        localPayload: { id: taskId, status: 'In Bearbeitung' }
+      });
+
+    // Fehlerhafter Versionskonflikt führt zu Fehlerantwort (HTTP 500 durch Exception Handler)
+    expect(res.status).toBe(500);
+    expect(res.body.success).toBe(false);
+    expect(res.body.message).toContain('Versionskonflikt');
+  });
+
+  // 13. Konfliktauflösung: USE_SERVER bestätigt vollständigen Serverstand im data-Envelope
+  test('13. Konfliktauflösung: USE_SERVER liefert den tatsächlichen vollständigen Serverstand im data-Envelope', async () => {
+    const taskId = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status, category, revision_version) VALUES ($1, 'Task Vollständig', 'Einsatzleiter Schmidt', '2025-06-15', 'Erledigt', 'Audit', 2) RETURNING id", [testTenantA])).rows[0].id;
     });
 
     const res = await request(app)
@@ -456,19 +478,27 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
         clientUuid: `res-srv-${Date.now()}`,
         entityType: 'task',
         strategy: 'USE_SERVER',
+        expectedVersion: 2,
         localPayload: { id: taskId }
       });
 
     expect(res.status).toBe(200);
-    expect(res.body.applied).toBe(true);
-    expect(res.body.serverState.status).toBe('Erledigt');
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toBeDefined();
+    expect(res.body.data.applied).toBe(true);
+    expect(res.body.data.serverState).toBeDefined();
+    expect(res.body.data.serverState.id).toBe(taskId);
+    expect(res.body.data.serverState.title).toBe('Task Vollständig');
+    expect(res.body.data.serverState.assigned_to_name).toBe('Einsatzleiter Schmidt');
+    expect(res.body.data.serverState.status).toBe('Erledigt');
+    expect(res.body.data.serverState.category).toBe('Audit');
+    expect(res.body.data.serverState.revision_version).toBe(2);
   });
 
-  // 13. Gleiche Mutation-ID mit verändertem Inhalt wird abgewiesen
-  test('13. Gleiche Mutation-ID mit verändertem Inhalt wird als REJECTED abgewiesen', async () => {
+  // 14. Gleiche Mutation-ID mit verändertem Inhalt wird abgewiesen
+  test('14. Gleiche Mutation-ID mit verändertem Inhalt wird als REJECTED abgewiesen', async () => {
     const reusableUuid = `tamper-id-${Date.now()}`;
 
-    // 1. Erster Push
     await request(app)
       .post('/api/v1/sync/push')
       .set('Authorization', `Bearer ${testTokenA}`)
@@ -486,7 +516,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
         ]
       });
 
-    // 2. Manipulierter zweiter Push mit geänderter Payload aber identischer Mutation-ID
     const resTamper = await request(app)
       .post('/api/v1/sync/push')
       .set('Authorization', `Bearer ${testTokenA}`)
@@ -509,35 +538,43 @@ describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz &
     expect(resTamper.body.data[0].message).toContain('Integritätsverletzung');
   });
 
-  // 14. Mandantentrennung bei Sync
-  test('14. Mandantenisolation beim Sync: Mandant B sieht keine Mutationen von Mandant A', async () => {
-    const clientUuidB = `hack-check-${Date.now()}`;
+  // 15. Mandantenisolation bei Konfliktauflösung
+  test('15. Mandantenisolation bei Konfliktauflösung: Mandant B kann keine Aufgaben von Mandant A auflösen', async () => {
+    const taskIdA = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status) VALUES ($1, 'Task A geheim', 'Leitung A', CURRENT_DATE, 'Offen') RETURNING id", [testTenantA])).rows[0].id;
+    });
 
-    await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
+    // Erzeuge Token für Mandant B
+    const tokenB = jwt.sign(
+      { sub: testUserAId, email: 'user.b@secops.local', tenantId: testTenantB, role: 'Einsatzleitung', permissions: ['logbook:create'] },
+      env.JWT_SECRET,
+      { expiresIn: '1h' }
+    );
+    const tokenHashB = crypto.createHash('sha256').update(tokenB).digest('hex');
+    await pool.query(`
+      INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
+      VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
+    `, [testUserAId, testTenantB, tokenHashB]);
+
+    // Versuch von Mandant B, den Task von Mandant A aufzulösen -> Muss mit Fehler abbrechen!
+    const resB = await request(app)
+      .post('/api/v1/sync/conflicts/resolve')
+      .set('Authorization', `Bearer ${tokenB}`)
       .send({
-        deviceId: 'dev-01',
-        mutations: [
-          {
-            clientUuid: clientUuidB,
-            entityType: 'guardbook',
-            action: 'CREATE',
-            clientTimestamp: new Date().toISOString(),
-            baseVersion: 1,
-            payload: { siteId: siteAId, guardId: guardAId, title: 'Sperrtest', description: 'Nur in A' }
-          }
-        ]
+        clientUuid: `hack-conflict-${Date.now()}`,
+        entityType: 'task',
+        strategy: 'USE_SERVER',
+        expectedVersion: 1,
+        localPayload: { id: taskIdA }
       });
 
-    const bCheck = await withTenantTransaction(testTenantB, async (tx) => {
-      return tx.query('SELECT * FROM guardbook_entries WHERE client_mutation_id = $1', [clientUuidB]);
-    });
-    expect(bCheck.rows.length).toBe(0);
+    expect(resB.status).toBe(500);
+    expect(resB.body.success).toBe(false);
+    expect(resB.body.message).toContain('nicht gefunden oder fremder Mandant');
   });
 
-  // 15. Parallele Übertragung derselben Mutation
-  test('15. Parallele Übertragung derselben Mutation führt zu exakt einer Ausführung', async () => {
+  // 16. Parallele Übertragung derselben Mutation
+  test('16. Parallele Übertragung derselben Mutation führt zu exakt einer Ausführung (Advisory Lock)', async () => {
     const parallelUuid = `parallel-mut-${Date.now()}`;
     const payload = {
       deviceId: 'dev-01',
