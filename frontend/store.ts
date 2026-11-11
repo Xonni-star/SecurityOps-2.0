@@ -52,88 +52,34 @@ import {
   initialGdprPolicies
 } from './mockData';
 import { apiClient } from './services/apiClient';
-import { offlineStorage } from './services/indexedDbService';
+import { offlineVault } from './services/indexedDbService';
 
 export type ThemeMode = 'dark' | 'light';
 
-export const initialReportDefinitions: ReportDefinition[] = [
-  {
-    id: 'rep-gf-monthly',
-    tenantId: 'tenant-frankfurt',
-    name: 'Monatscontrolling Geschäftsführung (Soll/Ist & DIN 77200)',
-    description: 'Vollständiger Monatsabschluss mit Stundenbilanz, Überstunden, Personalauslastung und Vorfallsquote.',
-    category: 'GESCHAEFTSFUEHRUNG',
-    requiredRole: [UserRole.ADMIN, UserRole.GF],
-    dataSource: 'shifts',
-    selectedColumns: ['siteName', 'date', 'type', 'status', 'employeeName'],
-    filterConfig: { dateRange: 'THIS_MONTH' },
-    groupBy: 'siteName',
-    scheduleInterval: 'MONTHLY',
-    lastGeneratedAt: '2025-05-14 23:59',
-    createdAt: '2025-01-01'
-  }
-];
-
-export const initialShiftSwaps: ShiftSwapRequest[] = [
-  {
-    id: 'swap-1',
-    tenantId: 'tenant-frankfurt',
-    shiftId: 'sh-1',
-    requestingEmployeeId: 'e-3',
-    requestingEmployeeName: 'Sabine Becker',
-    targetEmployeeId: 'e-4',
-    targetEmployeeName: 'Dennis Kowalski',
-    reason: 'Familiäre Angelegenheit / Arzttermin',
-    status: 'ANGEFRAGT',
-    requestedAt: '2025-05-15 08:30'
-  }
-];
-
-export const initialPatrolScans: PatrolScanEvent[] = [
-  {
-    id: 'scan-1',
-    tenantId: 'tenant-frankfurt',
-    siteId: 's-1',
-    siteName: 'Finanzturm Alpha (Hauptverwaltung)',
-    checkpointId: 'cp-1',
-    checkpointCode: 'CP-01',
-    checkpointName: 'Hauptfoyer Schrankenanlage',
-    guardId: 'e-3',
-    guardName: 'Sabine Becker',
-    scannedAt: '2025-05-15 06:15',
-    method: 'NFC_TAG',
-    verifiedTag: 'RFID-9901-A',
-    offlineCaptured: false
-  }
-];
+// Synchronisations-Mutex gegen parallele Läufe
+let isGlobalSyncInProgress = false;
 
 interface SecurityOpsStore {
-  // Theme
   theme: ThemeMode;
   toggleTheme: () => void;
 
-  // Multi-Tenancy
   tenants: Tenant[];
   currentTenantId: string;
   setCurrentTenantId: (tenantId: string) => void;
   getCurrentTenant: () => Tenant;
 
-  // Current User / RBAC
   currentUserRole: UserRole;
   currentUserName: string;
   currentUserId: string;
   setCurrentUserRole: (role: UserRole) => void;
 
-  // Active View Tab
   activeTab: string;
   setActiveTab: (tab: string) => void;
 
-  // Global Search
   globalSearch: string;
   setGlobalSearch: (q: string) => void;
   performGlobalSearch: (q: string) => GlobalSearchResult[];
 
-  // Offline Engine
   isOnline: boolean;
   toggleNetworkSimulation: () => void;
   syncQueue: OfflineQueueItem[];
@@ -142,19 +88,16 @@ interface SecurityOpsStore {
   resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => void;
   clearCompletedSyncs: () => void;
 
-  // Plugins
   modules: SecurityModuleManifest[];
   toggleModule: (moduleId: string) => void;
   isModuleActive: (moduleId: string) => boolean;
 
-  // Security Audit & Sessions
   auditLogs: SecurityAuditEntry[];
   activeSessions: UserSessionDevice[];
   gdprPolicies: GdprRetentionPolicy[];
   revokeSession: (sessionId: string) => void;
   addAuditLog: (entry: Omit<SecurityAuditEntry, 'id' | 'timestamp' | 'tenantId'>) => void;
 
-  // Notifications
   notifications: { id: string; title: string; message: string; type: 'info' | 'warning' | 'alert'; time: string }[];
   notificationDeliveries: NotificationDelivery[];
   notificationPreferences: NotificationPreference;
@@ -163,7 +106,6 @@ interface SecurityOpsStore {
   markNotificationAsRead: (deliveryId: string) => void;
   updateNotificationPreferences: (prefs: Partial<NotificationPreference>) => void;
 
-  // Automation Engine
   automations: AutomationRule[];
   automationTemplates: AutomationRule[];
   executionLogs: AutomationExecutionLog[];
@@ -175,13 +117,11 @@ interface SecurityOpsStore {
   testRunRule: (id: string) => { matched: boolean; actions: string[]; durationMs: number };
   runAutomationsNow: () => number;
 
-  // Reporting & Controlling
   reportDefinitions: ReportDefinition[];
   addReportDefinition: (rep: Omit<ReportDefinition, 'id' | 'createdAt'>) => void;
   deleteReportDefinition: (id: string) => void;
   calculateTenantKPIs: () => ControllingKPIs;
 
-  // Mobile App
   shiftSwaps: ShiftSwapRequest[];
   patrolScans: PatrolScanEvent[];
   shiftHandovers: ShiftHandoverProtocol[];
@@ -190,7 +130,6 @@ interface SecurityOpsStore {
   addPatrolScan: (scan: Omit<PatrolScanEvent, 'id' | 'tenantId' | 'scannedAt' | 'offlineCaptured'>) => void;
   submitShiftHandover: (handover: Omit<ShiftHandoverProtocol, 'id' | 'tenantId' | 'handoverTime' | 'offlineCaptured'>) => void;
 
-  // Datasets
   clients: Client[];
   sites: Site[];
   employees: Employee[];
@@ -202,7 +141,6 @@ interface SecurityOpsStore {
   tasks: TaskItem[];
   documents: ManagedDocument[];
 
-  // Tenant-Partitioned Selectors
   getTenantClients: () => Client[];
   getTenantSites: () => Site[];
   getTenantEmployees: () => Employee[];
@@ -221,7 +159,6 @@ interface SecurityOpsStore {
   getTenantShiftSwaps: () => ShiftSwapRequest[];
   getTenantPatrolScans: () => PatrolScanEvent[];
 
-  // Actions
   addClient: (client: Omit<Client, 'id' | 'tenantId'>) => void;
   addSite: (site: Omit<Site, 'id' | 'tenantId'>) => void;
   addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => void;
@@ -363,18 +300,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
-  syncQueue: [
-    {
-      id: 'sync-demo-1',
-      tenantId: 'tenant-frankfurt',
-      entityType: 'guardbook',
-      action: 'CREATE',
-      payload: { title: 'Notausgang-Prüfung Tiefgarage West', category: 'Kontrollgang', siteName: 'Finanzturm Alpha' },
-      createdAt: new Date(Date.now() - 1000 * 60 * 12).toLocaleTimeString(),
-      retryCount: 0,
-      status: 'synced'
-    }
-  ],
+  syncQueue: [],
 
   enqueueOfflineAction: async (item) => {
     const queueEntry: OfflineQueueItem = {
@@ -386,67 +312,150 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     };
 
     try {
-      if (typeof offlineStorage !== 'undefined' && offlineStorage.enqueueOffline) {
-        await offlineStorage.enqueueOffline({
-          id: queueEntry.id,
-          tenantId: queueEntry.tenantId,
-          storeName: queueEntry.entityType,
-          action: queueEntry.action,
-          data: queueEntry.payload,
-          timestamp: queueEntry.createdAt,
-          synced: false
-        });
-      }
+      // Verbindlich in IndexedDB schreiben und auf Bestätigung warten
+      await offlineVault.enqueueMutation({
+        id: queueEntry.id,
+        tenantId: queueEntry.tenantId,
+        userId: get().currentUserId,
+        entityType: queueEntry.entityType as any,
+        action: queueEntry.action,
+        payload: queueEntry.payload,
+        occurredAt: new Date().toISOString(),
+        baseVersion: 1
+      });
 
       set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
       return true;
     } catch (err: any) {
       console.error('[OFFLINE ENQUEUE FAILED]', err);
-      // Eintrag als FEHLGESCHLAGEN markieren, nicht verschlucken!
       const failedEntry: OfflineQueueItem = {
         ...queueEntry,
         status: 'failed',
-        errorMessage: err?.message || 'Speicherfehler in IndexedDB'
+        errorMessage: err?.message || 'Schreibfehler in IndexedDB'
       };
       set((state) => ({ syncQueue: [failedEntry, ...state.syncQueue] }));
       get().addNotification(
-        'Offline-Speicherfehler',
-        `Daten konnten nicht lokal gesichert werden: ${err?.message}`,
+        'Speicherfehler',
+        `Eintrag konnte nicht in lokaler Datenbank gesichert werden: ${err?.message}`,
         'alert'
       );
       return false;
     }
   },
 
+  /**
+   * Aufgabe 1: Vollständige und verlässliche Synchronisation mit echtem Backend
+   * - Lädt pending Outbox aus IndexedDB
+   * - Filtert strikt nach Mandant & Benutzer
+   * - Sendet Mutation-Batch via apiClient an /api/v1/sync/push
+   * - Verarbeitet Bestätigungen und markiert ERST DANN als synchronisiert
+   * - Behält Einträge bei Netzwerkfehler
+   * - Kennzeichnet Konflikte als CONFLICT
+   */
   triggerManualSync: async () => {
-    const { syncQueue, isOnline } = get();
+    const { isOnline, currentTenantId, currentUserId } = get();
     if (!isOnline) {
-      return { success: 0, failed: syncQueue.filter((q) => q.status === 'pending').length };
+      return { success: 0, failed: 0 };
     }
 
+    if (isGlobalSyncInProgress) {
+      console.warn('[SYNC BLOCKED] Ein Synchronisationslauf ist bereits aktiv.');
+      return { success: 0, failed: 0 };
+    }
+
+    isGlobalSyncInProgress = true;
     let successCount = 0;
     let failedCount = 0;
 
-    const updated = await Promise.all(
-      syncQueue.map(async (item) => {
-        if (item.status === 'pending') {
-          try {
-            if (typeof offlineStorage !== 'undefined' && offlineStorage.markSynced) {
-              await offlineStorage.markSynced(item.id);
-            }
-            successCount++;
-            return { ...item, status: 'synced' as SyncStatus, errorMessage: undefined };
-          } catch (err: any) {
-            failedCount++;
-            return { ...item, status: 'failed' as SyncStatus, errorMessage: err?.message };
-          }
-        }
-        return item;
-      })
-    );
+    try {
+      // 1. Lokale Outbox aus IndexedDB laden
+      const pendingMutations = await offlineVault.getPendingOutbox(currentTenantId, currentUserId);
+      if (pendingMutations.length === 0) {
+        return { success: 0, failed: 0 };
+      }
 
-    set({ syncQueue: updated });
-    return { success: successCount, failed: failedCount };
+      // 2. Formatieren für den Server-Batch-Endpunkt
+      const batchPayload = {
+        device_id: offlineVault.getDeviceId(),
+        mutations: pendingMutations.map((m) => ({
+          client_uuid: m.id,
+          entity_type: m.entityType,
+          action: m.action,
+          client_timestamp: m.occurredAt,
+          version: m.baseVersion,
+          payload: m.payload
+        }))
+      };
+
+      // 3. Echte Übertragung an das Backend
+      let serverResults: any[] = [];
+      try {
+        const response = await apiClient.post('/sync/push', batchPayload);
+        serverResults = Array.isArray(response) ? response : (response?.data || []);
+      } catch (networkErr: any) {
+        console.warn('[SYNC NETWORK ERROR] Backend vorübergehend unerreichbar:', networkErr.message);
+        // Bei Netzwerkfehler: Einträge verbleiben unverändert in Outbox!
+        get().addNotification(
+          'Synchronisation pausiert',
+          `Server nicht erreichbar (${networkErr.message}). Einträge bleiben lokal gesichert.`,
+          'warning'
+        );
+        return { success: 0, failed: pendingMutations.length };
+      }
+
+      // 4. Server-Antworten auswerten
+      for (const resItem of serverResults) {
+        const outboxMatch = pendingMutations.find((m) => m.id === resItem.client_uuid);
+        if (!outboxMatch) continue;
+
+        if (resItem.status === 'SYNCED') {
+          // ERST JETZT lokal quittieren und entfernen
+          await offlineVault.markSynced(resItem.client_uuid);
+          successCount++;
+          set((state) => ({
+            syncQueue: state.syncQueue.map((q) =>
+              q.id === resItem.client_uuid ? { ...q, status: 'synced', errorMessage: undefined } : q
+            )
+          }));
+        } else if (resItem.status === 'CONFLICT') {
+          // Als Konflikt markieren, NICHT löschen!
+          await offlineVault.updateMutationStatus(resItem.client_uuid, 'CONFLICT', {
+            conflictDetails: resItem.conflict_data
+          });
+          failedCount++;
+          set((state) => ({
+            syncQueue: state.syncQueue.map((q) =>
+              q.id === resItem.client_uuid
+                ? { ...q, status: 'conflict', conflictDetails: resItem.conflict_data }
+                : q
+            )
+          }));
+        } else {
+          // FAILED Status
+          await offlineVault.updateMutationStatus(resItem.client_uuid, 'FAILED', {
+            errorMessage: resItem.message || 'Server-Verarbeitungsfehler'
+          });
+          failedCount++;
+          set((state) => ({
+            syncQueue: state.syncQueue.map((q) =>
+              q.id === resItem.client_uuid ? { ...q, status: 'failed', errorMessage: resItem.message } : q
+            )
+          }));
+        }
+      }
+
+      if (successCount > 0) {
+        get().addNotification(
+          'Synchronisation erfolgreich',
+          `${successCount} Datensätze erfolgreich an PostgreSQL übertragen.`,
+          'info'
+        );
+      }
+
+      return { success: successCount, failed: failedCount };
+    } finally {
+      isGlobalSyncInProgress = false;
+    }
   },
 
   resolveConflict: (queueId) => {
@@ -615,7 +624,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     return 2;
   },
 
-  reportDefinitions: initialReportDefinitions,
+  reportDefinitions: [],
 
   addReportDefinition: (rep) => {
     const newDef: ReportDefinition = {
@@ -710,9 +719,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     };
   },
 
-  // Mobile App State
-  shiftSwaps: initialShiftSwaps,
-  patrolScans: initialPatrolScans,
+  shiftSwaps: [],
+  patrolScans: [],
   shiftHandovers: [],
 
   addShiftSwapRequest: (req) => {
@@ -791,7 +799,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     if (!isOnline) {
       enqueueOfflineAction({
         tenantId: currentTenantId,
-        entityType: 'patrol',
+        entityType: 'patrol' as any,
         action: 'CREATE',
         payload: newScan
       });
@@ -830,14 +838,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     if (!isOnline) {
       enqueueOfflineAction({
         tenantId: currentTenantId,
-        entityType: 'handover',
+        entityType: 'handover' as any,
         action: 'CREATE',
         payload: protocol
       });
     }
   },
 
-  // Datasets
   clients: initialClients,
   sites: initialSites,
   employees: initialEmployees,

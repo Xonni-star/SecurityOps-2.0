@@ -13,9 +13,43 @@ pool.on('error', (err) => {
 });
 
 /**
- * Führt alle Abfragen innerhalb einer isolierten Datenbanktransaktion mit RLS aus.
- * SET LOCAL app.current_tenant aktiviert die PostgreSQL Row-Level-Security für exakt diese Transaktion.
- * Verhindert Verbindungslecks durch garantiertes ROLLBACK und Freigabe im finally-Block.
+ * Überprüft beim Backend-Start die tatsächlich aktive PostgreSQL-Rolle.
+ * Bricht ab, wenn der Anwendungsbenutzer über SUPERUSER oder BYPASSRLS verfügt.
+ */
+export async function verifyAppDatabaseRole(): Promise<{ currentUser: string; isLeastPrivilege: boolean }> {
+  const client = await pool.connect();
+  try {
+    const res = await client.query(`
+      SELECT current_user, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb 
+      FROM pg_roles 
+      WHERE rolname = current_user;
+    `);
+
+    if (res.rows.length === 0) {
+      throw new Error(`Rolle des aktuellen Datenbankbenutzers konnte nicht ermittelt werden.`);
+    }
+
+    const { current_user: currentUser, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb } = res.rows[0];
+
+    // Sicherheitsprüfung: Anwendungsbenutzer darf NIEMALS Superuser sein oder RLS umgehen können!
+    if (rolsuper || rolbypassrls) {
+      const msg = `[SICHERHEITSABBRUCH] Anwendungs-Datenbankverbindung läuft als '${currentUser}' mit unzulässigen Rechten (SUPERUSER: ${rolsuper}, BYPASSRLS: ${rolbypassrls}). RLS-Schutz wäre kompromittiert! Verwenden Sie 'secops_app_user'.`;
+      console.error(msg);
+      if (env.NODE_ENV === 'production' || env.NODE_ENV === 'test') {
+        throw new Error(msg);
+      }
+    }
+
+    const isLeastPrivilege = !rolsuper && !rolbypassrls && !rolcreaterole && !rolcreatedb;
+    return { currentUser, isLeastPrivilege };
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Führt alle Abfragen innerhalb einer isolierten Transaktion mit gesetztem RLS-Mandantenkontext aus.
+ * SET LOCAL app.current_tenant aktiviert die PostgreSQL Row-Level-Security für diese Transaktion.
  */
 export async function withTenantTransaction<T>(
   tenantId: string,
@@ -24,8 +58,6 @@ export async function withTenantTransaction<T>(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Setzen der Session-Variable für PostgreSQL Row-Level-Security (RLS).
-    // Der dritte Parameter 'true' bewirkt, dass die Einstellung strikt auf die aktuelle Transaktion beschränkt ist.
     await client.query("SELECT set_config('app.current_tenant', $1, true)", [tenantId]);
 
     const result = await callback(client);
@@ -39,19 +71,18 @@ export async function withTenantTransaction<T>(
     }
     throw error;
   } finally {
-    // Session-Variable vorsorglich vor Rückgabe an den Pool zurücksetzen
     try {
       await client.query("SELECT set_config('app.current_tenant', '', false)");
     } catch {
-      // Ignorieren falls Verbindung bereits beendet
+      // Ignorieren falls Verbindung beendet
     }
     client.release();
   }
 }
 
 /**
- * Führt eine isolierte Transaktion OHNE Mandantenkontext aus (z. B. für Login, System-Bootstrap).
- * Hierbei greifen die RLS-Policies und blockieren mandantenspezifische Lese-/Schreibzugriffe!
+ * Führt eine Transaktion ohne Mandantenkontext aus (z. B. für Login, System-Bootstrap).
+ * RLS blockiert hierbei jeden mandantengebundenen Datensatz.
  */
 export async function withSystemTransaction<T>(
   callback: (client: PoolClient) => Promise<T>
@@ -75,9 +106,6 @@ export async function withSystemTransaction<T>(
   }
 }
 
-/**
- * Parametrisierte Standardabfrage
- */
 export async function query<R extends QueryResultRow = any>(
   text: string,
   params?: any[]

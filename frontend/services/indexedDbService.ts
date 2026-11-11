@@ -1,5 +1,5 @@
-// SecurityOps 2.0 - Native Enterprise IndexedDB Storage Engine (Zero Unapproved Dependencies)
-// Revisionssichere Fehlerbehandlung: Keine stillen Abbrüche, Quota-Validierung & Fehlerprotokollierung
+// SecurityOps 2.0 - Native Enterprise IndexedDB Storage Engine (Schritt 5 Gehärtet)
+// Transaktionsintegrität: Wartet garantiert auf transaction.oncomplete, behandelt onerror/onabort
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
 const DB_VERSION = 2;
@@ -9,10 +9,10 @@ export interface OutboxMutation {
   tenantId: string;
   userId: string;
   deviceId: string;
-  entityType: 'logbook' | 'shift' | 'task' | 'key' | 'employee' | 'attachment';
+  entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'attachment';
   action: 'CREATE' | 'UPDATE' | 'DELETE';
   payload: any;
-  occurredAt: string; // ISO Timestamp auf dem Endgerät
+  occurredAt: string;
   baseVersion: number;
   retryCount: number;
   lastAttemptAt?: string;
@@ -33,7 +33,7 @@ export interface StoredAttachment {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
-  blobData: string; // Base64 Data-URL
+  blobData: string;
   capturedAt: string;
   synced: boolean;
 }
@@ -74,7 +74,6 @@ export class IndexedDbService {
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
 
-        // 1. Outbox: Warteschlange für lokale Mutationen
         if (!db.objectStoreNames.contains('outbox')) {
           const outboxStore = db.createObjectStore('outbox', { keyPath: 'id' });
           outboxStore.createIndex('tenantId', 'tenantId', { unique: false });
@@ -82,21 +81,18 @@ export class IndexedDbService {
           outboxStore.createIndex('occurredAt', 'occurredAt', { unique: false });
         }
 
-        // 2. Inbox: Lokale Cache-Replikation
         if (!db.objectStoreNames.contains('inbox')) {
           const inboxStore = db.createObjectStore('inbox', { keyPath: 'compositeKey' });
           inboxStore.createIndex('tenantId', 'tenantId', { unique: false });
           inboxStore.createIndex('entityType', 'entityType', { unique: false });
         }
 
-        // 3. Attachments: Lokale Fotos und Dateianhänge
         if (!db.objectStoreNames.contains('attachments')) {
           const attachStore = db.createObjectStore('attachments', { keyPath: 'id' });
           attachStore.createIndex('entityId', 'entityId', { unique: false });
           attachStore.createIndex('synced', 'synced', { unique: false });
         }
 
-        // 4. Device Meta
         if (!db.objectStoreNames.contains('device_meta')) {
           db.createObjectStore('device_meta', { keyPath: 'deviceId' });
         }
@@ -115,7 +111,7 @@ export class IndexedDbService {
     });
   }
 
-  // --- OUTBOX OPERATIONEN (MIT REVIER-FEHLERBEHANDLUNG) ---
+  // --- OUTBOX OPERATIONEN (MIT PRÄZISER TRANSAKTIONSÜBERWACHUNG) ---
 
   async enqueueMutation(mutation: Omit<OutboxMutation, 'deviceId' | 'retryCount' | 'status'>): Promise<OutboxMutation> {
     const db = await this.init();
@@ -131,18 +127,22 @@ export class IndexedDbService {
       try {
         const tx = db.transaction('outbox', 'readwrite');
         const store = tx.objectStore('outbox');
-        const req = store.put(item);
+        store.put(item);
 
-        req.onsuccess = () => resolve(item);
-        req.onerror = () => {
-          const err = req.error;
-          console.error('[OUTBOX WRITE ERROR]', err);
-          reject(new Error(`Fehler beim Schreiben in die Offline-Warteschlange: ${err?.message || 'Unbekannt'}`));
+        // WICHTIG: Verbindlich auf tx.oncomplete warten!
+        tx.oncomplete = () => {
+          resolve(item);
         };
 
         tx.onerror = () => {
           const err = tx.error;
-          reject(new Error(`Transaktionsfehler beim Offline-Speichern: ${err?.message || 'Abbruch'}`));
+          console.error('[OUTBOX TRANSACTION ERROR]', err);
+          reject(new Error(`Fehler beim Speichern in IndexedDB Outbox: ${err?.message || 'Transaktionsfehler'}`));
+        };
+
+        tx.onabort = () => {
+          const err = tx.error;
+          reject(new Error(`Speichervorgang in IndexedDB abgebrochen: ${err?.message || 'Transaction aborted'}`));
         };
       } catch (err: any) {
         reject(new Error(`Unerwarteter Speicherfehler in IndexedDB: ${err?.message || 'Exception'}`));
@@ -154,8 +154,8 @@ export class IndexedDbService {
     return this.enqueueMutation({
       id: record.id,
       tenantId: record.tenantId,
-      userId: 'offline-user',
-      entityType: record.storeName || 'logbook',
+      userId: record.userId || 'offline-user',
+      entityType: record.storeName || 'guardbook',
       action: record.action || 'CREATE',
       payload: record.data,
       occurredAt: record.timestamp || new Date().toISOString(),
@@ -164,10 +164,11 @@ export class IndexedDbService {
   }
 
   async markSynced(id: string): Promise<void> {
+    // Entfernt den Eintrag erst NACH erfolgreicher Serverquittierung aus der Outbox
     await this.removeMutation(id);
   }
 
-  async getPendingOutbox(tenantId: string): Promise<OutboxMutation[]> {
+  async getPendingOutbox(tenantId: string, userId?: string): Promise<OutboxMutation[]> {
     const db = await this.init();
 
     return new Promise((resolve, reject) => {
@@ -178,10 +179,22 @@ export class IndexedDbService {
 
         req.onsuccess = () => {
           const records = (req.result as OutboxMutation[]) || [];
-          resolve(records.filter((r) => r.tenantId === tenantId && (r.status === 'PENDING' || r.status === 'FAILED')));
+          resolve(
+            records.filter((r) => {
+              const matchTenant = r.tenantId === tenantId;
+              const matchUser = !userId || r.userId === userId || r.userId === 'offline-user';
+              const matchStatus = r.status === 'PENDING' || r.status === 'FAILED';
+              return matchTenant && matchUser && matchStatus;
+            })
+          );
         };
+
         req.onerror = () => {
-          reject(new Error(`Fehler beim Lesen der Offline-Outbox: ${req.error?.message}`));
+          reject(new Error(`Fehler beim Lesen der Outbox: ${req.error?.message}`));
+        };
+
+        tx.onerror = () => {
+          reject(new Error(`Transaktionsfehler beim Outbox-Lesen: ${tx.error?.message}`));
         };
       } catch (err: any) {
         reject(new Error(`Fehler beim Zugriff auf IndexedDB: ${err?.message}`));
@@ -214,11 +227,12 @@ export class IndexedDbService {
           if (details?.errorMessage) record.errorMessage = details.errorMessage;
           if (details?.conflictDetails) record.conflictDetails = details.conflictDetails;
 
-          const putReq = store.put(record);
-          putReq.onsuccess = () => resolve();
-          putReq.onerror = () => reject(new Error(`Fehler beim Aktualisieren des Status: ${putReq.error?.message}`));
+          store.put(record);
         };
-        getReq.onerror = () => reject(new Error(`Fehler beim Finden des Eintrags: ${getReq.error?.message}`));
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(new Error(`Fehler beim Aktualisieren des Status: ${tx.error?.message}`));
+        tx.onabort = () => reject(new Error(`Transaktion abgebrochen: ${tx.error?.message}`));
       } catch (err: any) {
         reject(new Error(`Transaktionsfehler in IndexedDB: ${err?.message}`));
       }
@@ -232,9 +246,11 @@ export class IndexedDbService {
       try {
         const tx = db.transaction('outbox', 'readwrite');
         const store = tx.objectStore('outbox');
-        const req = store.delete(id);
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject(new Error(`Fehler beim Löschen der Mutation: ${req.error?.message}`));
+        store.delete(id);
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(new Error(`Fehler beim Löschen der Mutation: ${tx.error?.message}`));
+        tx.onabort = () => reject(new Error(`Transaktion abgebrochen: ${tx.error?.message}`));
       } catch (err: any) {
         reject(new Error(`Fehler beim Entfernen aus IndexedDB: ${err?.message}`));
       }
@@ -244,7 +260,7 @@ export class IndexedDbService {
   // --- ANHÄNGE & FOTOS ---
 
   async saveAttachment(attachment: StoredAttachment): Promise<void> {
-    const MAX_PHOTO_BYTES = 5 * 1024 * 1024; // 5 MB Limit
+    const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
     if (attachment.sizeBytes > MAX_PHOTO_BYTES) {
       throw new Error(`Dateigröße (${(attachment.sizeBytes / 1024 / 1024).toFixed(2)} MB) überschreitet das Limit von 5 MB.`);
     }
@@ -255,9 +271,11 @@ export class IndexedDbService {
       try {
         const tx = db.transaction('attachments', 'readwrite');
         const store = tx.objectStore('attachments');
-        const req = store.put(attachment);
-        req.onsuccess = () => resolve();
-        req.onerror = () => reject(new Error(`Fehler beim Speichern des Anhangs: ${req.error?.message}`));
+        store.put(attachment);
+
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(new Error(`Fehler beim Speichern des Anhangs: ${tx.error?.message}`));
+        tx.onabort = () => reject(new Error(`Speichern des Anhangs abgebrochen: ${tx.error?.message}`));
       } catch (err: any) {
         reject(new Error(`Transaktionsfehler beim Anhang: ${err?.message}`));
       }

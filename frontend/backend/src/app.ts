@@ -8,6 +8,7 @@ import { authenticateJwt, requirePermission } from './middleware/auth';
 import * as authController from './controllers/authController';
 import * as clientController from './controllers/clientController';
 import * as guardbookController from './controllers/guardbookController';
+import * as syncController from './controllers/syncController';
 
 export const app = express();
 
@@ -21,7 +22,7 @@ export const corsOptions: CorsOptions = {
       return callback(null, true);
     }
 
-    if (env.CORS_ALLOWED_ORIGINS.includes('*') || env.CORS_ALLOWED_ORIGINS.includes(origin)) {
+    if (env.CORS_ALLOWED_ORIGINS.includes(origin)) {
       return callback(null, true);
     }
 
@@ -63,5 +64,8 @@ app.post('/api/v1/customers', authenticateJwt, requirePermission('customers:crea
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
 app.post('/api/v1/logbook/revisions', authenticateJwt, requirePermission('logbook:create'), guardbookController.addGuardbookRevision);
+
+// Offline-Synchronisationsrouten (Aufgabe 1)
+app.post('/api/v1/sync/push', authenticateJwt, syncController.syncPush);
 
 app.use(errorHandler);
