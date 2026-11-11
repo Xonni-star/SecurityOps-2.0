@@ -8,5 +8,8 @@
   },
   "devDependencies": {
     "concurrently": "latest"
+  },
+  "engines": {
+    "node": ">=24.15.0"
   }
 }

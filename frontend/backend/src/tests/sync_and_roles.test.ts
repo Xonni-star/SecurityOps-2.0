@@ -2,7 +2,8 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import request from 'supertest';
 import { app } from '../app';
-import { pool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
+import { pool, migrationPool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
+import { cleanupTestData } from './testUtils';
 import { env } from '../config/env';
 
 describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Konfliktauflösung', () => {
@@ -89,10 +90,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
   });
 
   afterAll(async () => {
-    if (testTenantA) await pool.query('DELETE FROM tenants WHERE id = $1', [testTenantA]);
-    if (testTenantB) await pool.query('DELETE FROM tenants WHERE id = $1', [testTenantB]);
-    if (testUserAId) await pool.query('DELETE FROM users WHERE id = $1', [testUserAId]);
+    // Administrative Bereinigung inkl. Append-Only-Trigger (nur Testdatenbank).
+    await cleanupTestData([testTenantA, testTenantB], [testUserAId]);
     await pool.end();
+    await migrationPool.end();
   });
 
   // 1. Wachbuch: CREATE und wiederholte identische Übertragung

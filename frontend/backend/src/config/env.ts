@@ -9,7 +9,9 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(10, 'DATABASE_URL muss zwingend konfiguriert sein (für secops_app_user).'),
   DATABASE_MIGRATION_URL: z.string().min(10, 'DATABASE_MIGRATION_URL muss konfiguriert sein (für secops_admin).'),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET muss mindestens 32 Zeichen lang sein.'),
-  JWT_EXPIRES_IN: z.string().default('8h'),
+  // Nur Einheiten, die auch parseDurationToMs() versteht (siehe authController.ts),
+  // damit JWT-Ablauf und Sitzungs-Ablaufzeit garantiert identisch sind.
+  JWT_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, 'JWT_EXPIRES_IN muss dem Format <Zahl><s|m|h|d> entsprechen (z. B. 8h).').default('8h'),
   CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss konfiguriert sein.'),
   RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10))
 });

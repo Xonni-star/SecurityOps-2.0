@@ -105,7 +105,7 @@ export async function seedDatabase(): Promise<void> {
       // Objekt
       await tx.query(`
         INSERT INTO sites (id, tenant_id, client_id, site_code, name, address, security_level)
-        VALUES ('s1111111-1111-1111-1111-111111111111', $1, 'c1111111-1111-1111-1111-111111111111', 'OBJ-FRA-01', 'Finanzturm Alpha (Hauptverwaltung)', 'Neue Mainzer Straße 52, 60311 Frankfurt', 'Hoch (KRITIS / BSI)')
+        VALUES ('b1111111-1111-1111-1111-111111111111', $1, 'c1111111-1111-1111-1111-111111111111', 'OBJ-FRA-01', 'Finanzturm Alpha (Hauptverwaltung)', 'Neue Mainzer Straße 52, 60311 Frankfurt', 'Hoch (KRITIS / BSI)')
         ON CONFLICT (id, tenant_id) DO NOTHING;
       `, [TENANT_FRANKFURT_ID]);
 
@@ -135,5 +135,9 @@ export async function seedDatabase(): Promise<void> {
 if (require.main === module) {
   seedDatabase()
     .then(() => process.exit(0))
-    .catch(() => process.exit(1));
+    .catch((err) => {
+      // Fehler nicht verschlucken: sonst bleibt ein fehlgeschlagener Seed stumm.
+      console.error('[SEED FAILED]', err);
+      process.exit(1);
+    });
 }

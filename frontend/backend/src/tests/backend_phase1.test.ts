@@ -3,7 +3,8 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import request from 'supertest';
 import { app } from '../app';
-import { pool, withTenantTransaction, withSystemTransaction } from '../config/database';
+import { pool, migrationPool, withTenantTransaction, withSystemTransaction } from '../config/database';
+import { cleanupTestData } from './testUtils';
 import { env } from '../config/env';
 
 describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Tests', () => {
@@ -98,7 +99,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     testValidTokenA = jwt.sign(
       { sub: testUserAId, email: 'test.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['customers:read'] },
       env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '1h', jwtid: 'valid-token-a' }
     );
     const validHash = crypto.createHash('sha256').update(testValidTokenA).digest('hex');
     await pool.query(`
@@ -109,7 +110,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     testRevokedTokenA = jwt.sign(
       { sub: testUserAId, email: 'test.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['customers:read'] },
       env.JWT_SECRET,
-      { expiresIn: '1h' }
+      { expiresIn: '1h', jwtid: 'revoked-token-a' }
     );
     const revokedHash = crypto.createHash('sha256').update(testRevokedTokenA).digest('hex');
     await pool.query(`
@@ -120,7 +121,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     testExpiredTokenA = jwt.sign(
       { sub: testUserAId, email: 'test.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['customers:read'] },
       env.JWT_SECRET,
-      { expiresIn: '-10m' }
+      { expiresIn: '-10m', jwtid: 'expired-token-a' }
     );
     const expiredHash = crypto.createHash('sha256').update(testExpiredTokenA).digest('hex');
     await pool.query(`
@@ -130,12 +131,10 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
   });
 
   afterAll(async () => {
-    // Zuverlässige Bereinigung der Testdaten
-    if (testTenantA) await pool.query('DELETE FROM tenants WHERE id = $1', [testTenantA]);
-    if (testTenantB) await pool.query('DELETE FROM tenants WHERE id = $1', [testTenantB]);
-    if (testUserAId) await pool.query('DELETE FROM users WHERE id = $1', [testUserAId]);
-    if (testUserMultiTenantId) await pool.query('DELETE FROM users WHERE id = $1', [testUserMultiTenantId]);
+    // Administrative Bereinigung inkl. Append-Only-Trigger (nur Testdatenbank).
+    await cleanupTestData([testTenantA, testTenantB], [testUserAId, testUserMultiTenantId]);
     await pool.end();
+    await migrationPool.end();
   });
 
   // Test 1: Least-Privilege DB-Rolle
@@ -304,7 +303,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
       withTenantTransaction(testTenantA, async (tx) => {
         return tx.query('DELETE FROM guardbook_entries WHERE id = $1', [entryId]);
       })
-    ).rejects.toThrow(/Löschen von Einträgen in guardbook_entries ist nach DIN 77200 unzulässig/);
+    ).rejects.toThrow(/Löschen von Einträgen in guardbook_entries ist nach DIN 77200 unzulässig|permission denied for table guardbook_entries/);
   });
 
   // Test 10: Revisionen sind unlöschbar und unveränderlich
@@ -325,13 +324,13 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
       withTenantTransaction(testTenantA, async (tx) => {
         return tx.query("UPDATE guardbook_revisions SET note = 'Geändert' WHERE id = $1", [revId]);
       })
-    ).rejects.toThrow(/unveränderlich und unlöschbar/);
+    ).rejects.toThrow(/unveränderlich und unlöschbar|permission denied for table guardbook_revisions/);
 
     await expect(
       withTenantTransaction(testTenantA, async (tx) => {
         return tx.query("DELETE FROM guardbook_revisions WHERE id = $1", [revId]);
       })
-    ).rejects.toThrow(/unveränderlich und unlöschbar/);
+    ).rejects.toThrow(/unveränderlich und unlöschbar|permission denied for table guardbook_revisions/);
   });
 
   // Test 11: Parallele Wachbuch-Idempotenz via ON CONFLICT

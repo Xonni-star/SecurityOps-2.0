@@ -100,7 +100,9 @@ export async function withSystemTransaction<T>(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query("SELECT set_config('app.current_tenant', '', true)");
+    // NULL-UUID statt Leerstring: RLS-Policies casten app.current_tenant nach uuid.
+    // Ein Leerstring würde die Abfrage mit "invalid input syntax for type uuid" abbrechen.
+    await client.query("SELECT set_config('app.current_tenant', '00000000-0000-0000-0000-000000000000', true)");
     const result = await callback(client);
     await client.query('COMMIT');
     return result;

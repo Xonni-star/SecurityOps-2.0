@@ -888,7 +888,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           );
 
           const revs = await client.query(
-            'SELECT id, timestamp, author_name, note FROM guardbook_revisions WHERE entry_id = $1 AND tenant_id = $2 ORDER BY created_at ASC',
+            'SELECT id, created_at AS timestamp, author_name, note FROM guardbook_revisions WHERE entry_id = $1 AND tenant_id = $2 ORDER BY created_at ASC',
             [entryId, tenantId]
           );
           currentGb.revisions = revs.rows;
@@ -896,7 +896,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           updated = true;
         } else if (body.strategy === 'USE_SERVER') {
           const revs = await client.query(
-            'SELECT id, timestamp, author_name, note FROM guardbook_revisions WHERE entry_id = $1 AND tenant_id = $2 ORDER BY created_at ASC',
+            'SELECT id, created_at AS timestamp, author_name, note FROM guardbook_revisions WHERE entry_id = $1 AND tenant_id = $2 ORDER BY created_at ASC',
             [entryId, tenantId]
           );
           currentGb.revisions = revs.rows;

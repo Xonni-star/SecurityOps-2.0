@@ -1,0 +1,54 @@
+name: SecurityOps 2.0 CD – Release-Artefakte
+
+# Läuft ausschließlich nach einem erfolgreichen CI-Lauf auf `main` und
+# bündelt die von der CI erzeugten Build-Artefakte zu einem Release-Paket.
+# Es werden keine Zugangsdaten oder Umgebungsgeheimnisse benötigt.
+
+on:
+  workflow_run:
+    workflows: ["SecurityOps 2.0 CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package-artifacts:
+    name: Release-Paket aus CI-Artefakten bauen
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Frontend-Build herunterladen
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: release/frontend
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Backend-Build herunterladen
+        uses: actions/download-artifact@v4
+        with:
+          name: backend-dist
+          path: release/backend
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build-Manifest erzeugen
+        run: |
+          {
+            echo "commit=${{ github.event.workflow_run.head_sha }}"
+            echo "ci_run_id=${{ github.event.workflow_run.id }}"
+            echo "created_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > release/BUILD-MANIFEST.txt
+
+      - name: Release-Paket als Artefakt sichern
+        uses: actions/upload-artifact@v4
+        with:
+          name: securityops-release-${{ github.event.workflow_run.head_sha }}
+          path: release
+          if-no-files-found: error
+          retention-days: 30

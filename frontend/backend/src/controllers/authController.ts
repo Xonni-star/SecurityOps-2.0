@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import argon2 from 'argon2';
-import jwt from 'jsonwebtoken';
+import jwt, { SignOptions } from 'jsonwebtoken';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { query } from '../config/database';
@@ -150,6 +150,14 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     const sessionDurationMs = parseDurationToMs(env.JWT_EXPIRES_IN);
     const expiresAt = new Date(Date.now() + sessionDurationMs);
 
+    // env.JWT_EXPIRES_IN ist durch die Zod-Regel in config/env.ts auf
+    // <Zahl><s|m|h|d> beschränkt und entspricht damit dem von jsonwebtoken
+    // akzeptierten StringValue-Format. Der Cast überträgt diese Laufzeit-
+    // Garantie auf den Compiler, ohne "any" zu verwenden.
+    const signOptions: SignOptions = {
+      expiresIn: env.JWT_EXPIRES_IN as SignOptions['expiresIn']
+    };
+
     const token = jwt.sign(
       {
         sub: user.id,
@@ -159,7 +167,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
         permissions
       },
       env.JWT_SECRET,
-      { expiresIn: env.JWT_EXPIRES_IN }
+      signOptions
     );
 
     // 6. Sitzung in user_sessions persistieren

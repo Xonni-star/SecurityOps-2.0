@@ -1,4 +1,5 @@
-import { pool, withTenantTransaction, withSystemTransaction } from '../config/database';
+import { pool, migrationPool, withTenantTransaction, withSystemTransaction } from '../config/database';
+import { cleanupTestData } from './testUtils';
 
 describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
   let tenantA: string;
@@ -33,9 +34,10 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
   });
 
   afterAll(async () => {
-    if (tenantA) await pool.query('DELETE FROM tenants WHERE id = $1', [tenantA]);
-    if (tenantB) await pool.query('DELETE FROM tenants WHERE id = $1', [tenantB]);
+    // Administrative Bereinigung inkl. Append-Only-Trigger (nur Testdatenbank).
+    await cleanupTestData([tenantA, tenantB]);
     await pool.end();
+    await migrationPool.end();
   });
 
   test('Mandant A sieht keine Daten von Mandant B', async () => {
