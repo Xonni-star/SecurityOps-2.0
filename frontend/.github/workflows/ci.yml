@@ -1,0 +1,68 @@
+name: SecurityOps 2.0 CI
+
+on:
+  push:
+    branches: [ "main", "release/*" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  backend-verification:
+    name: Backend Build, PostgreSQL 16 RLS Migration & Test Suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16.2-alpine
+        env:
+          POSTGRES_DB: securityops_v2
+          POSTGRES_USER: secops_admin
+          POSTGRES_PASSWORD: SecOpsVault2025Secure
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: backend/package.json
+
+      - name: Install Backend Dependencies
+        run: npm ci --prefix backend
+
+      - name: Build TypeScript Backend
+        run: npm run build --prefix backend
+
+      - name: Execute PostgreSQL Migrations (secops_admin)
+        env:
+          DATABASE_MIGRATION_URL: postgresql://secops_admin:SecOpsVault2025Secure@127.0.0.1:5432/securityops_v2
+          DATABASE_URL: postgresql://secops_app_user:SecOpsVault2025Secure@127.0.0.1:5432/securityops_v2
+          JWT_SECRET: SEC-OPS-2025-ENTERPRISE-ARGON2-SUPER-SECURE-KEY-VAULT-32CHARS
+          CORS_ORIGIN: http://localhost:3000
+        run: npm run migrate --prefix backend
+
+      - name: Seed PostgreSQL Test Data
+        env:
+          DATABASE_MIGRATION_URL: postgresql://secops_admin:SecOpsVault2025Secure@127.0.0.1:5432/securityops_v2
+          DATABASE_URL: postgresql://secops_app_user:SecOpsVault2025Secure@127.0.0.1:5432/securityops_v2
+          JWT_SECRET: SEC-OPS-2025-ENTERPRISE-ARGON2-SUPER-SECURE-KEY-VAULT-32CHARS
+          CORS_ORIGIN: http://localhost:3000
+        run: npm run seed --prefix backend
+
+      - name: Run Backend & RLS Integration Tests (Jest)
+        env:
+          DATABASE_MIGRATION_URL: postgresql://secops_admin:SecOpsVault2025Secure@127.0.0.1:5432/securityops_v2
+          DATABASE_URL: postgresql://secops_app_user:SecOpsVault2025Secure@127.0.0.1:5432/securityops_v2
+          JWT_SECRET: SEC-OPS-2025-ENTERPRISE-ARGON2-SUPER-SECURE-KEY-VAULT-32CHARS
+          CORS_ORIGIN: http://localhost:3000
+        run: npm test --prefix backend

@@ -14,9 +14,7 @@ export const app = express();
 
 app.use(helmet());
 
-// 4. Sichere CORS-Konfiguration:
-// Whitelist-basierte Ursprungsprüfung ohne Wildcards.
-// Anfragen ohne Origin (z. B. Server-zu-Server oder Testumgebung) werden kontrolliert zugelassen.
+// CORS Whitelist-Prüfung ohne Wildcard
 const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
     if (!origin) {
@@ -64,7 +62,8 @@ app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), g
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
 app.post('/api/v1/logbook/revisions', authenticateJwt, requirePermission('logbook:create'), guardbookController.addGuardbookRevision);
 
-// 1. Echter Backend-Endpunkt für Offline-Synchronisation (Phase 6 Wiederherstellung)
+// Offline-Synchronisations-Endpunkte
 app.post('/api/v1/sync/push', authenticateJwt, requirePermission('logbook:create'), syncController.pushSyncMutations);
+app.post('/api/v1/sync/conflicts/resolve', authenticateJwt, requirePermission('logbook:create'), syncController.resolveSyncConflict);
 
 app.use(errorHandler);

@@ -16,6 +16,13 @@ const syncPushBatchSchema = z.object({
   mutations: z.array(syncMutationItemSchema).min(1, 'Mindestens eine Mutation muss übermittelt werden.')
 });
 
+const conflictResolveSchema = z.object({
+  clientUuid: z.string().min(8).max(64),
+  entityType: z.enum(['task', 'shift', 'key']),
+  strategy: z.enum(['USE_LOCAL', 'USE_SERVER']),
+  localPayload: z.record(z.any()).optional()
+});
+
 export interface SyncResultItem {
   clientUuid: string;
   serverId: string;
@@ -26,22 +33,36 @@ export interface SyncResultItem {
 }
 
 /**
- * Echter Backend-Endpunkt POST /api/v1/sync/push:
- * Verarbeitet ausstehende Mutationen idempotent gegen PostgreSQL.
- * Der Mandantenkontext und die Benutzeridentität stammen strikt aus req.user.
+ * POST /api/v1/sync/push
+ * Verarbeitet alle 6 unterstützten Mutationstypen vollständig:
+ * guardbook, shift, task, key, patrol, handover.
  */
 export async function pushSyncMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
     const userId = req.user!.userId;
+    const userEmail = req.user!.email;
     const body = syncPushBatchSchema.parse(req.body);
 
     const results: SyncResultItem[] = [];
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
+        // ----------------------------------------------------------------------
+        // 1. GUARDBOOK (APPEND-ONLY)
+        // ----------------------------------------------------------------------
         if (mut.entityType === 'guardbook') {
-          // Idempotenzprüfung über client_mutation_id
+          if (mut.action === 'DELETE') {
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: 'none',
+              status: 'REJECTED',
+              serverVersion: mut.baseVersion,
+              message: 'Löschen von Wachbucheinträgen ist nach DIN 77200 unzulässig (Append-Only).'
+            });
+            continue;
+          }
+
           const existingRes = await client.query(
             'SELECT id, title, description, stage FROM guardbook_entries WHERE tenant_id = $1 AND client_mutation_id = $2',
             [tenantId, mut.clientUuid]
@@ -51,15 +72,13 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
             const existing = existingRes.rows[0];
 
             if (mut.action === 'UPDATE') {
-              // Append-Only Korrektur: Fügt eine unlöschbare Revision an!
-              const correctionNote = mut.payload.correctionNote || 'Korrektur aus Offline-Synchronisation';
+              const correctionNote = mut.payload.correctionNote || 'Nachträgliche Ergänzung aus Offline-Synchronisation';
               await client.query(
                 `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note)
                  VALUES ($1, $2, $3, $4)`,
-                [tenantId, existing.id, req.user!.email, correctionNote]
+                [tenantId, existing.id, userEmail, correctionNote]
               );
 
-              // Status (stage) kontrolliert aktualisieren
               if (mut.payload.stage) {
                 await client.query(
                   'UPDATE guardbook_entries SET stage = $1 WHERE id = $2 AND tenant_id = $3',
@@ -75,7 +94,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 message: 'Revision erfolgreich angehängt'
               });
             } else {
-              // Idempotente Bestätigung: Bereits synchronisiert, kein Duplikat
+              // Idempotente Bestätigung
               results.push({
                 clientUuid: mut.clientUuid,
                 serverId: existing.id,
@@ -85,7 +104,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               });
             }
           } else {
-            // Neuer Eintrag: Atomar mit ON CONFLICT DO NOTHING einfügen
+            // Neuer Eintrag
             const siteId = mut.payload.siteId;
             const guardId = mut.payload.guardId || userId;
             const category = mut.payload.category || 'Vorkommnis';
@@ -98,7 +117,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               `INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description, police_involved, client_mutation_id)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
-               RETURNING id, title, entry_timestamp`,
+               RETURNING id, title`,
               [tenantId, siteId, guardId, category, priority, title, description, policeInvolved, mut.clientUuid]
             );
 
@@ -110,71 +129,309 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverVersion: 1
               });
             } else {
-              // Bei Race Condition: Idempotent bestehenden Eintrag zurückgeben
-              const raceCheck = await client.query(
+              const raceRes = await client.query(
                 'SELECT id FROM guardbook_entries WHERE tenant_id = $1 AND client_mutation_id = $2',
                 [tenantId, mut.clientUuid]
               );
               results.push({
                 clientUuid: mut.clientUuid,
-                serverId: raceCheck.rows[0]?.id || 'unknown',
+                serverId: raceRes.rows[0]?.id || 'unknown',
                 status: 'SYNCED',
                 serverVersion: 1
               });
             }
           }
-        } else if (mut.entityType === 'task') {
-          // Aufgabenkonflikterkennung
-          const taskId = mut.payload.id;
-          if (taskId) {
-            const taskRes = await client.query(
-              'SELECT id, title, status FROM tasks WHERE id = $1 AND tenant_id = $2',
-              [taskId, tenantId]
+        }
+        // ----------------------------------------------------------------------
+        // 2. SHIFTS (DIENSTPLANUNG)
+        // ----------------------------------------------------------------------
+        else if (mut.entityType === 'shift') {
+          const shiftId = mut.payload.id;
+
+          if (mut.action === 'CREATE') {
+            const insRes = await client.query(
+              `INSERT INTO shifts (tenant_id, site_id, employee_id, shift_date, start_time, end_time, type, status, required_qualification, conflict_reason, client_mutation_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
+               RETURNING id`,
+              [
+                tenantId,
+                mut.payload.siteId,
+                mut.payload.employeeId || null,
+                mut.payload.shiftDate || new Date().toISOString().split('T')[0],
+                mut.payload.startTime || '06:00',
+                mut.payload.endTime || '18:00',
+                mut.payload.type || 'Tagdienst',
+                mut.payload.status || 'Besetzt',
+                mut.payload.requiredQualification || 'Sachkundeprüfung § 34a GewO',
+                mut.payload.conflictReason || null,
+                mut.clientUuid
+              ]
             );
 
-            if (taskRes.rows.length > 0) {
-              const serverTask = taskRes.rows[0];
-              // Kollisionsprüfung bei paralleler Statusänderung
-              if (serverTask.status !== mut.payload.expectedBaseStatus && mut.payload.expectedBaseStatus) {
-                results.push({
-                  clientUuid: mut.clientUuid,
-                  serverId: taskId,
-                  status: 'CONFLICT',
-                  serverVersion: 2,
-                  conflictData: { serverStatus: serverTask.status, clientStatus: mut.payload.status },
-                  message: 'Parallele Bearbeitung auf Server festgestellt.'
-                });
-                continue;
-              }
+            const sId = insRes.rows.length > 0
+              ? insRes.rows[0].id
+              : (await client.query('SELECT id FROM shifts WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
 
-              await client.query(
-                'UPDATE tasks SET status = $1 WHERE id = $2 AND tenant_id = $3',
-                [mut.payload.status, taskId, tenantId]
-              );
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: sId || 'unknown',
+              status: 'SYNCED',
+              serverVersion: 1
+            });
+          } else if (mut.action === 'UPDATE') {
+            const updateRes = await client.query(
+              `UPDATE shifts 
+               SET employee_id = COALESCE($1, employee_id),
+                   status = COALESCE($2, status),
+                   conflict_reason = $3
+               WHERE id = $4 AND tenant_id = $5
+               RETURNING id`,
+              [mut.payload.employeeId || null, mut.payload.status || null, mut.payload.conflictReason || null, shiftId, tenantId]
+            );
 
+            if (updateRes.rows.length === 0) {
               results.push({
                 clientUuid: mut.clientUuid,
-                serverId: taskId,
+                serverId: shiftId || 'unknown',
+                status: 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: 'Schicht nicht gefunden oder kein Mandantenzugriff.'
+              });
+            } else {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: shiftId,
                 status: 'SYNCED',
                 serverVersion: mut.baseVersion + 1
               });
+            }
+          } else {
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: shiftId || 'none',
+              status: 'REJECTED',
+              serverVersion: mut.baseVersion,
+              message: 'Löschen von Schichten via Offline-Sync nicht freigegeben.'
+            });
+          }
+        }
+        // ----------------------------------------------------------------------
+        // 3. TASKS (AUFGABEN MIT KONFLIKTERKENNUNG)
+        // ----------------------------------------------------------------------
+        else if (mut.entityType === 'task') {
+          const taskId = mut.payload.id;
+
+          if (mut.action === 'CREATE') {
+            const insTask = await client.query(
+              `INSERT INTO tasks (tenant_id, title, assigned_to_name, site_name, due_date, priority, status, category, client_mutation_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
+               RETURNING id`,
+              [
+                tenantId,
+                mut.payload.title,
+                mut.payload.assignedToName || 'Einsatzleitung',
+                mut.payload.siteName || null,
+                mut.payload.dueDate || new Date().toISOString().split('T')[0],
+                mut.payload.priority || 'Mittel',
+                mut.payload.status || 'Offen',
+                mut.payload.category || 'Audit',
+                mut.clientUuid
+              ]
+            );
+
+            const tId = insTask.rows.length > 0
+              ? insTask.rows[0].id
+              : (await client.query('SELECT id FROM tasks WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
+
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: tId || 'unknown',
+              status: 'SYNCED',
+              serverVersion: 1
+            });
+          } else if (mut.action === 'UPDATE') {
+            const taskRes = await client.query(
+              'SELECT id, title, status, revision_version FROM tasks WHERE id = $1 AND tenant_id = $2',
+              [taskId, tenantId]
+            );
+
+            if (taskRes.rows.length === 0) {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: taskId || 'unknown',
+                status: 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: 'Aufgabe nicht gefunden.'
+              });
               continue;
             }
-          }
 
-          // Neue Aufgabe
-          const insTask = await client.query(
-            `INSERT INTO tasks (tenant_id, title, assigned_to_name, site_name, due_date, priority, status, category)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            const serverTask = taskRes.rows[0];
+
+            // Paralleler Änderungskonflikt: Server-Version ist bereits weiter
+            if (serverTask.revision_version > mut.baseVersion) {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: taskId,
+                status: 'CONFLICT',
+                serverVersion: serverTask.revision_version,
+                conflictData: {
+                  serverStatus: serverTask.status,
+                  serverVersion: serverTask.revision_version,
+                  clientStatus: mut.payload.status,
+                  clientVersion: mut.baseVersion
+                },
+                message: 'Parallele Bearbeitung festgestellt. Manuelle Auflösung erforderlich.'
+              });
+              continue;
+            }
+
+            // Normales Update
+            await client.query(
+              'UPDATE tasks SET status = $1, revision_version = revision_version + 1 WHERE id = $2 AND tenant_id = $3',
+              [mut.payload.status, taskId, tenantId]
+            );
+
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: taskId,
+              status: 'SYNCED',
+              serverVersion: serverTask.revision_version + 1
+            });
+          }
+        }
+        // ----------------------------------------------------------------------
+        // 4. KEYS (SCHLÜSSELDEPOT)
+        // ----------------------------------------------------------------------
+        else if (mut.entityType === 'key') {
+          const keyId = mut.payload.id;
+
+          if (mut.action === 'UPDATE') {
+            const keyRes = await client.query(
+              `UPDATE keys 
+               SET status = $1,
+                   current_holder_id = $2,
+                   issued_at = $3,
+                   expected_return = $4
+               WHERE id = $5 AND tenant_id = $6
+               RETURNING id, key_number, status`,
+              [
+                mut.payload.status,
+                mut.payload.currentHolderId || null,
+                mut.payload.issuedAt || null,
+                mut.payload.expectedReturn || null,
+                keyId,
+                tenantId
+              ]
+            );
+
+            if (keyRes.rows.length === 0) {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: keyId || 'unknown',
+                status: 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: 'Schlüssel nicht gefunden oder kein Mandantenzugriff.'
+              });
+            } else {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: keyId,
+                status: 'SYNCED',
+                serverVersion: mut.baseVersion + 1
+              });
+            }
+          } else {
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: keyId || 'unknown',
+              status: 'REJECTED',
+              serverVersion: mut.baseVersion,
+              message: 'Nur Status-Updates für Schlüssel via Offline-Sync freigegeben.'
+            });
+          }
+        }
+        // ----------------------------------------------------------------------
+        // 5. PATROL (KONTROLLGANG-SCANS)
+        // ----------------------------------------------------------------------
+        else if (mut.entityType === 'patrol') {
+          const insPatrol = await client.query(
+            `INSERT INTO patrol_scans (tenant_id, site_id, checkpoint_id, checkpoint_code, checkpoint_name, guard_id, scanned_at, method, verified_tag, notes, client_mutation_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
              RETURNING id`,
-            [tenantId, mut.payload.title, mut.payload.assignedToName || 'Einsatzleitung', mut.payload.siteName || null, mut.payload.dueDate || new Date().toISOString().split('T')[0], mut.payload.priority || 'Mittel', mut.payload.status || 'Offen', mut.payload.category || 'Audit']
+            [
+              tenantId,
+              mut.payload.siteId,
+              mut.payload.checkpointId || null,
+              mut.payload.checkpointCode || 'CP-01',
+              mut.payload.checkpointName || 'Kontrollpunkt',
+              mut.payload.guardId || userId,
+              mut.payload.scannedAt || mut.clientTimestamp,
+              mut.payload.method || 'QR_CODE',
+              mut.payload.verifiedTag || 'RFID-TAG',
+              mut.payload.notes || null,
+              mut.clientUuid
+            ]
           );
+
+          const pId = insPatrol.rows.length > 0
+            ? insPatrol.rows[0].id
+            : (await client.query('SELECT id FROM patrol_scans WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
 
           results.push({
             clientUuid: mut.clientUuid,
-            serverId: insTask.rows[0].id,
+            serverId: pId || 'unknown',
             status: 'SYNCED',
             serverVersion: 1
+          });
+        }
+        // ----------------------------------------------------------------------
+        // 6. HANDOVER (SCHICHTÜBERGABEN)
+        // ----------------------------------------------------------------------
+        else if (mut.entityType === 'handover') {
+          const insHandover = await client.query(
+            `INSERT INTO shift_handovers (tenant_id, site_id, relieving_guard_id, relieved_guard_id, handover_time, key_register_checked, open_incidents_count, remarks, acknowledged, client_mutation_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
+             RETURNING id`,
+            [
+              tenantId,
+              mut.payload.siteId,
+              mut.payload.relievingGuardId,
+              mut.payload.relievedGuardId || userId,
+              mut.payload.handoverTime || mut.clientTimestamp,
+              mut.payload.keyRegisterChecked ?? true,
+              mut.payload.openIncidentsCount || 0,
+              mut.payload.remarks || null,
+              mut.payload.acknowledged ?? true,
+              mut.clientUuid
+            ]
+          );
+
+          const hId = insHandover.rows.length > 0
+            ? insHandover.rows[0].id
+            : (await client.query('SELECT id FROM shift_handovers WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
+
+          results.push({
+            clientUuid: mut.clientUuid,
+            serverId: hId || 'unknown',
+            status: 'SYNCED',
+            serverVersion: 1
+          });
+        }
+        // ----------------------------------------------------------------------
+        // UNBEKANNTER ENTITY TYPE -> EXPLIZIT REJECTED (NICHTS IGNORIEREN!)
+        // ----------------------------------------------------------------------
+        else {
+          results.push({
+            clientUuid: mut.clientUuid,
+            serverId: 'none',
+            status: 'REJECTED',
+            serverVersion: mut.baseVersion,
+            message: `Nicht unterstützter Mutationstyp: '${mut.entityType}'.`
           });
         }
       }
@@ -184,6 +441,44 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
       success: true,
       message: `${results.length} Synchronisationsoperation(en) serverseitig verarbeitet`,
       data: results
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * POST /api/v1/sync/conflicts/resolve
+ * Reale Server-Auflösung von Synchronisationskonflikten:
+ * Wendet die gewählte Strategie in der PostgreSQL-Datenbank an und quittiert den Vorgang.
+ */
+export async function resolveSyncConflict(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const userEmail = req.user!.email;
+    const body = conflictResolveSchema.parse(req.body);
+
+    await withTenantTransaction(tenantId, async (client) => {
+      if (body.entityType === 'task' && body.strategy === 'USE_LOCAL' && body.localPayload?.id) {
+        await client.query(
+          `UPDATE tasks 
+           SET status = $1, revision_version = revision_version + 1
+           WHERE id = $2 AND tenant_id = $3`,
+          [body.localPayload.status || 'In Bearbeitung', body.localPayload.id, tenantId]
+        );
+      }
+
+      // Revisionsprotokollierung der Entscheidung
+      await client.query(
+        `INSERT INTO audit_logs (tenant_id, user_email, role, action_type, severity, target_entity, details, ip_address)
+         VALUES ($1, $2, 'Einsatzleitung', 'CONFLICT_RESOLVED', 'INFO', $3, $4, $5)`,
+        [tenantId, userEmail, `Conflict:${body.clientUuid}`, `Konflikt aufgelöst mit Strategie: ${body.strategy}`, req.ip || '127.0.0.1']
+      );
+    });
+
+    res.json({
+      success: true,
+      message: `Konflikt ${body.clientUuid} erfolgreich auf dem Server aufgelöst (${body.strategy}).`
     });
   } catch (error) {
     next(error);

@@ -1,6 +1,6 @@
 -- ==============================================================================
--- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 3 FINALE HÄRTUNG)
--- Least-Privilege Rollentrennung, Append-Only Trigger, Composite FKs & RLS
+-- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 5R.1 KORRIGIERT)
+-- Least-Privilege Rollentrennung, Idempotenz-Constraints, Composite FKs & RLS
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -99,10 +99,12 @@ CREATE TABLE IF NOT EXISTS clients (
     notice_period_months INT NOT NULL DEFAULT 3,
     sla_level VARCHAR(50) NOT NULL DEFAULT 'Gold (24/7 Vor-Ort)',
     billing_status VARCHAR(50) NOT NULL DEFAULT 'Regulär',
+    client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
-    CONSTRAINT uq_client_number_tenant UNIQUE (tenant_id, client_number)
+    CONSTRAINT uq_client_number_tenant UNIQUE (tenant_id, client_number),
+    CONSTRAINT uq_clients_client_mutation UNIQUE (tenant_id, client_mutation_id)
 );
 
 CREATE TABLE IF NOT EXISTS sites (
@@ -117,10 +119,12 @@ CREATE TABLE IF NOT EXISTS sites (
     required_guards_night INT NOT NULL DEFAULT 2,
     alarm_system VARCHAR(150),
     access_rules TEXT,
+    client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
     CONSTRAINT uq_site_code_tenant UNIQUE (tenant_id, site_code),
+    CONSTRAINT uq_sites_client_mutation UNIQUE (tenant_id, client_mutation_id),
     CONSTRAINT fk_sites_client_tenant FOREIGN KEY (client_id, tenant_id)
         REFERENCES clients(id, tenant_id) ON DELETE RESTRICT
 );
@@ -139,10 +143,12 @@ CREATE TABLE IF NOT EXISTS employees (
     weekly_hours NUMERIC(4,1) NOT NULL DEFAULT 40.0,
     hourly_rate NUMERIC(6,2) NOT NULL DEFAULT 18.50,
     date_of_joining DATE NOT NULL,
+    client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
-    CONSTRAINT uq_employee_number_tenant UNIQUE (tenant_id, personnel_number)
+    CONSTRAINT uq_employee_number_tenant UNIQUE (tenant_id, personnel_number),
+    CONSTRAINT uq_employees_client_mutation UNIQUE (tenant_id, client_mutation_id)
 );
 
 CREATE TABLE IF NOT EXISTS employee_qualifications (
@@ -173,9 +179,11 @@ CREATE TABLE IF NOT EXISTS shifts (
     status VARCHAR(30) NOT NULL DEFAULT 'Besetzt',
     required_qualification VARCHAR(100) NOT NULL,
     conflict_reason TEXT,
+    client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
+    CONSTRAINT uq_shifts_client_mutation UNIQUE (tenant_id, client_mutation_id),
     CONSTRAINT fk_shifts_site_tenant FOREIGN KEY (site_id, tenant_id)
         REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
     CONSTRAINT fk_shifts_employee_tenant FOREIGN KEY (employee_id, tenant_id)
@@ -207,7 +215,6 @@ CREATE TABLE IF NOT EXISTS guardbook_entries (
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
--- Revisionshistorie für nachträgliche Ergänzungen (Append-Only)
 CREATE TABLE IF NOT EXISTS guardbook_revisions (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -220,7 +227,7 @@ CREATE TABLE IF NOT EXISTS guardbook_revisions (
         REFERENCES guardbook_entries(id, tenant_id) ON DELETE CASCADE
 );
 
--- 6. SCHLÜSSELVERWALTUNG (COMPOSITE FOREIGN KEYS)
+-- 6. SCHLÜSSELVERWALTUNG (COMPOSITE FOREIGN KEYS & IDEMPOTENZ)
 CREATE TABLE IF NOT EXISTS keys (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -232,16 +239,18 @@ CREATE TABLE IF NOT EXISTS keys (
     current_holder_id UUID,
     issued_at TIMESTAMP WITH TIME ZONE,
     expected_return TIMESTAMP WITH TIME ZONE,
+    client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
     CONSTRAINT uq_key_number_tenant UNIQUE (tenant_id, key_number),
+    CONSTRAINT uq_keys_client_mutation UNIQUE (tenant_id, client_mutation_id),
     CONSTRAINT fk_keys_site_tenant FOREIGN KEY (site_id, tenant_id)
         REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
     CONSTRAINT fk_keys_holder_tenant FOREIGN KEY (current_holder_id, tenant_id)
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
--- 7. AUFGABEN
+-- 7. AUFGABEN (IDEMPOTENZ-CONSTRAINT & VERSIONIERUNG)
 CREATE TABLE IF NOT EXISTS tasks (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -252,11 +261,61 @@ CREATE TABLE IF NOT EXISTS tasks (
     priority VARCHAR(20) NOT NULL DEFAULT 'Mittel',
     status VARCHAR(30) NOT NULL DEFAULT 'Offen',
     category VARCHAR(50) NOT NULL DEFAULT 'Audit',
+    revision_version INT NOT NULL DEFAULT 1,
+    client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (id, tenant_id)
+    PRIMARY KEY (id, tenant_id),
+    CONSTRAINT uq_tasks_client_mutation UNIQUE (tenant_id, client_mutation_id)
 );
 
--- 8. AUDIT PROTOKOLLE
+-- 8. KONTROLLGANG-SCANS (QR-CODE / NFC)
+CREATE TABLE IF NOT EXISTS patrol_scans (
+    id UUID DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    site_id UUID NOT NULL,
+    checkpoint_id VARCHAR(100),
+    checkpoint_code VARCHAR(50) NOT NULL,
+    checkpoint_name VARCHAR(150) NOT NULL,
+    guard_id UUID NOT NULL,
+    scanned_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    method VARCHAR(30) NOT NULL DEFAULT 'QR_CODE',
+    verified_tag VARCHAR(100) NOT NULL,
+    notes TEXT,
+    client_mutation_id VARCHAR(64),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, tenant_id),
+    CONSTRAINT uq_patrol_client_mutation UNIQUE (tenant_id, client_mutation_id),
+    CONSTRAINT fk_patrol_site_tenant FOREIGN KEY (site_id, tenant_id)
+        REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT fk_patrol_guard_tenant FOREIGN KEY (guard_id, tenant_id)
+        REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
+);
+
+-- 9. SCHICHTÜBERGABE-PROTOKOLLE
+CREATE TABLE IF NOT EXISTS shift_handovers (
+    id UUID DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    site_id UUID NOT NULL,
+    relieving_guard_id UUID NOT NULL,
+    relieved_guard_id UUID NOT NULL,
+    handover_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    key_register_checked BOOLEAN NOT NULL DEFAULT true,
+    open_incidents_count INT NOT NULL DEFAULT 0,
+    remarks TEXT,
+    acknowledged BOOLEAN NOT NULL DEFAULT true,
+    client_mutation_id VARCHAR(64),
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, tenant_id),
+    CONSTRAINT uq_handover_client_mutation UNIQUE (tenant_id, client_mutation_id),
+    CONSTRAINT fk_handover_site_tenant FOREIGN KEY (site_id, tenant_id)
+        REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT fk_handover_relieving_tenant FOREIGN KEY (relieving_guard_id, tenant_id)
+        REFERENCES employees(id, tenant_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_handover_relieved_tenant FOREIGN KEY (relieved_guard_id, tenant_id)
+        REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
+);
+
+-- 10. AUDIT PROTOKOLLE
 CREATE TABLE IF NOT EXISTS audit_logs (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -272,7 +331,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 -- ==============================================================================
--- POSTGRESQL ROW-LEVEL SECURITY (RLS) AKTIVIERUNG & POLICY DEFINITIONEN
+-- POSTGRESQL ROW-LEVEL SECURITY (RLS) AKTIVIERUNG
 -- ==============================================================================
 
 DO $$
@@ -288,22 +347,18 @@ DECLARE
         'guardbook_revisions',
         'keys',
         'tasks',
+        'patrol_scans',
+        'shift_handovers',
         'audit_logs'
     ];
 BEGIN
     FOREACH tbl IN ARRAY rls_tables LOOP
-        -- RLS aktivieren und zwingend auch für Tabellenbesitzer erzwingen
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
         
-        -- Alte Policies entfernen
         EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_permissive ON %I;', tbl);
         EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_policy ON %I;', tbl);
         
-        -- Strikte Mandanten-Isolierung:
-        -- Gibt ausschließlich Datensätze frei, wenn app.current_tenant exakt gesetzt ist
-        -- und mit der tenant_id des Datensatzes übereinstimmt.
-        -- Ohne gesetzten Mandantenkontext (NULL oder leer) liefert USING false und WITH CHECK false!
         EXECUTE format('
             CREATE POLICY tenant_isolation_permissive ON %I
                 AS PERMISSIVE
@@ -324,8 +379,7 @@ BEGIN
 END $$;
 
 -- ==============================================================================
--- ECHTER APPEND-ONLY SCHUTZ FÜR WACHBUCH & REVISIONEN AUF DATENBANKEBENE
--- Verhindert nachträgliche Manipulation von Kernfeldern und Löschungen physisch
+-- ECHTER APPEND-ONLY SCHUTZ FÜR WACHBUCH & REVISIONEN
 -- ==============================================================================
 
 CREATE OR REPLACE FUNCTION prevent_guardbook_tampering()
@@ -334,8 +388,6 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'Löschen von Einträgen in guardbook_entries ist nach DIN 77200 unzulässig (Append-Only Integrität).';
     ELSIF TG_OP = 'UPDATE' THEN
-        -- Nur kontrollierte Aktualisierungen von stage, resolved und resolution_note zulässig.
-        -- Kernfelder wie entry_timestamp, category, title, description, guard_id, site_id, tenant_id, client_mutation_id dürfen NIEMALS geändert werden!
         IF OLD.entry_timestamp != NEW.entry_timestamp OR
            OLD.category != NEW.category OR
            OLD.title != NEW.title OR
@@ -370,20 +422,14 @@ FOR EACH ROW EXECUTE FUNCTION prevent_revision_tampering();
 
 -- ==============================================================================
 -- LEAST-PRIVILEGE RECHTE FÜR DEN UNPRIVILEGIERTEN ANWENDUNGSBENUTZER
--- Keine Vergabe von ALL PRIVILEGES! Nur minimal notwendige Rechte.
 -- ==============================================================================
 
 REVOKE ALL ON SCHEMA public FROM secops_app_user;
 GRANT USAGE ON SCHEMA public TO secops_app_user;
 
--- Lese- und Schreibrechte für operative Tabellen
-GRANT SELECT, INSERT, UPDATE ON clients, sites, employees, employee_qualifications, shifts, guardbook_entries, tasks, audit_logs, users, user_sessions, user_roles, roles, permissions, role_permissions, tenants TO secops_app_user;
+GRANT SELECT, INSERT, UPDATE ON clients, sites, employees, employee_qualifications, shifts, guardbook_entries, keys, tasks, patrol_scans, shift_handovers, audit_logs, users, user_sessions, user_roles, roles, permissions, role_permissions, tenants TO secops_app_user;
 
--- Revisionshistorie: Streng auf SELECT und INSERT limitiert (KEIN UPDATE, KEIN DELETE)
 GRANT SELECT, INSERT ON guardbook_revisions TO secops_app_user;
-
--- Sequenzen für ID-Generierung
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO secops_app_user;
 
--- Physischer Ausschluss von DELETE-Rechten auf Wachbuch und Revisionen
-REVOKE DELETE ON guardbook_entries, guardbook_revisions FROM secops_app_user;
+REVOKE DELETE ON guardbook_entries, guardbook_revisions, patrol_scans, shift_handovers FROM secops_app_user;
