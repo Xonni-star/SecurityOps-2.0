@@ -2,3 +2,6 @@
 backend/.env.local
 docker-compose.yml
 **/docker-compose.yml
+
+# Node.js & Dependencies
+node_modules/

@@ -11,19 +11,19 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@google/genai": "latest",
-    "lucide-react": "latest",
-    "react": "latest",
-    "react-dom": "latest",
-    "recharts": "latest",
-    "zustand": "latest"
+    "@google/genai": "3.1.0",
+    "lucide-react": "1.72.0",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "recharts": "3.10.1",
+    "zustand": "5.1.0"
   },
   "devDependencies": {
-    "@types/node": "latest",
-    "@vitejs/plugin-react": "latest",
+    "@types/node": "26.6.6",
+    "@vitejs/plugin-react": "6.3.0",
     "jsdom": "^31.0.0",
-    "typescript": "latest",
-    "vite": "latest",
+    "typescript": "7.0.2",
+    "vite": "8.3.8",
     "vitest": "^5.1.0"
   },
   "engines": {
