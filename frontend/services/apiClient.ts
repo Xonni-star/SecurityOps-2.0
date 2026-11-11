@@ -21,28 +21,42 @@ export interface RequestOptions extends RequestInit {
 
 class ApiClient {
   private token: string | null = null;
-  private currentTenantId: string = '11111111-1111-1111-1111-111111111111';
+  private currentTenantId: string = 'tenant-frankfurt';
 
   constructor() {
-    this.token = localStorage.getItem('secops_access_token');
-    const storedTenant = localStorage.getItem('secops_tenant_id');
-    if (storedTenant) {
-      this.currentTenantId = storedTenant;
+    try {
+      if (typeof localStorage !== 'undefined') {
+        this.token = localStorage.getItem('secops_access_token');
+        const storedTenant = localStorage.getItem('secops_tenant_id');
+        if (storedTenant) {
+          this.currentTenantId = storedTenant;
+        }
+      }
+    } catch {
+      // Fallback für Umgebungen mit gesperrtem localStorage
     }
   }
 
   setToken(token: string | null) {
     this.token = token;
-    if (token) {
-      localStorage.setItem('secops_access_token', token);
-    } else {
-      localStorage.removeItem('secops_access_token');
-    }
+    try {
+      if (typeof localStorage !== 'undefined') {
+        if (token) {
+          localStorage.setItem('secops_access_token', token);
+        } else {
+          localStorage.removeItem('secops_access_token');
+        }
+      }
+    } catch {}
   }
 
   setTenantId(tenantId: string) {
     this.currentTenantId = tenantId;
-    localStorage.setItem('secops_tenant_id', tenantId);
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem('secops_tenant_id', tenantId);
+      }
+    } catch {}
   }
 
   getToken(): string | null {

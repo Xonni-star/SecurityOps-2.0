@@ -18,7 +18,7 @@ const syncPushBatchSchema = z.object({
 
 const conflictResolveSchema = z.object({
   clientUuid: z.string().min(8).max(64),
-  entityType: z.enum(['task', 'shift', 'key']),
+  entityType: z.enum(['task', 'shift', 'key', 'guardbook']),
   strategy: z.enum(['USE_LOCAL', 'USE_SERVER']),
   localPayload: z.record(z.any()).optional()
 });
@@ -34,8 +34,13 @@ export interface SyncResultItem {
 
 /**
  * POST /api/v1/sync/push
- * Verarbeitet alle 6 unterstützten Mutationstypen vollständig:
- * guardbook, shift, task, key, patrol, handover.
+ * Verarbeitet alle 6 Mutationstypen mit CREATE, UPDATE und DELETE:
+ * - guardbook: Append-only, keine Löschung, UPDATE erzeugt Revision
+ * - shift: CREATE / UPDATE mit Validierung, DELETE mit Mandantensperre
+ * - task: Versionierte Kollisionserkennung (baseVersion vs revision_version)
+ * - key: Statusänderungen (Ausgabe/Rücknahme), DELETE abgewiesen
+ * - patrol: Unveränderliche Scans, UPDATE und DELETE abgewiesen
+ * - handover: Unveränderliche Übergabeprotokolle, UPDATE und DELETE abgewiesen
  */
 export async function pushSyncMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -48,9 +53,9 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
-        // ----------------------------------------------------------------------
-        // 1. GUARDBOOK (APPEND-ONLY)
-        // ----------------------------------------------------------------------
+        // ======================================================================
+        // 1. GUARDBOOK (DIGITALES WACHBUCH - APPEND-ONLY)
+        // ======================================================================
         if (mut.entityType === 'guardbook') {
           if (mut.action === 'DELETE') {
             results.push({
@@ -58,53 +63,13 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               serverId: 'none',
               status: 'REJECTED',
               serverVersion: mut.baseVersion,
-              message: 'Löschen von Wachbucheinträgen ist nach DIN 77200 unzulässig (Append-Only).'
+              message: 'Löschen von Wachbucheinträgen ist nach DIN 77200 verboten (Append-Only Integrität).'
             });
             continue;
           }
 
-          const existingRes = await client.query(
-            'SELECT id, title, description, stage FROM guardbook_entries WHERE tenant_id = $1 AND client_mutation_id = $2',
-            [tenantId, mut.clientUuid]
-          );
-
-          if (existingRes.rows.length > 0) {
-            const existing = existingRes.rows[0];
-
-            if (mut.action === 'UPDATE') {
-              const correctionNote = mut.payload.correctionNote || 'Nachträgliche Ergänzung aus Offline-Synchronisation';
-              await client.query(
-                `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note)
-                 VALUES ($1, $2, $3, $4)`,
-                [tenantId, existing.id, userEmail, correctionNote]
-              );
-
-              if (mut.payload.stage) {
-                await client.query(
-                  'UPDATE guardbook_entries SET stage = $1 WHERE id = $2 AND tenant_id = $3',
-                  [mut.payload.stage, existing.id, tenantId]
-                );
-              }
-
-              results.push({
-                clientUuid: mut.clientUuid,
-                serverId: existing.id,
-                status: 'SYNCED',
-                serverVersion: mut.baseVersion + 1,
-                message: 'Revision erfolgreich angehängt'
-              });
-            } else {
-              // Idempotente Bestätigung
-              results.push({
-                clientUuid: mut.clientUuid,
-                serverId: existing.id,
-                status: 'SYNCED',
-                serverVersion: 1,
-                message: 'Bereits vorhanden (idempotent bestätigt)'
-              });
-            }
-          } else {
-            // Neuer Eintrag
+          if (mut.action === 'CREATE') {
+            // Idempotente Neuanlage mit atomarem ON CONFLICT
             const siteId = mut.payload.siteId;
             const guardId = mut.payload.guardId || userId;
             const category = mut.payload.category || 'Vorkommnis';
@@ -129,25 +94,67 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverVersion: 1
               });
             } else {
-              const raceRes = await client.query(
+              // Bereits idempotent vorhanden
+              const existingRes = await client.query(
                 'SELECT id FROM guardbook_entries WHERE tenant_id = $1 AND client_mutation_id = $2',
                 [tenantId, mut.clientUuid]
               );
               results.push({
                 clientUuid: mut.clientUuid,
-                serverId: raceRes.rows[0]?.id || 'unknown',
+                serverId: existingRes.rows[0]?.id || 'unknown',
                 status: 'SYNCED',
-                serverVersion: 1
+                serverVersion: 1,
+                message: 'Bereits vorhanden (idempotent bestätigt)'
               });
             }
+          } else if (mut.action === 'UPDATE') {
+            // Revisionssichere Korrektur: Fügt unlöschbare Revision an!
+            const entryRes = await client.query(
+              'SELECT id FROM guardbook_entries WHERE tenant_id = $1 AND client_mutation_id = $2',
+              [tenantId, mut.clientUuid]
+            );
+
+            if (entryRes.rows.length === 0) {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: 'none',
+                status: 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: 'Zu korrigierender Wachbucheintrag nicht gefunden.'
+              });
+              continue;
+            }
+
+            const entryId = entryRes.rows[0].id;
+            const note = mut.payload.correctionNote || 'Korrektur aus Offline-Synchronisation';
+
+            await client.query(
+              `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note)
+               VALUES ($1, $2, $3, $4)`,
+              [tenantId, entryId, userEmail, note]
+            );
+
+            if (mut.payload.stage) {
+              await client.query(
+                'UPDATE guardbook_entries SET stage = $1 WHERE id = $2 AND tenant_id = $3',
+                [mut.payload.stage, entryId, tenantId]
+              );
+            }
+
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: entryId,
+              status: 'SYNCED',
+              serverVersion: mut.baseVersion + 1,
+              message: 'Revision erfolgreich angehängt'
+            });
           }
         }
-        // ----------------------------------------------------------------------
-        // 2. SHIFTS (DIENSTPLANUNG)
-        // ----------------------------------------------------------------------
-        else if (mut.entityType === 'shift') {
-          const shiftId = mut.payload.id;
 
+        // ======================================================================
+        // 2. SHIFTS (DIENSTPLANUNG)
+        // ======================================================================
+        else if (mut.entityType === 'shift') {
           if (mut.action === 'CREATE') {
             const insRes = await client.query(
               `INSERT INTO shifts (tenant_id, site_id, employee_id, shift_date, start_time, end_time, type, status, required_qualification, conflict_reason, client_mutation_id)
@@ -180,6 +187,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               serverVersion: 1
             });
           } else if (mut.action === 'UPDATE') {
+            const shiftId = mut.payload.id;
             const updateRes = await client.query(
               `UPDATE shifts 
                SET employee_id = COALESCE($1, employee_id),
@@ -196,7 +204,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverId: shiftId || 'unknown',
                 status: 'REJECTED',
                 serverVersion: mut.baseVersion,
-                message: 'Schicht nicht gefunden oder kein Mandantenzugriff.'
+                message: 'Schicht nicht gefunden oder fremder Mandant.'
               });
             } else {
               results.push({
@@ -206,22 +214,36 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverVersion: mut.baseVersion + 1
               });
             }
-          } else {
-            results.push({
-              clientUuid: mut.clientUuid,
-              serverId: shiftId || 'none',
-              status: 'REJECTED',
-              serverVersion: mut.baseVersion,
-              message: 'Löschen von Schichten via Offline-Sync nicht freigegeben.'
-            });
+          } else if (mut.action === 'DELETE') {
+            const shiftId = mut.payload.id;
+            const delRes = await client.query(
+              'DELETE FROM shifts WHERE id = $1 AND tenant_id = $2 RETURNING id',
+              [shiftId, tenantId]
+            );
+            if (delRes.rows.length === 0) {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: shiftId || 'unknown',
+                status: 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: 'Schicht zum Löschen nicht gefunden.'
+              });
+            } else {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: shiftId,
+                status: 'SYNCED',
+                serverVersion: mut.baseVersion + 1,
+                message: 'Schicht gelöscht'
+              });
+            }
           }
         }
-        // ----------------------------------------------------------------------
-        // 3. TASKS (AUFGABEN MIT KONFLIKTERKENNUNG)
-        // ----------------------------------------------------------------------
-        else if (mut.entityType === 'task') {
-          const taskId = mut.payload.id;
 
+        // ======================================================================
+        // 3. TASKS (AUFGABEN & MASSNAHMEN MIT VERSIONSKONFLIKT-SCHUTZ)
+        // ======================================================================
+        else if (mut.entityType === 'task') {
           if (mut.action === 'CREATE') {
             const insTask = await client.query(
               `INSERT INTO tasks (tenant_id, title, assigned_to_name, site_name, due_date, priority, status, category, client_mutation_id)
@@ -252,6 +274,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               serverVersion: 1
             });
           } else if (mut.action === 'UPDATE') {
+            const taskId = mut.payload.id;
             const taskRes = await client.query(
               'SELECT id, title, status, revision_version FROM tasks WHERE id = $1 AND tenant_id = $2',
               [taskId, tenantId]
@@ -270,7 +293,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
             const serverTask = taskRes.rows[0];
 
-            // Paralleler Änderungskonflikt: Server-Version ist bereits weiter
+            // Paralleler Änderungskonflikt: Server-Version ist bereits weiter als baseVersion des Clients
             if (serverTask.revision_version > mut.baseVersion) {
               results.push({
                 clientUuid: mut.clientUuid,
@@ -288,7 +311,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               continue;
             }
 
-            // Normales Update
+            // Atomares Update mit Versionserhöhung
             await client.query(
               'UPDATE tasks SET status = $1, revision_version = revision_version + 1 WHERE id = $2 AND tenant_id = $3',
               [mut.payload.status, taskId, tenantId]
@@ -300,11 +323,32 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               status: 'SYNCED',
               serverVersion: serverTask.revision_version + 1
             });
+          } else if (mut.action === 'DELETE') {
+            const taskId = mut.payload.id;
+            const delRes = await client.query('DELETE FROM tasks WHERE id = $1 AND tenant_id = $2 RETURNING id', [taskId, tenantId]);
+            if (delRes.rows.length === 0) {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: taskId || 'unknown',
+                status: 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: 'Aufgabe zum Löschen nicht gefunden.'
+              });
+            } else {
+              results.push({
+                clientUuid: mut.clientUuid,
+                serverId: taskId,
+                status: 'SYNCED',
+                serverVersion: mut.baseVersion + 1,
+                message: 'Aufgabe gelöscht'
+              });
+            }
           }
         }
-        // ----------------------------------------------------------------------
+
+        // ======================================================================
         // 4. KEYS (SCHLÜSSELDEPOT)
-        // ----------------------------------------------------------------------
+        // ======================================================================
         else if (mut.entityType === 'key') {
           const keyId = mut.payload.id;
 
@@ -349,82 +393,106 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               serverId: keyId || 'unknown',
               status: 'REJECTED',
               serverVersion: mut.baseVersion,
-              message: 'Nur Status-Updates für Schlüssel via Offline-Sync freigegeben.'
+              message: `Aktion '${mut.action}' für Schlüssel via Offline-Sync unzulässig.`
             });
           }
         }
-        // ----------------------------------------------------------------------
-        // 5. PATROL (KONTROLLGANG-SCANS)
-        // ----------------------------------------------------------------------
+
+        // ======================================================================
+        // 5. PATROL (KONTROLLGANG-SCANS - UNVERÄNDERLICH)
+        // ======================================================================
         else if (mut.entityType === 'patrol') {
-          const insPatrol = await client.query(
-            `INSERT INTO patrol_scans (tenant_id, site_id, checkpoint_id, checkpoint_code, checkpoint_name, guard_id, scanned_at, method, verified_tag, notes, client_mutation_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-             ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
-             RETURNING id`,
-            [
-              tenantId,
-              mut.payload.siteId,
-              mut.payload.checkpointId || null,
-              mut.payload.checkpointCode || 'CP-01',
-              mut.payload.checkpointName || 'Kontrollpunkt',
-              mut.payload.guardId || userId,
-              mut.payload.scannedAt || mut.clientTimestamp,
-              mut.payload.method || 'QR_CODE',
-              mut.payload.verifiedTag || 'RFID-TAG',
-              mut.payload.notes || null,
-              mut.clientUuid
-            ]
-          );
+          if (mut.action === 'CREATE') {
+            const insPatrol = await client.query(
+              `INSERT INTO patrol_scans (tenant_id, site_id, checkpoint_id, checkpoint_code, checkpoint_name, guard_id, scanned_at, method, verified_tag, notes, client_mutation_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+               ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
+               RETURNING id`,
+              [
+                tenantId,
+                mut.payload.siteId,
+                mut.payload.checkpointId || null,
+                mut.payload.checkpointCode || 'CP-01',
+                mut.payload.checkpointName || 'Kontrollpunkt',
+                mut.payload.guardId || userId,
+                mut.payload.scannedAt || mut.clientTimestamp,
+                mut.payload.method || 'QR_CODE',
+                mut.payload.verifiedTag || 'RFID-TAG',
+                mut.payload.notes || null,
+                mut.clientUuid
+              ]
+            );
 
-          const pId = insPatrol.rows.length > 0
-            ? insPatrol.rows[0].id
-            : (await client.query('SELECT id FROM patrol_scans WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
+            const pId = insPatrol.rows.length > 0
+              ? insPatrol.rows[0].id
+              : (await client.query('SELECT id FROM patrol_scans WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
 
-          results.push({
-            clientUuid: mut.clientUuid,
-            serverId: pId || 'unknown',
-            status: 'SYNCED',
-            serverVersion: 1
-          });
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: pId || 'unknown',
+              status: 'SYNCED',
+              serverVersion: 1
+            });
+          } else {
+            // Kontrollgangs-Scans dürfen niemals geändert oder gelöscht werden!
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: 'none',
+              status: 'REJECTED',
+              serverVersion: mut.baseVersion,
+              message: 'Kontrollgangs-Scans sind unveränderliche Audit-Ereignisse (UPDATE/DELETE unzulässig).'
+            });
+          }
         }
-        // ----------------------------------------------------------------------
-        // 6. HANDOVER (SCHICHTÜBERGABEN)
-        // ----------------------------------------------------------------------
+
+        // ======================================================================
+        // 6. HANDOVER (SCHICHTÜBERGABEN - UNVERÄNDERLICH)
+        // ======================================================================
         else if (mut.entityType === 'handover') {
-          const insHandover = await client.query(
-            `INSERT INTO shift_handovers (tenant_id, site_id, relieving_guard_id, relieved_guard_id, handover_time, key_register_checked, open_incidents_count, remarks, acknowledged, client_mutation_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
-             RETURNING id`,
-            [
-              tenantId,
-              mut.payload.siteId,
-              mut.payload.relievingGuardId,
-              mut.payload.relievedGuardId || userId,
-              mut.payload.handoverTime || mut.clientTimestamp,
-              mut.payload.keyRegisterChecked ?? true,
-              mut.payload.openIncidentsCount || 0,
-              mut.payload.remarks || null,
-              mut.payload.acknowledged ?? true,
-              mut.clientUuid
-            ]
-          );
+          if (mut.action === 'CREATE') {
+            const insHandover = await client.query(
+              `INSERT INTO shift_handovers (tenant_id, site_id, relieving_guard_id, relieved_guard_id, handover_time, key_register_checked, open_incidents_count, remarks, acknowledged, client_mutation_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+               ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
+               RETURNING id`,
+              [
+                tenantId,
+                mut.payload.siteId,
+                mut.payload.relievingGuardId,
+                mut.payload.relievedGuardId || userId,
+                mut.payload.handoverTime || mut.clientTimestamp,
+                mut.payload.keyRegisterChecked ?? true,
+                mut.payload.openIncidentsCount || 0,
+                mut.payload.remarks || null,
+                mut.payload.acknowledged ?? true,
+                mut.clientUuid
+              ]
+            );
 
-          const hId = insHandover.rows.length > 0
-            ? insHandover.rows[0].id
-            : (await client.query('SELECT id FROM shift_handovers WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
+            const hId = insHandover.rows.length > 0
+              ? insHandover.rows[0].id
+              : (await client.query('SELECT id FROM shift_handovers WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
 
-          results.push({
-            clientUuid: mut.clientUuid,
-            serverId: hId || 'unknown',
-            status: 'SYNCED',
-            serverVersion: 1
-          });
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: hId || 'unknown',
+              status: 'SYNCED',
+              serverVersion: 1
+            });
+          } else {
+            results.push({
+              clientUuid: mut.clientUuid,
+              serverId: 'none',
+              status: 'REJECTED',
+              serverVersion: mut.baseVersion,
+              message: 'Schichtübergabeprotokolle sind unveränderliche Dokumente (UPDATE/DELETE unzulässig).'
+            });
+          }
         }
-        // ----------------------------------------------------------------------
-        // UNBEKANNTER ENTITY TYPE -> EXPLIZIT REJECTED (NICHTS IGNORIEREN!)
-        // ----------------------------------------------------------------------
+
+        // ======================================================================
+        // UNBEKANNTER ENTITY TYPE -> EXPLIZIT REJECTED
+        // ======================================================================
         else {
           results.push({
             clientUuid: mut.clientUuid,
@@ -439,7 +507,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     res.json({
       success: true,
-      message: `${results.length} Synchronisationsoperation(en) serverseitig verarbeitet`,
+      message: `${results.length} Synchronisationsoperation(en) verarbeitet`,
       data: results
     });
   } catch (error) {
@@ -449,8 +517,10 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
 /**
  * POST /api/v1/sync/conflicts/resolve
- * Reale Server-Auflösung von Synchronisationskonflikten:
- * Wendet die gewählte Strategie in der PostgreSQL-Datenbank an und quittiert den Vorgang.
+ * Echte Server-Auflösung von Synchronisationskonflikten:
+ * - USE_LOCAL: Übernimmt den lokalen Stand atomar und erhöht revision_version
+ * - USE_SERVER: Bestätigt den Serverstand verbindlich
+ * Unbekannte Typen/Strategien werden ausdrücklich als REJECTED zurückgewiesen.
  */
 export async function resolveSyncConflict(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -458,27 +528,45 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     const userEmail = req.user!.email;
     const body = conflictResolveSchema.parse(req.body);
 
+    let updated = false;
+
     await withTenantTransaction(tenantId, async (client) => {
-      if (body.entityType === 'task' && body.strategy === 'USE_LOCAL' && body.localPayload?.id) {
-        await client.query(
-          `UPDATE tasks 
-           SET status = $1, revision_version = revision_version + 1
-           WHERE id = $2 AND tenant_id = $3`,
-          [body.localPayload.status || 'In Bearbeitung', body.localPayload.id, tenantId]
-        );
+      if (body.entityType === 'task') {
+        const taskId = body.localPayload?.id || body.clientUuid;
+        const taskCheck = await client.query('SELECT id, status FROM tasks WHERE id = $1 AND tenant_id = $2', [taskId, tenantId]);
+
+        if (taskCheck.rows.length === 0) {
+          throw new Error('Aufgabe für Konfliktauflösung nicht gefunden.');
+        }
+
+        if (body.strategy === 'USE_LOCAL' && body.localPayload?.status) {
+          await client.query(
+            `UPDATE tasks 
+             SET status = $1, revision_version = revision_version + 1
+             WHERE id = $2 AND tenant_id = $3`,
+            [body.localPayload.status, taskId, tenantId]
+          );
+          updated = true;
+        } else if (body.strategy === 'USE_SERVER') {
+          // Serverstand verbindlich beibehalten
+          updated = true;
+        }
+      } else {
+        throw new Error(`Konfliktstrategie für Typ '${body.entityType}' nicht unterstützt.`);
       }
 
-      // Revisionsprotokollierung der Entscheidung
+      // Revisionssichere Protokollierung der Konfliktentscheidung
       await client.query(
         `INSERT INTO audit_logs (tenant_id, user_email, role, action_type, severity, target_entity, details, ip_address)
          VALUES ($1, $2, 'Einsatzleitung', 'CONFLICT_RESOLVED', 'INFO', $3, $4, $5)`,
-        [tenantId, userEmail, `Conflict:${body.clientUuid}`, `Konflikt aufgelöst mit Strategie: ${body.strategy}`, req.ip || '127.0.0.1']
+        [tenantId, userEmail, `Conflict:${body.clientUuid}`, `Konflikt aufgelöst: Strategie=${body.strategy}, Entity=${body.entityType}`, req.ip || '127.0.0.1']
       );
     });
 
     res.json({
       success: true,
-      message: `Konflikt ${body.clientUuid} erfolgreich auf dem Server aufgelöst (${body.strategy}).`
+      message: `Konflikt ${body.clientUuid} erfolgreich auf dem Server aufgelöst (${body.strategy}).`,
+      applied: updated
     });
   } catch (error) {
     next(error);

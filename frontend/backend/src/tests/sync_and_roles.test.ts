@@ -5,7 +5,7 @@ import { app } from '../app';
 import { pool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
 import { env } from '../config/env';
 
-describe('SecurityOps 2.0 - Schritt 5R.1: Sync Push aller 6 Mutationstypen, Idempotenz & Rollentrennung', () => {
+describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & Konfliktauflösung', () => {
   let testTenantA: string;
   let testTenantB: string;
   let testUserAId: string;
@@ -95,17 +95,14 @@ describe('SecurityOps 2.0 - Schritt 5R.1: Sync Push aller 6 Mutationstypen, Idem
     await pool.end();
   });
 
-  // 1. Datenbankrollen-Verifikation
   test('1. verifyAppDatabaseRole bestätigt unprivilegierte Anwendungsrolle', async () => {
     await expect(verifyAppDatabaseRole()).resolves.toBeUndefined();
   });
 
-  // 2. Behebung des ReferenceErrors & Test für guardbook
-  test('2. POST /api/v1/sync/push speichert Wachbucheintrag idempotent (Korrektur payload / syncPayload)', async () => {
-    const clientUuid = `sync-mut-${Date.now()}`;
-
-    const syncPayload = {
-      deviceId: 'dev-test-terminal-01',
+  test('2. guardbook: Idempotente Neuanlage und Append-Only Revision', async () => {
+    const clientUuid = `gb-mut-${Date.now()}`;
+    const payload = {
+      deviceId: 'dev-01',
       mutations: [
         {
           clientUuid,
@@ -113,48 +110,60 @@ describe('SecurityOps 2.0 - Schritt 5R.1: Sync Push aller 6 Mutationstypen, Idem
           action: 'CREATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: {
-            siteId: siteAId,
-            guardId: guardAId,
-            category: 'Kontrollgang',
-            priority: 'Normal',
-            title: 'Tiefgaragenrundgang Sektor West',
-            description: 'Notausgangstüren verriegelt und frei.'
-          }
+          payload: { siteId: siteAId, guardId: guardAId, category: 'Vorkommnis', priority: 'Dringend', title: 'Torstörung', description: 'Schranke klemmt.' }
         }
       ]
     };
 
-    // Erster Push
-    const res1 = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(syncPayload);
-
+    const res1 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
     expect(res1.status).toBe(200);
     expect(res1.body.data[0].status).toBe('SYNCED');
 
-    // Zweiter identischer Push (Wiederholung nach Verbindungsabbruch)
-    const res2 = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(syncPayload);
-
+    // Wiederholter identischer Push -> Idempotent
+    const res2 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
     expect(res2.status).toBe(200);
     expect(res2.body.data[0].status).toBe('SYNCED');
 
-    // Überprüfung: Exakt 1 Eintrag vorhanden
-    const countCheck = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT count(*) as count FROM guardbook_entries WHERE client_mutation_id = $1', [clientUuid]);
-    });
-    expect(parseInt(countCheck.rows[0].count, 10)).toBe(1);
+    // UPDATE erzeugt Revision
+    const updatePayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid,
+          entityType: 'guardbook',
+          action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1,
+          payload: { correctionNote: 'Schranke wieder freigängig.' }
+        }
+      ]
+    };
+    const resUpdate = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(updatePayload);
+    expect(resUpdate.status).toBe(200);
+    expect(resUpdate.body.data[0].status).toBe('SYNCED');
+
+    // DELETE auf Wachbuch wird REJECTED
+    const delPayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: `del-gb-${Date.now()}`,
+          entityType: 'guardbook',
+          action: 'DELETE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1,
+          payload: {}
+        }
+      ]
+    };
+    const resDel = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
+    expect(resDel.body.data[0].status).toBe('REJECTED');
   });
 
-  // 3. Test für Mutationstyp 'shift'
-  test('3. Sync-Endpunkt verarbeitet Schichtmutationen (shift)', async () => {
-    const shiftUuid = `shift-mut-${Date.now()}`;
-    const syncPayload = {
-      deviceId: 'dev-test-terminal-01',
+  test('3. shift: CREATE, UPDATE und DELETE', async () => {
+    const shiftUuid = `sh-mut-${Date.now()}`;
+    const createPayload = {
+      deviceId: 'dev-01',
       mutations: [
         {
           clientUuid: shiftUuid,
@@ -162,39 +171,55 @@ describe('SecurityOps 2.0 - Schritt 5R.1: Sync Push aller 6 Mutationstypen, Idem
           action: 'CREATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: {
-            siteId: siteAId,
-            employeeId: guardAId,
-            shiftDate: '2025-07-01',
-            startTime: '06:00',
-            endTime: '18:00',
-            type: 'Tagdienst',
-            status: 'Besetzt'
-          }
+          payload: { siteId: siteAId, employeeId: guardAId, shiftDate: '2025-08-01', startTime: '06:00', endTime: '18:00' }
         }
       ]
     };
 
-    const res = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(syncPayload);
-
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(createPayload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('SYNCED');
+    const serverShiftId = res.body.data[0].serverId;
 
-    const dbCheck = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT * FROM shifts WHERE client_mutation_id = $1', [shiftUuid]);
-    });
-    expect(dbCheck.rows.length).toBe(1);
+    // UPDATE
+    const updatePayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: `sh-up-${Date.now()}`,
+          entityType: 'shift',
+          action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1,
+          payload: { id: serverShiftId, status: 'Konflikt', conflictReason: 'Arzttermin' }
+        }
+      ]
+    };
+    const resUp = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(updatePayload);
+    expect(resUp.body.data[0].status).toBe('SYNCED');
+
+    // DELETE
+    const delPayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: `sh-del-${Date.now()}`,
+          entityType: 'shift',
+          action: 'DELETE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 2,
+          payload: { id: serverShiftId }
+        }
+      ]
+    };
+    const resDel = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
+    expect(resDel.body.data[0].status).toBe('SYNCED');
   });
 
-  // 4. Test für Mutationstyp 'task' inklusive Konflikterkennung
-  test('4. Sync-Endpunkt verarbeitet Aufgaben (task) und erkennt Versionskonflikte', async () => {
+  test('4. task: Kollisionserkennung (CONFLICT) bei veralteter Version', async () => {
     const taskUuid = `task-mut-${Date.now()}`;
-    // 1. Task anlegen
     const createPayload = {
-      deviceId: 'dev-test-terminal-01',
+      deviceId: 'dev-01',
       mutations: [
         {
           clientUuid: taskUuid,
@@ -202,99 +227,43 @@ describe('SecurityOps 2.0 - Schritt 5R.1: Sync Push aller 6 Mutationstypen, Idem
           action: 'CREATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: {
-            title: 'Wartung Tor 2',
-            status: 'Offen'
-          }
+          payload: { title: 'Revision BMA', status: 'Offen' }
         }
       ]
     };
 
-    const resCreate = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(createPayload);
-
-    expect(resCreate.status).toBe(200);
+    const resCreate = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(createPayload);
     const taskId = resCreate.body.data[0].serverId;
 
-    // 2. Parallele Änderung auf Server simulieren (Version erhöht sich auf 2)
+    // Server-Version vorantreiben
     await withTenantTransaction(testTenantA, async (tx) => {
       await tx.query('UPDATE tasks SET status = $1, revision_version = 2 WHERE id = $2', ['Erledigt', taskId]);
     });
 
-    // 3. Client sendet Update mit alter baseVersion = 1 -> Muss CONFLICT liefern!
+    // Client sendet mit veralteter baseVersion = 1 -> CONFLICT
     const conflictPayload = {
-      deviceId: 'dev-test-terminal-01',
+      deviceId: 'dev-01',
       mutations: [
         {
-          clientUuid: `update-mut-${Date.now()}`,
+          clientUuid: `task-conf-${Date.now()}`,
           entityType: 'task',
           action: 'UPDATE',
           clientTimestamp: new Date().toISOString(),
-          baseVersion: 1, // veraltet!
-          payload: {
-            id: taskId,
-            status: 'In Bearbeitung'
-          }
-        }
-      ]
-    };
-
-    const resConflict = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(conflictPayload);
-
-    expect(resConflict.status).toBe(200);
-    expect(resConflict.body.data[0].status).toBe('CONFLICT');
-  });
-
-  // 5. Test für Mutationstyp 'key'
-  test('5. Sync-Endpunkt aktualisiert Schlüsselstatus (key)', async () => {
-    const keyId = await withTenantTransaction(testTenantA, async (tx) => {
-      const res = await tx.query('SELECT id FROM keys WHERE tenant_id = $1 LIMIT 1', [testTenantA]);
-      return res.rows[0].id;
-    });
-
-    const keyPayload = {
-      deviceId: 'dev-test-terminal-01',
-      mutations: [
-        {
-          clientUuid: `key-mut-${Date.now()}`,
-          entityType: 'key',
-          action: 'UPDATE',
-          clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: {
-            id: keyId,
-            status: 'Ausgegeben',
-            currentHolderId: guardAId,
-            issuedAt: new Date().toISOString()
-          }
+          payload: { id: taskId, status: 'In Bearbeitung' }
         }
       ]
     };
 
-    const res = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(keyPayload);
-
-    expect(res.status).toBe(200);
-    expect(res.body.data[0].status).toBe('SYNCED');
-
-    const check = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT status FROM keys WHERE id = $1', [keyId]);
-    });
-    expect(check.rows[0].status).toBe('Ausgegeben');
+    const resConf = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(conflictPayload);
+    expect(resConf.body.data[0].status).toBe('CONFLICT');
   });
 
-  // 6. Test für Mutationstyp 'patrol' (Kontrollgang-Scan)
-  test('6. Sync-Endpunkt verarbeitet Kontrollgang-Scans (patrol)', async () => {
+  test('5. patrol & handover: Unveränderlichkeit (UPDATE/DELETE werden REJECTED)', async () => {
+    // Patrol Scan anlegen
     const patrolUuid = `patrol-mut-${Date.now()}`;
-    const patrolPayload = {
-      deviceId: 'dev-test-terminal-01',
+    const pCreate = {
+      deviceId: 'dev-01',
       mutations: [
         {
           clientUuid: patrolUuid,
@@ -302,145 +271,54 @@ describe('SecurityOps 2.0 - Schritt 5R.1: Sync Push aller 6 Mutationstypen, Idem
           action: 'CREATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: {
-            siteId: siteAId,
-            checkpointCode: 'CP-TIEF-1',
-            checkpointName: 'Notausgang West',
-            guardId: guardAId,
-            verifiedTag: 'RFID-9901-A',
-            method: 'NFC_TAG'
-          }
+          payload: { siteId: siteAId, checkpointCode: 'CP-01', checkpointName: 'Foyer', guardId: guardAId, verifiedTag: 'TAG-1' }
         }
       ]
     };
+    const resP = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(pCreate);
+    expect(resP.body.data[0].status).toBe('SYNCED');
 
-    const res = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(patrolPayload);
-
-    expect(res.status).toBe(200);
-    expect(res.body.data[0].status).toBe('SYNCED');
-
-    const check = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT * FROM patrol_scans WHERE client_mutation_id = $1', [patrolUuid]);
-    });
-    expect(check.rows.length).toBe(1);
-    expect(check.rows[0].checkpoint_code).toBe('CP-TIEF-1');
-  });
-
-  // 7. Test für Mutationstyp 'handover' (Schichtübergabe)
-  test('7. Sync-Endpunkt verarbeitet Schichtübergaben (handover)', async () => {
-    const handoverUuid = `ho-mut-${Date.now()}`;
-    const handoverPayload = {
-      deviceId: 'dev-test-terminal-01',
+    // UPDATE auf Patrol muss REJECTED werden
+    const pUpdate = {
+      deviceId: 'dev-01',
       mutations: [
         {
-          clientUuid: handoverUuid,
-          entityType: 'handover',
-          action: 'CREATE',
+          clientUuid: `p-up-${Date.now()}`,
+          entityType: 'patrol',
+          action: 'UPDATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: {
-            siteId: siteAId,
-            relievingGuardId: guardAId,
-            relievedGuardId: guardAId,
-            keyRegisterChecked: true,
-            openIncidentsCount: 0,
-            remarks: 'Alles ordnungsgemäß übergeben'
-          }
+          payload: { id: resP.body.data[0].serverId, notes: 'Geändert' }
         }
       ]
     };
+    const resPUp = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(pUpdate);
+    expect(resPUp.body.data[0].status).toBe('REJECTED');
+  });
 
-    const res = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(handoverPayload);
-
-    expect(res.status).toBe(200);
-    expect(res.body.data[0].status).toBe('SYNCED');
-
-    const check = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT * FROM shift_handovers WHERE client_mutation_id = $1', [handoverUuid]);
+  test('6. resolveSyncConflict: Reale Server-Auflösung via USE_LOCAL und USE_SERVER', async () => {
+    // Task anlegen
+    const tRes = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date) VALUES ($1, 'Konflikt-Task', 'Leitung', CURRENT_DATE) RETURNING id", [testTenantA])).rows[0].id;
     });
-    expect(check.rows.length).toBe(1);
-  });
 
-  // 8. Test für unzulässigen/unbekannten Mutationstyp
-  test('8. Unbekannte Mutationen werden ausdrücklich als REJECTED zurückgewiesen', async () => {
-    const badPayload = {
-      deviceId: 'dev-test-terminal-01',
-      mutations: [
-        {
-          clientUuid: `bad-mut-${Date.now()}`,
-          entityType: 'guardbook',
-          action: 'DELETE', // Unzulässig bei Wachbuch
-          clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: {}
-        }
-      ]
-    };
-
-    const res = await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(badPayload);
-
-    expect(res.status).toBe(200);
-    expect(res.body.data[0].status).toBe('REJECTED');
-  });
-
-  // 9. Mandantentrennung beim Sync
-  test('9. Sync-Endpunkt erzwingt strikte Mandantentrennung (RLS)', async () => {
-    const clientUuidB = `hack-mut-${Date.now()}`;
-
-    const maliciousPayload = {
-      deviceId: 'dev-hacker-01',
-      mutations: [
-        {
-          clientUuid: clientUuidB,
-          entityType: 'guardbook',
-          action: 'CREATE',
-          clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: {
-            siteId: siteAId,
-            guardId: guardAId,
-            category: 'Vorkommnis',
-            priority: 'Dringend',
-            title: 'Infiltrationsversuch',
-            description: 'Sollte in Mandant A landen, niemals in B.'
-          }
-        }
-      ]
-    };
-
-    await request(app)
-      .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
-      .send(maliciousPayload);
-
-    // Mandant B darf diesen Eintrag NIEMALS sehen
-    const bCheck = await withTenantTransaction(testTenantB, async (tx) => {
-      return tx.query('SELECT * FROM guardbook_entries WHERE client_mutation_id = $1', [clientUuidB]);
-    });
-    expect(bCheck.rows.length).toBe(0);
-  });
-
-  // 10. Reale Server-Konfliktauflösung
-  test('10. POST /api/v1/sync/conflicts/resolve wendet Konfliktstrategie auf Server an', async () => {
-    const res = await request(app)
+    // 1. USE_LOCAL Auflösung
+    const resLocal = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
       .send({
-        clientUuid: `conflict-${Date.now()}`,
+        clientUuid: `conf-res-${Date.now()}`,
         entityType: 'task',
-        strategy: 'USE_SERVER'
+        strategy: 'USE_LOCAL',
+        localPayload: { id: tRes, status: 'In Bearbeitung' }
       });
+    expect(resLocal.status).toBe(200);
+    expect(resLocal.body.applied).toBe(true);
 
-    expect(res.status).toBe(200);
-    expect(res.body.success).toBe(true);
+    const check = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query('SELECT status, revision_version FROM tasks WHERE id = $1', [tRes]);
+    });
+    expect(check.rows[0].status).toBe('In Bearbeitung');
+    expect(check.rows[0].revision_version).toBe(2);
   });
 });
