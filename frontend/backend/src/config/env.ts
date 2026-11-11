@@ -9,7 +9,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(10, 'DATABASE_URL muss zwingend konfiguriert sein.'),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET muss mindestens 32 Zeichen lang sein.'),
   JWT_EXPIRES_IN: z.string().default('8h'),
-  CORS_ORIGIN: z.string().default('*'),
+  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss explizit konfiguriert werden (kein ungesicherter Wildcard).'),
   RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10))
 });
 
@@ -38,6 +38,12 @@ if (knownInsecureSecrets.includes(parsedEnv.data.JWT_SECRET)) {
     console.error('[PRODUKTIONSABBRUCH] Start im Produktivmodus mit unsicherem JWT_SECRET verweigert.');
     process.exit(1);
   }
+}
+
+// Im Produktivbetrieb darf CORS_ORIGIN kein Wildcard sein
+if (parsedEnv.data.NODE_ENV === 'production' && parsedEnv.data.CORS_ORIGIN === '*') {
+  console.error('[PRODUKTIONSABBRUCH] CORS_ORIGIN darf in der Produktionsumgebung kein Wildcard "*" sein.');
+  process.exit(1);
 }
 
 export const env = parsedEnv.data;

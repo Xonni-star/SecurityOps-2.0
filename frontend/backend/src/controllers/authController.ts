@@ -12,11 +12,28 @@ const loginSchema = z.object({
   requestedTenantId: z.string().uuid().optional()
 });
 
+/**
+ * Wandelt Zeitangaben wie '8h', '1h', '30m' in Millisekunden um
+ */
+function parseDurationToMs(durationStr: string): number {
+  const match = durationStr.match(/^(\d+)([smhd])$/);
+  if (!match) return 8 * 60 * 60 * 1000; // Fallback: 8 Stunden
+  const value = parseInt(match[1], 10);
+  const unit = match[2];
+  switch (unit) {
+    case 's': return value * 1000;
+    case 'm': return value * 60 * 1000;
+    case 'h': return value * 60 * 60 * 1000;
+    case 'd': return value * 24 * 60 * 60 * 1000;
+    default: return 8 * 60 * 60 * 1000;
+  }
+}
+
 export async function login(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { email, password, requestedTenantId } = loginSchema.parse(req.body);
 
-    // 1. Benutzer aus PostgreSQL abfragen
+    // 1. Benutzer abfragen
     const userResult = await query(
       `SELECT id, email, password_hash, first_name, last_name, is_active, failed_login_attempts, locked_until 
        FROM users WHERE email = $1`,
@@ -30,7 +47,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
     const user = userResult.rows[0];
 
-    // Brute-Force Sperrprüfung in der Datenbank
+    // Sperrprüfung
     if (user.locked_until && new Date(user.locked_until) > new Date()) {
       res.status(429).json({
         success: false,
@@ -47,13 +64,13 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     // 2. Passwortprüfung mit Argon2id
     const validPassword = await argon2.verify(user.password_hash, password);
     if (!validPassword) {
-      const newAttempts = (user.failed_login_attempts || 0) + 1;
-      const shouldLock = newAttempts >= 5;
-      const lockedUntil = shouldLock ? new Date(Date.now() + 15 * 60 * 1000) : null;
-
+      // ATOMARE Aktualisierung in PostgreSQL verhindert Race Conditions bei parallelen Anfragen:
       await query(
-        'UPDATE users SET failed_login_attempts = $1, locked_until = $2 WHERE id = $3',
-        [newAttempts, lockedUntil, user.id]
+        `UPDATE users 
+         SET failed_login_attempts = failed_login_attempts + 1,
+             locked_until = CASE WHEN failed_login_attempts + 1 >= 5 THEN CURRENT_TIMESTAMP + INTERVAL '15 minutes' ELSE NULL END
+         WHERE id = $1`,
+        [user.id]
       );
 
       res.status(401).json({ success: false, message: 'Ungültige Anmeldedaten.' });
@@ -66,34 +83,57 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       [user.id]
     );
 
-    // 3. Mandantenzugehörigkeit und Rollen serverseitig aus der Datenbank laden
-    let tenantQuery = `
-      SELECT t.id as tenant_id, t.name as tenant_name, r.id as role_id, r.name as role_name
-      FROM user_roles ur
-      JOIN tenants t ON ur.tenant_id = t.id
-      JOIN roles r ON ur.role_id = r.id
-      WHERE ur.user_id = $1 AND t.is_active = true
-    `;
-    const queryParams: any[] = [user.id];
+    // 3. EINDEUTIGE MANDANTENAUSWAHL (Keine willkürliche Auswahl via LIMIT 1)
+    const userTenantsResult = await query(
+      `SELECT t.id as tenant_id, t.name as tenant_name, r.id as role_id, r.name as role_name
+       FROM user_roles ur
+       JOIN tenants t ON ur.tenant_id = t.id
+       JOIN roles r ON ur.role_id = r.id
+       WHERE ur.user_id = $1 AND t.is_active = true`,
+      [user.id]
+    );
 
-    if (requestedTenantId) {
-      tenantQuery += ' AND t.id = $2';
-      queryParams.push(requestedTenantId);
-    }
+    const memberships = userTenantsResult.rows;
 
-    tenantQuery += ' LIMIT 1';
-
-    const tenantResult = await query(tenantQuery, queryParams);
-
-    if (tenantResult.rows.length === 0) {
+    if (memberships.length === 0) {
       res.status(403).json({
         success: false,
-        message: 'Keine gültige Mandantenzuordnung für diesen Benutzer gefunden.'
+        message: 'Keine aktiven Mandantenzuordnungen für diesen Benutzer vorhanden.'
       });
       return;
     }
 
-    const { tenant_id, tenant_name, role_id, role_name } = tenantResult.rows[0];
+    let selectedMembership = null;
+
+    if (requestedTenantId) {
+      selectedMembership = memberships.find((m) => m.tenant_id === requestedTenantId);
+      if (!selectedMembership) {
+        res.status(403).json({
+          success: false,
+          message: 'Zugriff verweigert: Sie gehören dem angeforderten Mandanten nicht an.'
+        });
+        return;
+      }
+    } else {
+      if (memberships.length === 1) {
+        selectedMembership = memberships[0];
+      } else {
+        // MEHRDEUTIGE MANDANTENZUORDNUNG: Der Benutzer MUSS explizit wählen!
+        res.status(400).json({
+          success: false,
+          code: 'AMBIGUOUS_TENANT_SELECTION',
+          message: 'Mehrdeutige Mandantenzuordnung: Bitte übermitteln Sie "requestedTenantId" mit der gewünschten Mandanten-ID.',
+          availableTenants: memberships.map((m) => ({
+            id: m.tenant_id,
+            name: m.tenant_name,
+            role: m.role_name
+          }))
+        });
+        return;
+      }
+    }
+
+    const { tenant_id, tenant_name, role_id, role_name } = selectedMembership;
 
     // 4. Granulare Berechtigungen aus der Datenbank laden
     const permResult = await query(
@@ -106,7 +146,10 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
     const permissions: string[] = permResult.rows.map((row) => row.code);
 
-    // 5. JWT signieren
+    // 5. Exakter Abgleich von JWT- und Sitzungs-Ablaufzeit
+    const sessionDurationMs = parseDurationToMs(env.JWT_EXPIRES_IN);
+    const expiresAt = new Date(Date.now() + sessionDurationMs);
+
     const token = jwt.sign(
       {
         sub: user.id,
@@ -121,7 +164,6 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
     // 6. Sitzung in user_sessions persistieren
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 Stunden
 
     await query(
       `INSERT INTO user_sessions (user_id, tenant_id, token_hash, device_name, ip_address, expires_at, revoked)
@@ -135,6 +177,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       data: {
         accessToken: token,
         tokenType: 'Bearer',
+        expiresAt: expiresAt.toISOString(),
         user: {
           id: user.id,
           email: user.email,
@@ -157,8 +200,6 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.split(' ')[1];
       const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-
-      // Sitzung in der Datenbank auf widerrufen setzen
       await query('UPDATE user_sessions SET revoked = true WHERE token_hash = $1', [tokenHash]);
     }
 

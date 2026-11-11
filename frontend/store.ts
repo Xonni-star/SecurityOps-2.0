@@ -104,51 +104,36 @@ export const initialPatrolScans: PatrolScanEvent[] = [
     method: 'NFC_TAG',
     verifiedTag: 'RFID-9901-A',
     offlineCaptured: false
-  },
-  {
-    id: 'scan-2',
-    tenantId: 'tenant-frankfurt',
-    siteId: 's-1',
-    siteName: 'Finanzturm Alpha (Hauptverwaltung)',
-    checkpointId: 'cp-2',
-    checkpointCode: 'CP-02',
-    checkpointName: 'Rechenzentrum Ebene -2',
-    guardId: 'e-3',
-    guardName: 'Sabine Becker',
-    scannedAt: '2025-05-15 06:45',
-    method: 'QR_CODE',
-    verifiedTag: 'RFID-9902-B',
-    offlineCaptured: false
   }
 ];
 
 interface SecurityOpsStore {
-  // Theme (Dark / Light) with WCAG AA compliance
+  // Theme
   theme: ThemeMode;
   toggleTheme: () => void;
 
-  // Multi-Tenancy State
+  // Multi-Tenancy
   tenants: Tenant[];
   currentTenantId: string;
   setCurrentTenantId: (tenantId: string) => void;
   getCurrentTenant: () => Tenant;
 
-  // Current user & role context
+  // Current User / RBAC
   currentUserRole: UserRole;
   currentUserName: string;
   currentUserId: string;
   setCurrentUserRole: (role: UserRole) => void;
 
-  // Active view
+  // Active View Tab
   activeTab: string;
   setActiveTab: (tab: string) => void;
 
-  // Global Search across all entities
+  // Global Search
   globalSearch: string;
   setGlobalSearch: (q: string) => void;
   performGlobalSearch: (q: string) => GlobalSearchResult[];
 
-  // Offline First State & Sync Queue
+  // Offline Engine
   isOnline: boolean;
   toggleNetworkSimulation: () => void;
   syncQueue: OfflineQueueItem[];
@@ -157,7 +142,7 @@ interface SecurityOpsStore {
   resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => void;
   clearCompletedSyncs: () => void;
 
-  // Modular System / Plugin Framework
+  // Plugins
   modules: SecurityModuleManifest[];
   toggleModule: (moduleId: string) => void;
   isModuleActive: (moduleId: string) => boolean;
@@ -178,7 +163,7 @@ interface SecurityOpsStore {
   markNotificationAsRead: (deliveryId: string) => void;
   updateNotificationPreferences: (prefs: Partial<NotificationPreference>) => void;
 
-  // Automation Engine Rules, Templates & Logs
+  // Automation Engine
   automations: AutomationRule[];
   automationTemplates: AutomationRule[];
   executionLogs: AutomationExecutionLog[];
@@ -190,13 +175,13 @@ interface SecurityOpsStore {
   testRunRule: (id: string) => { matched: boolean; actions: string[]; durationMs: number };
   runAutomationsNow: () => number;
 
-  // Reporting & Controlling Engine
+  // Reporting & Controlling
   reportDefinitions: ReportDefinition[];
   addReportDefinition: (rep: Omit<ReportDefinition, 'id' | 'createdAt'>) => void;
   deleteReportDefinition: (id: string) => void;
   calculateTenantKPIs: () => ControllingKPIs;
 
-  // Phase 11: Mobile Application State
+  // Mobile App
   shiftSwaps: ShiftSwapRequest[];
   patrolScans: PatrolScanEvent[];
   shiftHandovers: ShiftHandoverProtocol[];
@@ -205,7 +190,7 @@ interface SecurityOpsStore {
   addPatrolScan: (scan: Omit<PatrolScanEvent, 'id' | 'tenantId' | 'scannedAt' | 'offlineCaptured'>) => void;
   submitShiftHandover: (handover: Omit<ShiftHandoverProtocol, 'id' | 'tenantId' | 'handoverTime' | 'offlineCaptured'>) => void;
 
-  // Tenant-Partitioned Data Sets
+  // Datasets
   clients: Client[];
   sites: Site[];
   employees: Employee[];
@@ -217,7 +202,7 @@ interface SecurityOpsStore {
   tasks: TaskItem[];
   documents: ManagedDocument[];
 
-  // Tenant-Scoped Filtered Getters
+  // Tenant-Partitioned Selectors
   getTenantClients: () => Client[];
   getTenantSites: () => Site[];
   getTenantEmployees: () => Employee[];
@@ -236,7 +221,7 @@ interface SecurityOpsStore {
   getTenantShiftSwaps: () => ShiftSwapRequest[];
   getTenantPatrolScans: () => PatrolScanEvent[];
 
-  // CRUD Actions
+  // Actions
   addClient: (client: Omit<Client, 'id' | 'tenantId'>) => void;
   addSite: (site: Omit<Site, 'id' | 'tenantId'>) => void;
   addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => void;
@@ -258,47 +243,37 @@ interface SecurityOpsStore {
 }
 
 export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
-  theme: (localStorage.getItem('secops_theme') as ThemeMode) || 'dark',
+  theme: (typeof localStorage !== 'undefined' ? localStorage.getItem('secops_theme') as ThemeMode : 'dark') || 'dark',
   toggleTheme: () => {
     const nextTheme = get().theme === 'dark' ? 'light' : 'dark';
-    localStorage.setItem('secops_theme', nextTheme);
-    if (nextTheme === 'dark') {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
+    if (typeof localStorage !== 'undefined') localStorage.setItem('secops_theme', nextTheme);
+    if (typeof document !== 'undefined') {
+      if (nextTheme === 'dark') document.documentElement.classList.add('dark');
+      else document.documentElement.classList.remove('dark');
     }
     set({ theme: nextTheme });
   },
 
   tenants: initialTenants,
-  currentTenantId: localStorage.getItem('secops_tenant_id') || 'tenant-frankfurt',
+  currentTenantId: (typeof localStorage !== 'undefined' ? localStorage.getItem('secops_tenant_id') : null) || 'tenant-frankfurt',
   setCurrentTenantId: (tenantId) => {
     apiClient.setTenantId(tenantId);
     set({ currentTenantId: tenantId });
-    get().addAuditLog({
-      actorEmail: 'admin@secops.local',
-      actorRole: get().currentUserRole,
-      actionType: 'ROLE_CHANGE',
-      severity: 'INFO',
-      targetEntity: `Tenant Switch to ${tenantId}`,
-      details: 'Sitzungskontext wurde gewechselt. RLS-Filter neu synchronisiert.',
-      ipAddress: '127.0.0.1'
-    });
   },
   getCurrentTenant: () => {
     const { tenants, currentTenantId } = get();
     return tenants.find((t) => t.id === currentTenantId) || tenants[0];
   },
 
-  currentUserRole: UserRole.GUARD,
-  currentUserName: 'Sabine Becker (Wachdienstmitarbeiter)',
-  currentUserId: 'e-3',
+  currentUserRole: UserRole.EINSATZLEITUNG,
+  currentUserName: 'Alexander Schmidt (Einsatzleiter)',
+  currentUserId: 'e-1',
   setCurrentUserRole: (role) => {
-    let name = 'Sabine Becker (Wachdienstmitarbeiter)';
-    let uId = 'e-3';
-    if (role === UserRole.EINSATZLEITUNG) {
-      name = 'Alexander Schmidt (Einsatzleiter)';
-      uId = 'e-1';
+    let name = 'Alexander Schmidt (Einsatzleiter)';
+    let uId = 'e-1';
+    if (role === UserRole.GUARD) {
+      name = 'Sabine Becker (Wachdienstmitarbeiter)';
+      uId = 'e-3';
     } else if (role === UserRole.OBJEKTLEITUNG) {
       name = 'Tarkan Kaya (Objektleiter)';
       uId = 'e-2';
@@ -306,20 +281,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       name = 'Dr. Michael von Berg (Geschäftsführung)';
       uId = 'admin-1';
     }
-
     set({ currentUserRole: role, currentUserName: name, currentUserId: uId });
-    get().addAuditLog({
-      actorEmail: `${uId}@secops.local`,
-      actorRole: role,
-      actionType: 'ROLE_CHANGE',
-      severity: 'WARNUNG',
-      targetEntity: `RBAC Role -> ${role}`,
-      details: `Rollenwechsel im System auf ${role} durchgeführt.`,
-      ipAddress: '194.25.101.44'
-    });
   },
 
-  activeTab: 'mobile_app',
+  // Standardmäßig 'dashboard' laden für sofortige sichtbare Leitstellen-Darstellung
+  activeTab: 'dashboard',
   setActiveTab: (tab) => set({ activeTab: tab }),
 
   globalSearch: '',
@@ -328,7 +294,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   performGlobalSearch: (query) => {
     if (!query || query.trim().length < 2) return [];
     const q = query.toLowerCase().trim();
-    const { getTenantClients, getTenantSites, getTenantEmployees, getTenantGuardBook, getTenantKeys, getTenantTasks, getTenantDocuments, getTenantAutomations } = get();
+    const { getTenantClients, getTenantSites, getTenantEmployees, getTenantGuardBook, getTenantKeys, getTenantTasks, getTenantDocuments } = get();
     const results: GlobalSearchResult[] = [];
 
     getTenantClients().forEach((c) => {
@@ -352,7 +318,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
     getTenantGuardBook().forEach((g) => {
       if (g.title.toLowerCase().includes(q) || g.description.toLowerCase().includes(q) || g.siteName.toLowerCase().includes(q)) {
-        results.push({ id: g.id, title: g.title, subtitle: `${g.siteName} • ${g.priority} (${g.stage})`, category: 'Wachbuch', targetTab: 'guardbook' });
+        results.push({ id: g.id, title: g.title, subtitle: `${g.siteName} • ${g.priority}`, category: 'Wachbuch', targetTab: 'guardbook' });
       }
     });
 
@@ -420,15 +386,17 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       status: 'pending'
     };
 
-    offlineStorage.enqueueOffline({
-      id: queueEntry.id,
-      tenantId: queueEntry.tenantId,
-      storeName: queueEntry.entityType,
-      action: queueEntry.action,
-      data: queueEntry.payload,
-      timestamp: queueEntry.createdAt,
-      synced: false
-    }).catch(console.error);
+    if (typeof offlineStorage !== 'undefined' && offlineStorage.enqueueOffline) {
+      offlineStorage.enqueueOffline({
+        id: queueEntry.id,
+        tenantId: queueEntry.tenantId,
+        storeName: queueEntry.entityType,
+        action: queueEntry.action,
+        data: queueEntry.payload,
+        timestamp: queueEntry.createdAt,
+        synced: false
+      }).catch(console.error);
+    }
 
     set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
   },
@@ -445,7 +413,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     const updated = syncQueue.map((item) => {
       if (item.status === 'pending') {
         successCount++;
-        offlineStorage.markSynced(item.id).catch(console.error);
+        if (typeof offlineStorage !== 'undefined' && offlineStorage.markSynced) {
+          offlineStorage.markSynced(item.id).catch(console.error);
+        }
         return { ...item, status: 'synced' as SyncStatus };
       }
       return item;
@@ -492,20 +462,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         s.id === sessionId ? { ...s, status: 'REVOKED' } : s
       )
     }));
-    get().addAuditLog({
-      actorEmail: 'a.schmidt@ffm-sec.de',
-      actorRole: 'Einsatzleitung',
-      actionType: 'DEVICE_REVOKE',
-      severity: 'WARNUNG',
-      targetEntity: `Session ${sessionId}`,
-      details: `Gerätesitzung ${sessionId} widerrufen. Token auf Blacklist gesetzt.`,
-      ipAddress: '194.25.101.44'
-    });
-    get().addNotification(
-      'Sitzung widerrufen',
-      `Sitzung ${sessionId} wurde gesperrt.`,
-      'info'
-    );
   },
 
   addAuditLog: (entry) => {
@@ -730,7 +686,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     };
   },
 
-  // Phase 11: Mobile Application State
+  // Mobile App State
   shiftSwaps: initialShiftSwaps,
   patrolScans: initialPatrolScans,
   shiftHandovers: [],
@@ -764,7 +720,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   approveShiftSwap: (swapId, approved) => {
-    const { currentUserName, addAuditLog, addNotification } = get();
+    const { currentUserName, addNotification } = get();
     set((state) => ({
       shiftSwaps: state.shiftSwaps.map((s) =>
         s.id === swapId
@@ -915,27 +871,27 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
   getTenantAuditLogs: () => {
     const { auditLogs, currentTenantId } = get();
-    return auditLogs.filter((a) => a.tenantId === currentTenantId);
+    return (auditLogs || []).filter((a) => a.tenantId === currentTenantId);
   },
   getTenantExecutionLogs: () => {
     const { executionLogs, currentTenantId } = get();
-    return executionLogs.filter((l) => l.tenantId === currentTenantId);
+    return (executionLogs || []).filter((l) => l.tenantId === currentTenantId);
   },
   getTenantNotificationDeliveries: () => {
     const { notificationDeliveries, currentTenantId } = get();
-    return notificationDeliveries.filter((nd) => nd.tenantId === currentTenantId);
+    return (notificationDeliveries || []).filter((nd) => nd.tenantId === currentTenantId);
   },
   getTenantReportDefinitions: () => {
     const { reportDefinitions, currentTenantId } = get();
-    return reportDefinitions.filter((r) => r.tenantId === currentTenantId);
+    return (reportDefinitions || []).filter((r) => r.tenantId === currentTenantId);
   },
   getTenantShiftSwaps: () => {
     const { shiftSwaps, currentTenantId } = get();
-    return shiftSwaps.filter((s) => s.tenantId === currentTenantId);
+    return (shiftSwaps || []).filter((s) => s.tenantId === currentTenantId);
   },
   getTenantPatrolScans: () => {
     const { patrolScans, currentTenantId } = get();
-    return patrolScans.filter((p) => p.tenantId === currentTenantId);
+    return (patrolScans || []).filter((p) => p.tenantId === currentTenantId);
   },
 
   addClient: (c) => {
@@ -984,7 +940,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
   assignShiftEmployee: (shiftId, employeeId, employeeName) => {
     const { isOnline, currentTenantId, enqueueOfflineAction, employees, shifts } = get();
-    const shift = shifts.find((s) => s.id === shiftId);
     const emp = employees.find((e) => e.id === employeeId);
 
     let conflictReason: string | undefined = undefined;
@@ -1192,7 +1147,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     })),
 
   addDocument: (doc) => {
-    const { currentTenantId, addAuditLog } = get();
+    const { currentTenantId } = get();
     const newDoc: ManagedDocument = {
       ...doc,
       id: `doc-${Date.now()}`,

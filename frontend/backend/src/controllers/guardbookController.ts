@@ -3,19 +3,19 @@ import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 
 const createGuardbookSchema = z.object({
-  siteId: z.string().uuid(),
-  guardId: z.string().uuid(),
-  category: z.string(),
+  siteId: z.string().uuid('siteId muss eine gültige UUID sein.'),
+  guardId: z.string().uuid('guardId muss eine gültige UUID sein.'),
+  category: z.string().min(2).max(50),
   priority: z.enum(['Niedrig', 'Normal', 'Dringend', 'Kritisch']).default('Normal'),
-  title: z.string().min(3),
+  title: z.string().min(3).max(255),
   description: z.string().min(5),
   policeInvolved: z.boolean().default(false),
-  clientMutationId: z.string().optional()
+  clientMutationId: z.string().min(8).max(64).regex(/^[a-zA-Z0-9_\-]+$/, 'clientMutationId muss ein gültiger Identifier sein.').optional()
 });
 
 const revisionGuardbookSchema = z.object({
-  entryId: z.string().uuid(),
-  correctionNote: z.string().min(5)
+  entryId: z.string().uuid('entryId muss eine gültige UUID sein.'),
+  correctionNote: z.string().min(5, 'Korrekturhinweis muss mindestens 5 Zeichen enthalten.')
 });
 
 export async function listGuardbook(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -64,7 +64,7 @@ export async function createGuardbookEntry(req: Request, res: Response, next: Ne
           return insertRes.rows[0];
         }
 
-        // Falls bereits existent: Vorhandenen Eintrag abrufen ohne Neuanlage (idempotent)
+        // Bei bestehendem Eintrag: Den existierenden Datensatz abrufen (idempotent, kein Duplikat)
         const existing = await client.query(
           'SELECT id, title, entry_timestamp FROM guardbook_entries WHERE tenant_id = $1 AND client_mutation_id = $2',
           [tenantId, body.clientMutationId]
@@ -72,7 +72,7 @@ export async function createGuardbookEntry(req: Request, res: Response, next: Ne
         return existing.rows[0];
       }
 
-      // Ohne clientMutationId normal einfügen
+      // Ohne clientMutationId
       const insertRes = await client.query(
         `INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description, police_involved)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -84,7 +84,7 @@ export async function createGuardbookEntry(req: Request, res: Response, next: Ne
 
     res.status(201).json({
       success: true,
-      message: 'Wachbucheintrag gespeichert (atomare Idempotenz abgesichert)',
+      message: 'Wachbucheintrag erfasst (atomare Idempotenz gewährleistet)',
       data: result
     });
   } catch (error) {
@@ -92,10 +92,6 @@ export async function createGuardbookEntry(req: Request, res: Response, next: Ne
   }
 }
 
-/**
- * Revisionsverwaltung: Nachträgliche Korrekturen werden als unzerstörbare Ergänzung
- * in guardbook_revisions gespeichert; der Originaleintrag bleibt unangetastet.
- */
 export async function addGuardbookRevision(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;

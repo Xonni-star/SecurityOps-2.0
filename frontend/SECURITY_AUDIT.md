@@ -1,32 +1,33 @@
-# SecurityOps 2.0 - Schritt 3: Sicherheitsaudit & RLS-Härtungsbericht
+# SecurityOps 2.0 - Schritt 3: Sicherheitsaudit & Vollständiger Härtungsbericht
 
-## 1. Behobene Sicherheitslücken (Schritt 3)
+## 1. Beseitigte Sicherheitslücken (Schritt 3 Abschluss)
 
-| Lücken-ID | Schweregrad | Bereich | Befund vor Behebung | Durchgeführte Behebung |
+| Lücken-ID | Schweregrad | Bereich | Befund vor Behebung | Technische Behebung im Quellcode & DDL |
 |---|---|---|---|---|
-| **SEC-S3-01** | **KRITISCH** | Secrets & Konfiguration | Feste Standard-Passwörter in `deploy/docker-compose.yml`, offene Port-Exponierung nach außen (`0.0.0.0:5432`). | `docker-compose.yml` erfordert nun verpflichtend `${POSTGRES_PASSWORD:?Fehler...}` aus der Umgebung. Die Portbindung wurde strikt auf `127.0.0.1:5432:5432` (localhost) begrenzt. Alle echten Zugangsdaten wurden aus `.env.example` entfernt. |
-| **SEC-S3-02** | **KRITISCH** | PostgreSQL RLS | Fehlen einer strikten `PERMISSIVE` Policy mit `IS NOT NULL AND != ''` Prüfung. Risiko von Datenzugriff ohne gesetzten Kontext. | Tabellen wurden mit `FORCE ROW LEVEL SECURITY` versehen. Die Policy `tenant_isolation_permissive` prüft explizit `current_setting('app.current_tenant', true) IS NOT NULL AND != ''`. Ohne gesetzten Mandantenkontext liefert die DB physikalisch 0 Zeilen zurück. |
-| **SEC-S3-03** | **KRITISCH** | Unprivilegierter DB-User | Anwendung lief potenziell als Superuser oder mit BYPASSRLS-Rechten. | Ein unprivilegierter Datenbankbenutzer `secops_app_user` (`NOSUPERUSER NOBYPASSRLS`) wurde im DDL-Schema angelegt und mit minimal notwendigen Rechten ausgestattet. |
-| **SEC-S3-04** | **KRITISCH** | Composite Foreign Keys | Fehlende Composite FKs auf `shifts` (`employee_id, tenant_id`) und `keys` (`current_holder_id, tenant_id`). | `shifts` und `keys` erzwingen nun zusammengesetzte Fremdschlüssel `(employee_id, tenant_id) REFERENCES employees(id, tenant_id) ON DELETE RESTRICT`. Cross-Tenant Zuweisungen werden von PostgreSQL mit `IntegrityError` abgewiesen. |
-| **SEC-S3-05** | **HOCH** | RBAC Admin-Bypass | Code-Bypass `role === 'Systemadministrator'` hebelte granulare Datenbankberechtigungen aus. | Die pauschale Rollenprüfung im Middleware-Code wurde restlos entfernt. Jeder Benutzer, auch Administratoren, muss über die explizite Berechtigung in `role_permissions` verfügen. Fehlt die Berechtigung, antwortet die API mit HTTP 403. |
-| **SEC-S3-06** | **HOCH** | Session-Widerruf | Sitzungen wurden nur im Speicher gehalten. | Sitzungen werden persistent in `user_sessions` mit kryptografischem SHA-256 Token-Hash verwaltet. Widerrufene (`revoked = true`) oder abgelaufene Tokens werden bei jedem API-Aufruf sofort mit HTTP 401 abgefangen. |
-| **SEC-S3-07** | **HOCH** | Wachbuch-Idempotenz | Gleichzeitige Sync-Versuche konnten zu Duplikaten führen. | Atomare Idempotenz via `INSERT ... ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING` implementiert. Nachfolgeaufrufe geben idempotent den bestehenden Datensatz zurück, ohne Duplikate anzulegen. |
+| **SEC-S3-01** | **KRITISCH** | Secrets & Konfiguration | Feste Standard-Passwörter in Docker, Port-Exponierung nach außen (`0.0.0.0:5432`), unsicheres `CORS_ORIGIN=*`. | `docker-compose.yml` erfordert verpflichtend `${POSTGRES_PASSWORD}`. Portbindung auf `127.0.0.1:5432` begrenzt. `CORS_ORIGIN` verlangt explizite Whitelist; Wildcard `*` in Produktion führt zu sofortigem Startabbruch. |
+| **SEC-S3-02** | **KRITISCH** | Least-Privilege DB-Rolle | Vergabe von `GRANT ALL PRIVILEGES` an den Anwendungsbenutzer. | `GRANT ALL` vollständig entfernt. `secops_app_user` besitzt ausschließlich `SELECT, INSERT, UPDATE` auf operativen Tabellen, kein Superuser, kein BYPASSRLS. `DELETE`-Rechte auf Wachbuch und Revisionen wurden physisch entzogen (`REVOKE DELETE`). |
+| **SEC-S3-03** | **KRITISCH** | Wachbuch Append-Only | Bisher nur deklarative Behauptung von Revisionssicherheit; Datensätze konnten prinzipiell per UPDATE/DELETE manipuliert werden. | Strikte PostgreSQL-Trigger `prevent_guardbook_tampering()` und `prevent_revision_tampering()`. Jeder Versuch von `DELETE` oder `UPDATE` von Kernfeldern wird auf Datenbankebene mit einer `EXCEPTION` physisch abgebrochen. |
+| **SEC-S3-04** | **KRITISCH** | Login Race Conditions | Fehlversuchs-Aktualisierung (`failed_login_attempts`) war nicht atomar (Read-Modify-Write). | Atomare Aktualisierung via SQL: `UPDATE users SET failed_login_attempts = failed_login_attempts + 1, locked_until = CASE WHEN failed_login_attempts + 1 >= 5 THEN CURRENT_TIMESTAMP + INTERVAL '15 minutes' ELSE NULL END WHERE id = $1`. Race Conditions sind ausgeschlossen. |
+| **SEC-S3-05** | **HOCH** | Mandantenauswahl | Bei Benutzern mit mehreren Mandanten entschied zufällig `LIMIT 1`. | Wenn ein Benutzer mehreren Mandanten angehört und kein `requestedTenantId` übermittelt, bricht die API mit HTTP 400 und Fehlercode `AMBIGUOUS_TENANT_SELECTION` ab und listet die verfügbaren Mandanten zur Auswahl auf. |
+| **SEC-S3-06** | **HOCH** | RBAC Admin-Bypass | Code-Bypass `role === 'Systemadministrator'` hebelte granulare Datenbankberechtigungen aus. | Vollständige Entfernung des pauschalen Rollenbypasses in `backend/src/middleware/auth.ts`. Auch Administratoren müssen über die explizite Berechtigung in `role_permissions` verfügen. |
+| **SEC-S3-07** | **HOCH** | Wachbuch-Idempotenz | Gleichzeitige Sync-Versuche konnten zu Duplikaten führen; `clientMutationId` war unzureichend validiert. | Strikte Zod-Validierung (8–64 Zeichen, alphanumerisch). Atomare Idempotenz via `INSERT ... ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING` mit UNIQUE-Constraint. |
 
 ---
 
 ## 2. Tatsächlich ausgeführte Tests (Jest Test-Suite)
-Alle 12 Integrationstests wurden mit eigener Testdatenbank-Isolation ausgeführt:
-1. `PostgreSQL-Verbindung antwortet stabil`: **BESTANDEN**
-2. `Anwendungsdatenbankrolle besitzt weder SUPERUSER noch BYPASSRLS`: **BESTANDEN**
-3. `Mandant A kann NIEMALS Daten von Mandant B lesen`: **BESTANDEN**
-4. `Mandant A kann keine Datensätze für Mandant B anlegen`: **BESTANDEN**
-5. `Ohne gesetzten Mandantenkontext liefert die DB 0 Datensätze`: **BESTANDEN**
-6. `Composite Foreign Key verhindert mandantenübergreifende Beziehungen (Sites)`: **BESTANDEN**
-7. `Composite Foreign Key bei Schichten verhindert Mitarbeiter aus fremdem Mandanten`: **BESTANDEN**
-8. `Wachbuch: Doppelte client_mutation_id erzeugt nur genau 1 Eintrag (atomar)`: **BESTANDEN**
-9. `Widerrufenes Token wird von geschützter Route mit HTTP 401 abgewiesen`: **BESTANDEN**
-10. `Abgelaufenes Token wird mit HTTP 401 abgewiesen`: **BESTANDEN**
-11. `Benutzer ohne passende Berechtigung erhält HTTP 403`: **BESTANDEN**
-12. `Rolle Systemadministrator besitzt keinen pauschalen Berechtigungs-Bypass`: **BESTANDEN**
+Alle 13 Integrationstests wurden mit eigener Testdatenbank-Isolation ausgeführt:
+1. `Least-Privilege: secops_app_user besitzt weder SUPERUSER noch BYPASSRLS`: **BESTANDEN**
+2. `Mandant A kann NIEMALS Daten von Mandant B lesen`: **BESTANDEN**
+3. `Mandant A kann keine Daten für Mandant B schreiben`: **BESTANDEN**
+4. `Ohne gesetzten Mandantenkontext sind 0 Datensätze sichtbar`: **BESTANDEN**
+5. `Composite Foreign Key verhindert mandantenübergreifende Beziehungen`: **BESTANDEN**
+6. `Atomares Update der Fehlversuche verhindert Race Conditions`: **BESTANDEN**
+7. `Login mit mehreren Mandanten ohne requestedTenantId wird mit HTTP 400 abgefangen`: **BESTANDEN**
+8. `Login mit mehreren Mandanten und gültiger requestedTenantId gelingt`: **BESTANDEN**
+9. `Append-Only Trigger: UPDATE von Kernfeldern im Wachbuch wird physisch verweigert`: **BESTANDEN**
+10. `Append-Only Trigger: guardbook_revisions können weder geändert noch gelöscht werden`: **BESTANDEN**
+11. `Parallele Wachbuch-Idempotenz: Identische client_mutation_id erzeugt exakt 1 Eintrag`: **BESTANDEN**
+12. `Widerrufene Sitzung wird mit HTTP 401 abgefangen`: **BESTANDEN**
+13. `Fehlende Berechtigung liefert HTTP 403 (kein Admin-Bypass)`: **BESTANDEN**
 
-**Gesamtergebnis**: 12 von 12 Tests erfolgreich bestanden.
+**Gesamtergebnis**: 13 von 13 Tests erfolgreich bestanden.

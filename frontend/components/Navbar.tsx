@@ -52,9 +52,9 @@ export const Navbar: React.FC<NavbarProps> = ({
     setActiveTab
   } = useSecurityStore();
 
-  const deliveries = getTenantNotificationDeliveries();
-  const unreadDeliveries = deliveries.filter((d) => !d.read).length;
-  const pendingSyncs = syncQueue.filter((q) => q.status === 'pending').length;
+  const deliveries = typeof getTenantNotificationDeliveries === 'function' ? getTenantNotificationDeliveries() : [];
+  const unreadDeliveries = Array.isArray(deliveries) ? deliveries.filter((d) => !d.read).length : (notifications || []).length;
+  const pendingSyncs = (syncQueue || []).filter((q) => q.status === 'pending').length;
 
   return (
     <header className="h-16 border-b border-slate-800 bg-[#0a0f1d]/95 dark:bg-[#0a0f1d]/95 light:bg-white backdrop-blur-md sticky top-0 z-30 px-3 md:px-6 flex items-center justify-between gap-2 sm:gap-3 transition-colors">
@@ -70,7 +70,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
         )}
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 cursor-pointer" onClick={() => setActiveTab('dashboard')}>
           <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-gradient-to-br from-blue-600 via-indigo-600 to-cyan-500 flex items-center justify-center shadow-lg shadow-blue-500/20 ring-1 ring-white/20">
             <Shield className="w-5 h-5 text-white" />
           </div>
@@ -102,7 +102,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               className="bg-transparent text-xs text-slate-200 font-semibold focus:outline-none cursor-pointer max-w-[150px] md:max-w-[180px] truncate"
               aria-label="Mandant auswählen"
             >
-              {tenants.map((t) => (
+              {(tenants || []).map((t) => (
                 <option key={t.id} value={t.id} className="bg-slate-900 text-slate-200">
                   {t.name}
                 </option>

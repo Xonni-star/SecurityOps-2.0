@@ -4,18 +4,22 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ---
 
-## 1. Architektur & Sicherheitsgrundlagen (Schritt 3)
+## 1. Architektur & Sicherheitsgrundlagen (Schritt 3 Finale)
 
 - **Backend**: Node.js & TypeScript mit Express REST-API (`/api/v1`).
-- **Datenbank**: PostgreSQL 16+ mit unprivilegiertem Benutzer (`secops_app_user`, `NOSUPERUSER NOBYPASSRLS`).
+- **Least-Privilege Datenbank**: PostgreSQL 16+ mit unprivilegiertem Benutzer `secops_app_user` (`NOSUPERUSER NOBYPASSRLS`).
 - **Mandantentrennung & RLS**:
   - `tenant_id` als UUID auf allen mandantenspezifischen Tabellen.
   - Physische Durchsetzung von **PostgreSQL Row-Level Security (RLS)** via `ENABLE ROW LEVEL SECURITY` und `FORCE ROW LEVEL SECURITY`.
-  - Transaktionssichere Mandantenbindung via `SET LOCAL app.current_tenant`. Ohne gesetzten Mandantenkontext werden 0 Datensätze geliefert.
+  - Transaktionssichere Mandantenbindung via `SET LOCAL app.current_tenant`. Ohne gesetzten Mandantenkontext werden physisch 0 Datensätze geliefert.
   - Composite Foreign Keys `(parent_id, tenant_id)` verhindern mandantenübergreifende Fremdschlüsselverknüpfungen (z. B. Schichten auf fremde Mitarbeiter oder Schlüssel an fremde Inhaber).
+- **Append-Only Revisionssicherheit**:
+  - PostgreSQL-Trigger `prevent_guardbook_tampering()` und `prevent_revision_tampering()` blockieren nachträgliche Manipulationen und Löschungen physisch auf Datenbankebene.
 - **Authentifizierung & Sessions**:
   - Passwort-Hashing mit **Argon2id**.
   - Persistente Sitzungsverwaltung und Token-Widerruf über `user_sessions`.
+  - Atomarer Brute-Force Schutz gegen Race Conditions.
+  - Eindeutige Mandantenauswahl bei Mehrfachzugehörigkeiten.
   - Granulare serverseitige Rollen- und Rechteprüfung (RBAC) **ohne pauschale Systemadministrator-Bypasses**.
   - Atomare Wachbuch-Idempotenz via `INSERT ... ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`.
 
@@ -40,7 +44,7 @@ npm install
 
 # 3. Umgebungsvariablen anlegen
 cp backend/.env.example backend/.env
-# In backend/.env sichere Passwörter und JWT_SECRET eintragen!
+# In backend/.env sichere Passwörter, JWT_SECRET und CORS_ORIGIN eintragen!
 
 # 4. PostgreSQL-Container starten (gebunden an 127.0.0.1)
 POSTGRES_PASSWORD=MeinGeheimesPasswort docker compose -f deploy/docker-compose.yml up -d db
@@ -60,6 +64,6 @@ npm run dev --prefix backend
 
 ## 3. Testdurchführung
 ```bash
-# Führt alle 12 Sicherheits-, RLS- und Idempotenz-Tests aus:
+# Führt alle 13 Sicherheits-, RLS-, Append-Only- und Idempotenz-Tests aus:
 npm test --prefix backend
 ```
