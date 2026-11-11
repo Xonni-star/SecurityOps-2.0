@@ -857,4 +857,85 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const after = await historyRows(db);
     expect(after).toEqual(before);
   });
+
+  test('46. Gültige Datenbank mit zusätzlicher Migration 005 wird akzeptiert', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({ '005_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toEqual(['001', '002', '003', '004', '005']);
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005']);
+  });
+
+  test('47. Fremdes Objekt bei Migration oberhalb 004 wird erkannt', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({ '005_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
+
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    await queryInDatabase(db, 'CREATE TABLE fremd_tabelle (id INT)');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
+    expect(message).not.toMatch(/"neue_tabelle"/);
+    expect(await historyRows(db)).toHaveLength(5);
+  });
+
+  test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `CREATE FUNCTION prevent_guardbook_tampering(x integer) RETURNS integer LANGUAGE sql AS 'SELECT $1'`
+    );
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(
+      /Unerwartetes Objekt im Schema public: Funktion\/Prozedur "prevent_guardbook_tampering" mit Signatur "prevent_guardbook_tampering\(integer\)"/
+    );
+  });
+
+  test('49. View anstelle einer erwarteten Tabelle wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'DROP TABLE audit_logs CASCADE; CREATE VIEW audit_logs AS SELECT 1 AS id;');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Relation "audit_logs" hat Typ "View" statt "Tabelle"/);
+  });
+
+  test('50. Daten und Migrationseinträge bleiben bei Objektabweichung unverändert', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({ '005_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
+
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    await queryInDatabase(
+      db,
+      `INSERT INTO tenants (name, subdomain, tax_number, bwr_register_id)
+       VALUES ('Bestand', 'bestand-529', 'DE-529-1', 'BWR-529-1')`
+    );
+    const before = await historyRows(db);
+
+    await queryInDatabase(db, 'CREATE TABLE fremd_tabelle (id INT); INSERT INTO fremd_tabelle VALUES (1);');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Tabelle "fremd_tabelle"/);
+
+    const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
+    expect(tenants.some((row) => row.name === 'Bestand')).toBe(true);
+
+    const rows = await queryInDatabase<{ id: number }>(db, 'SELECT id FROM fremd_tabelle');
+    expect(rows).toEqual([{ id: 1 }]);
+
+    const after = await historyRows(db);
+    expect(after).toEqual(before);
+  });
 });

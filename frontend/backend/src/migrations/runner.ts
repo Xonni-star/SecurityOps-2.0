@@ -395,127 +395,466 @@ interface PolicyRow {
   with_check: string | null;
 }
 
-interface UnexpectedSchemaObject {
-  kind: string;
-  name: string;
+type RelationKind = 'r' | 'p' | 'v' | 'm' | 'S' | 'f';
+type CustomTypeKind = 'c' | 'e' | 'd' | 'r' | 'm';
+
+interface ExpectedSchemaObjects {
+  relations: Map<string, RelationKind>;
+  routines: Set<string>;
+  types: Map<string, CustomTypeKind>;
 }
 
-/** Erlaubte Routinen aus Migration 001 (append-only Triggerfunktionen). */
-const EXPECTED_ROUTINE_NAMES = EXPECTED_FUNCTIONS.map((fn) => fn.name);
+const RELATION_KIND_LABELS: Record<string, string> = {
+  r: 'Tabelle',
+  p: 'partitionierte Tabelle',
+  v: 'View',
+  m: 'Materialized View',
+  S: 'Sequenz',
+  f: 'Fremdtabelle'
+};
 
-/**
- * Ermittelt sämtliche unerwarteten Objekte im Schema `public`:
- * Relationen (Tabellen, partitionierte Tabellen, Views, Materialized Views,
- * Sequenzen, Fremdtabellen), Funktionen/Prozeduren und eigenständige Typen.
- *
- * Erlaubt bleiben:
- * - die 21 SecurityOps-Tabellen und `schema_migrations`,
- * - die beiden Triggerfunktionen aus Migration 001,
- * - automatische Zeilentypen, Array-Typen und Erweiterungsobjekte.
- */
-async function findUnexpectedSchemaObjects(client: Client): Promise<UnexpectedSchemaObject[]> {
-  const relationResult = await client.query<UnexpectedSchemaObject>(
-    `
-    SELECT c.relname AS name,
-           CASE c.relkind
-             WHEN 'r' THEN 'Tabelle'
-             WHEN 'p' THEN 'partitionierte Tabelle'
-             WHEN 'v' THEN 'View'
-             WHEN 'm' THEN 'Materialized View'
-             WHEN 'S' THEN 'Sequenz'
-             WHEN 'f' THEN 'Fremdtabelle'
-             ELSE c.relkind::text
-           END AS kind
+const TYPE_KIND_LABELS: Record<string, string> = {
+  c: 'Zusammengesetzter Typ',
+  e: 'Enum',
+  d: 'Domain',
+  r: 'Range-Typ',
+  m: 'Multirange-Typ'
+};
+
+function stripSqlComments(sql: string): string {
+  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n\r]*/g, ' ');
+}
+
+function maskSqlLiterals(sql: string): string {
+  return sql
+    .replace(/\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$/g, "''")
+    .replace(/'(?:''|[^'])*'/g, "''");
+}
+
+const SQL_IDENTIFIER = `(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)`;
+const SQL_QUALIFIED_NAME = `${SQL_IDENTIFIER}(?:\\s*\\.\\s*${SQL_IDENTIFIER})?`;
+
+function normalizeIdentifier(identifier: string): string {
+  const withoutQuotes = identifier.replace(/"/g, '').trim();
+  const parts = withoutQuotes.split('.');
+  return parts[parts.length - 1].toLowerCase();
+}
+
+function normalizeTypeName(typeName: string): string {
+  let value = typeName.trim().toLowerCase().replace(/\s+/g, ' ');
+  value = value.replace(/^public\./, '');
+  const aliases: Record<string, string> = {
+    int: 'integer',
+    int4: 'integer',
+    int2: 'smallint',
+    int8: 'bigint',
+    bool: 'boolean',
+    varchar: 'character varying',
+    char: 'character',
+    float4: 'real',
+    float8: 'double precision',
+    decimal: 'numeric',
+    timestamptz: 'timestamp with time zone',
+    timestamp: 'timestamp without time zone',
+    timetz: 'time with time zone',
+    time: 'time without time zone'
+  };
+  return aliases[value] ?? value;
+}
+
+const KNOWN_TYPE_STARTS = new Set([
+  'integer',
+  'int',
+  'int4',
+  'bigint',
+  'int8',
+  'smallint',
+  'int2',
+  'text',
+  'varchar',
+  'character',
+  'char',
+  'boolean',
+  'bool',
+  'numeric',
+  'decimal',
+  'real',
+  'float4',
+  'double',
+  'timestamp',
+  'timestamptz',
+  'date',
+  'time',
+  'timetz',
+  'uuid',
+  'json',
+  'jsonb',
+  'bytea',
+  'interval',
+  'record',
+  'trigger',
+  'void',
+  'anyelement',
+  'anyarray',
+  'anynonarray',
+  'regclass',
+  'regtype',
+  'public'
+]);
+
+function removeTopLevelDefault(value: string): string {
+  let depth = 0;
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    if (char === '(' || char === '[') depth++;
+    else if (char === ')' || char === ']') depth--;
+    else if (depth === 0 && value.slice(i, i + 7).toUpperCase() === 'DEFAULT') {
+      const before = value.slice(0, i).trimEnd();
+      const after = value.slice(i + 7);
+      if (before.length > 0 && /[\s,]/.test(value[i - 1] ?? '') && /^\s/.test(after)) {
+        return before;
+      }
+    }
+  }
+  return value;
+}
+
+function splitTopLevel(value: string, separator: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let depth = 0;
+  for (const char of value) {
+    if (char === '(' || char === '[') depth++;
+    else if (char === ')' || char === ']') depth--;
+    if (char === separator && depth === 0) {
+      parts.push(current);
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  parts.push(current);
+  return parts;
+}
+
+function normalizeArgumentList(args: string): string {
+  return splitTopLevel(args, ',')
+    .map((part) => {
+      let value = removeTopLevelDefault(part.trim());
+      if (!value) return '';
+      value = value.replace(/^(IN|OUT|INOUT|VARIADIC)\s+/i, '');
+      const tokens = value.split(/\s+/);
+      if (tokens.length > 1) {
+        const first = tokens[0].toLowerCase();
+        if (!KNOWN_TYPE_STARTS.has(first) && !first.includes('.') && !first.includes('[')) {
+          value = tokens.slice(1).join(' ');
+        }
+      }
+      return normalizeTypeName(value);
+    })
+    .filter((part) => part.length > 0)
+    .join(',');
+}
+
+function extractParenthesized(text: string, startIndex: number): { content: string; endIndex: number } | null {
+  let depth = 0;
+  for (let i = startIndex; i < text.length; i++) {
+    const char = text[i];
+    if (char === '(') depth++;
+    else if (char === ')') {
+      depth--;
+      if (depth === 0) {
+        return { content: text.slice(startIndex + 1, i), endIndex: i };
+      }
+    }
+  }
+  return null;
+}
+
+export function extractSchemaObjects(sql: string): ExpectedSchemaObjects {
+  const cleaned = maskSqlLiterals(stripSqlComments(sql));
+  const relations = new Map<string, RelationKind>();
+  const routines = new Set<string>();
+  const types = new Map<string, CustomTypeKind>();
+
+  const relationPatterns: Array<{ pattern: RegExp; kind: RelationKind }> = [
+    {
+      pattern: new RegExp(
+        `\\bCREATE\\s+FOREIGN\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
+        'gi'
+      ),
+      kind: 'f'
+    },
+    {
+      pattern: new RegExp(
+        `\\bCREATE\\s+(?:UNLOGGED\\s+|TEMP(?:ORARY)?\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
+        'gi'
+      ),
+      kind: 'r'
+    },
+    {
+      pattern: new RegExp(
+        `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?MATERIALIZED\\s+VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
+        'gi'
+      ),
+      kind: 'm'
+    },
+    {
+      pattern: new RegExp(
+        `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
+        'gi'
+      ),
+      kind: 'v'
+    },
+    {
+      pattern: new RegExp(
+        `\\bCREATE\\s+(?:UNLOGGED\\s+)?SEQUENCE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
+        'gi'
+      ),
+      kind: 'S'
+    }
+  ];
+
+  for (const { pattern, kind } of relationPatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(cleaned)) !== null) {
+      const name = normalizeIdentifier(match[1]);
+      if (relations.has(name)) continue;
+
+      let actualKind = kind;
+      if (kind === 'r') {
+        const statementEnd = cleaned.indexOf(';', match.index);
+        const statement = cleaned.slice(match.index, statementEnd === -1 ? undefined : statementEnd);
+        if (/\bPARTITION\s+BY\b/i.test(statement)) actualKind = 'p';
+      }
+
+      relations.set(name, actualKind);
+    }
+  }
+
+  const typePatterns: Array<{ pattern: RegExp; kind: CustomTypeKind }> = [
+    {
+      pattern: new RegExp(`\\bCREATE\\s+TYPE\\s+(${SQL_QUALIFIED_NAME})\\s+AS\\s+ENUM\\b`, 'gi'),
+      kind: 'e'
+    },
+    {
+      pattern: new RegExp(`\\bCREATE\\s+TYPE\\s+(${SQL_QUALIFIED_NAME})\\s+AS\\s+RANGE\\b`, 'gi'),
+      kind: 'r'
+    },
+    {
+      pattern: new RegExp(`\\bCREATE\\s+TYPE\\s+(${SQL_QUALIFIED_NAME})\\s+AS\\s*\\(`, 'gi'),
+      kind: 'c'
+    },
+    {
+      pattern: new RegExp(`\\bCREATE\\s+DOMAIN\\s+(${SQL_QUALIFIED_NAME})`, 'gi'),
+      kind: 'd'
+    }
+  ];
+
+  for (const { pattern, kind } of typePatterns) {
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(cleaned)) !== null) {
+      types.set(normalizeIdentifier(match[1]), kind);
+    }
+  }
+
+  const routinePattern = new RegExp(
+    `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?(FUNCTION|PROCEDURE)\\s+(${SQL_QUALIFIED_NAME})\\s*\\(`,
+    'gi'
+  );
+
+  let routineMatch: RegExpExecArray | null;
+  while ((routineMatch = routinePattern.exec(cleaned)) !== null) {
+    const openParenIndex = cleaned.indexOf('(', routineMatch.index + routineMatch[0].length - 1);
+    if (openParenIndex === -1) continue;
+
+    const paren = extractParenthesized(cleaned, openParenIndex);
+    if (!paren) continue;
+
+    const name = normalizeIdentifier(routineMatch[2]);
+    const args = normalizeArgumentList(paren.content);
+    routines.add(`${name}(${args})`);
+  }
+
+  return { relations, routines, types };
+}
+
+export function deriveExpectedSchemaObjects(migrations: MigrationFile[]): ExpectedSchemaObjects {
+  const result: ExpectedSchemaObjects = {
+    relations: new Map(),
+    routines: new Set(),
+    types: new Map()
+  };
+
+  for (const migration of migrations) {
+    const extracted = extractSchemaObjects(migration.sql);
+    for (const [name, kind] of extracted.relations) result.relations.set(name, kind);
+    for (const signature of extracted.routines) result.routines.add(signature);
+    for (const [name, kind] of extracted.types) result.types.set(name, kind);
+  }
+
+  return result;
+}
+
+interface ActualRelationRow {
+  name: string;
+  kind: string;
+  extension_owned: boolean;
+}
+
+interface ActualRoutineRow {
+  name: string;
+  args: string;
+  extension_owned: boolean;
+}
+
+interface ActualTypeRow {
+  name: string;
+  kind: string;
+  extension_owned: boolean;
+}
+
+interface RangeRow {
+  range_name: string;
+  multirange_name: string;
+}
+
+async function compareSchemaObjects(client: Client, expected: ExpectedSchemaObjects): Promise<string[]> {
+  const problems: string[] = [];
+
+  // Relationen inklusive Typvergleich
+  const relationResult = await client.query<ActualRelationRow>(`
+    SELECT c.relname AS name, c.relkind AS kind,
+           EXISTS (
+             SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_class'::regclass
+                AND d.objid = c.oid
+                AND d.deptype = 'e'
+           ) AS extension_owned
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = 'public'
        AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
-       AND c.relname <> ALL($1::text[])
-       AND NOT EXISTS (
-         SELECT 1 FROM pg_depend d
-          WHERE d.classid = 'pg_class'::regclass
-            AND d.objid = c.oid
-            AND d.deptype = 'e'
-       )
-  `,
-    [[...EXPECTED_TABLES, HISTORY_TABLE]]
-  );
+  `);
 
-  const routineResult = await client.query<UnexpectedSchemaObject>(
-    `
-    SELECT p.proname AS name, 'Funktion/Prozedur' AS kind
+  const actualRelations = new Map<string, string>();
+  for (const row of relationResult.rows) {
+    if (row.name === HISTORY_TABLE || row.extension_owned) continue;
+    actualRelations.set(row.name, row.kind);
+
+    const expectedKind = expected.relations.get(row.name);
+    if (!expectedKind) {
+      problems.push(
+        `Unerwartetes Objekt im Schema public: ${RELATION_KIND_LABELS[row.kind] ?? row.kind} "${row.name}"`
+      );
+    } else if (expectedKind !== row.kind) {
+      problems.push(
+        `Relation "${row.name}" hat Typ "${RELATION_KIND_LABELS[row.kind] ?? row.kind}" statt ` +
+          `"${RELATION_KIND_LABELS[expectedKind] ?? expectedKind}"`
+      );
+    }
+  }
+
+  for (const [name, kind] of expected.relations) {
+    if (!actualRelations.has(name)) {
+      problems.push(`Erwartete Relation fehlt: ${RELATION_KIND_LABELS[kind] ?? kind} "${name}"`);
+    }
+  }
+
+  // Routinen inklusive Signatur
+  const routineResult = await client.query<ActualRoutineRow>(`
+    SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS args,
+           EXISTS (
+             SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_proc'::regclass
+                AND d.objid = p.oid
+                AND d.deptype = 'e'
+           ) AS extension_owned
       FROM pg_proc p
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
-       AND p.proname <> ALL($1::text[])
-       AND NOT EXISTS (
-         SELECT 1 FROM pg_depend d
-          WHERE d.classid = 'pg_proc'::regclass
-            AND d.objid = p.oid
-            AND d.deptype = 'e'
-       )
-  `,
-    [EXPECTED_ROUTINE_NAMES]
-  );
+  `);
 
-  const typeResult = await findUnexpectedCustomTypes(client);
+  const actualRoutines = new Set<string>();
+  for (const row of routineResult.rows) {
+    if (row.extension_owned) continue;
 
-  return [
-    ...relationResult.rows,
-    ...routineResult.rows,
-    ...typeResult.map((type) => ({ kind: type.kind, name: type.typname }))
-  ].sort((a, b) => `${a.kind} ${a.name}`.localeCompare(`${b.kind} ${b.name}`));
-}
+    const signature = `${row.name}(${normalizeArgumentList(row.args)})`;
+    actualRoutines.add(signature);
 
-interface UnexpectedCustomType {
-  typname: string;
-  kind: string;
-}
+    if (!expected.routines.has(signature)) {
+      problems.push(
+        `Unerwartetes Objekt im Schema public: Funktion/Prozedur "${row.name}" mit Signatur "${signature}"`
+      );
+    }
+  }
 
-/**
- * Ermittelt unerwartete benutzerdefinierte Typen im Schema `public`.
- *
- * Bewusst NICHT gemeldet werden:
- * - automatisch erzeugte Zeilentypen von Tabellen, partitionierten Tabellen,
- *   Views, Materialized Views und Fremdtabellen (relkind r/p/v/m/f),
- * - Array-Typen (typtype 'b'),
- * - Typen, die zu einer PostgreSQL-Erweiterung gehören (pg_depend.deptype = 'e').
- *
- * Gemeldet werden eigenständige Composite Types ('c'), Enums ('e'),
- * Domains ('d'), Range-Typen ('r') und Multirange-Typen ('m').
- */
-async function findUnexpectedCustomTypes(client: Client): Promise<UnexpectedCustomType[]> {
-  const result = await client.query<UnexpectedCustomType>(`
-    SELECT t.typname,
-           CASE t.typtype
-             WHEN 'e' THEN 'Enum'
-             WHEN 'd' THEN 'Domain'
-             WHEN 'c' THEN 'Zusammengesetzter Typ'
-             WHEN 'r' THEN 'Range-Typ'
-             WHEN 'm' THEN 'Multirange-Typ'
-             ELSE t.typtype::text
-           END AS kind
+  for (const signature of expected.routines) {
+    if (!actualRoutines.has(signature)) {
+      problems.push(`Erwartete Routine fehlt: ${signature}`);
+    }
+  }
+
+  // Typen inklusive automatischer Multirange-Typen
+  const rangeResult = await client.query<RangeRow>(`
+    SELECT r.rngtypid::regtype::text AS range_name,
+           r.rngmultitypid::regtype::text AS multirange_name
+      FROM pg_range r
+  `);
+
+  const allowedMultiranges = new Set<string>();
+  for (const row of rangeResult.rows) {
+    const rangeName = normalizeIdentifier(row.range_name);
+    if (expected.types.get(rangeName) === 'r') {
+      allowedMultiranges.add(normalizeIdentifier(row.multirange_name));
+    }
+  }
+
+  const typeResult = await client.query<ActualTypeRow>(`
+    SELECT t.typname AS name, t.typtype AS kind,
+           EXISTS (
+             SELECT 1 FROM pg_depend d
+              WHERE d.classid = 'pg_type'::regclass
+                AND d.objid = t.oid
+                AND d.deptype = 'e'
+           ) AS extension_owned
       FROM pg_type t
       JOIN pg_namespace n ON n.oid = t.typnamespace
       LEFT JOIN pg_class rel ON rel.oid = t.typrelid
      WHERE n.nspname = 'public'
        AND (
          t.typtype IN ('e', 'd', 'r', 'm')
-         -- Eigenständige Composite Types haben einen pg_class-Eintrag mit relkind 'c'.
-         -- Zeilentypen von Tabellen/Views/Fremdtabellen (relkind r/p/v/m/f) werden
-         -- über die Relationsprüfung abgedeckt und hier ausgeschlossen.
          OR (t.typtype = 'c' AND (rel.oid IS NULL OR rel.relkind = 'c'))
        )
-       AND NOT EXISTS (
-         SELECT 1
-           FROM pg_depend d
-          WHERE d.classid = 'pg_type'::regclass
-            AND d.objid = t.oid
-            AND d.deptype = 'e'
-       )
-     ORDER BY t.typname
   `);
-  return result.rows;
+
+  const actualTypes = new Map<string, string>();
+  for (const row of typeResult.rows) {
+    if (row.extension_owned) continue;
+    if (row.kind === 'm' && allowedMultiranges.has(row.name)) continue;
+
+    actualTypes.set(row.name, row.kind);
+
+    const expectedKind = expected.types.get(row.name);
+    if (!expectedKind) {
+      problems.push(
+        `Unerwartetes Objekt im Schema public: ${TYPE_KIND_LABELS[row.kind] ?? row.kind} "${row.name}"`
+      );
+    } else if (expectedKind !== row.kind) {
+      problems.push(
+        `Typ "${row.name}" hat Typ "${TYPE_KIND_LABELS[row.kind] ?? row.kind}" statt ` +
+          `"${TYPE_KIND_LABELS[expectedKind] ?? expectedKind}"`
+      );
+    }
+  }
+
+  for (const [name, kind] of expected.types) {
+    if (!actualTypes.has(name)) {
+      problems.push(`Erwarteter Typ fehlt: ${TYPE_KIND_LABELS[kind] ?? kind} "${name}"`);
+    }
+  }
+
+  return problems;
 }
 
 async function inspectSchema(client: Client): Promise<SchemaInspection> {
@@ -870,28 +1209,6 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
     const appliedRows = await readAppliedMigrations(client);
     verifyAppliedMigrations(appliedRows, migrations);
 
-    const maxAppliedVersion = appliedRows.reduce(
-      (max, row) => Math.max(max, parseInt(row.version, 10)),
-      0
-    );
-
-    // Die statische Objekt-Whitelist beschreibt exakt den Stand nach 001–004.
-    // Sind bereits neuere, diesem Runner unbekannte Migrationen angewendet,
-    // würden deren Objekte fälschlich als fremd gelten. In diesem Fall wird
-    // die Whitelist-Prüfung übersprungen; die Prüfsummen gelten weiterhin.
-    if (maxAppliedVersion <= BASELINE_MAX_VERSION) {
-      const unexpectedObjects = await findUnexpectedSchemaObjects(client);
-      if (unexpectedObjects.length > 0) {
-        const details = unexpectedObjects
-          .map((object) => `Unerwartetes Objekt im Schema public: ${object.kind} "${object.name}"`)
-          .join('; ');
-        throw new Error(
-          `Bestehende Datenbank enthält unerwartete Schemaobjekte. ${details}. ` +
-            'Abbruch, um keine Migrationen auf einem unbekannten Schema auszuführen.'
-        );
-      }
-    }
-
     const appliedVersions = new Set(appliedRows.map((row) => parseInt(row.version, 10)));
 
     if (appliedRows.length === 0) {
@@ -933,6 +1250,23 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
           `[MIGRATION] Bestehende Datenbank vollständig verifiziert. Migrationen 001–004 als Baseline übernommen: ${baselined.join(', ')}`
         );
       }
+    }
+
+    // Erwartete Schemaobjekte ausschließlich aus den tatsächlich angewendeten
+    // Migrationen ableiten. Noch nicht angewendete Migrationen werden nicht
+    // als vorhanden vorausgesetzt.
+    const appliedMigrationsForObjects = migrations.filter((migration) =>
+      appliedVersions.has(migration.numericVersion)
+    );
+    const expectedObjects = deriveExpectedSchemaObjects(appliedMigrationsForObjects);
+    const objectProblems = await compareSchemaObjects(client, expectedObjects);
+
+    if (objectProblems.length > 0) {
+      throw new Error(
+        'Bestehende Datenbank enthält unerwartete oder fehlende Schemaobjekte. ' +
+          `${describeProblems(objectProblems)}. ` +
+          'Abbruch, um keine Migrationen auf einem unbekannten Schema auszuführen.'
+      );
     }
 
     for (const migration of migrations) {
