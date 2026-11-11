@@ -40,10 +40,24 @@ if (knownInsecureSecrets.includes(parsedEnv.data.JWT_SECRET)) {
   }
 }
 
-// Im Produktivbetrieb darf CORS_ORIGIN kein Wildcard sein
-if (parsedEnv.data.NODE_ENV === 'production' && parsedEnv.data.CORS_ORIGIN === '*') {
-  console.error('[PRODUKTIONSABBRUCH] CORS_ORIGIN darf in der Produktionsumgebung kein Wildcard "*" sein.');
+// Parsen der CORS-Origins: Bereinigung von Leerzeichen, Validierung und Wildcard-Prüfung
+const rawCors = parsedEnv.data.CORS_ORIGIN;
+export const parsedCorsOrigins: string[] = rawCors
+  .split(',')
+  .map((origin) => origin.trim())
+  .filter((origin) => origin.length > 0);
+
+if (parsedCorsOrigins.length === 0) {
+  console.error('[PRODUKTIONSABBRUCH] CORS_ORIGIN enthält keine gültigen Ursprünge.');
   process.exit(1);
 }
 
-export const env = parsedEnv.data;
+if (parsedEnv.data.NODE_ENV === 'production' && parsedCorsOrigins.includes('*')) {
+  console.error('[PRODUKTIONSABBRUCH] CORS_ORIGIN darf in der Produktionsumgebung kein Wildcard "*" enthalten.');
+  process.exit(1);
+}
+
+export const env = {
+  ...parsedEnv.data,
+  CORS_ALLOWED_ORIGINS: parsedCorsOrigins
+};

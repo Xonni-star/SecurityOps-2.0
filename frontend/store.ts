@@ -137,7 +137,7 @@ interface SecurityOpsStore {
   isOnline: boolean;
   toggleNetworkSimulation: () => void;
   syncQueue: OfflineQueueItem[];
-  enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'>) => void;
+  enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'>) => Promise<boolean>;
   triggerManualSync: () => Promise<{ success: number; failed: number }>;
   resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => void;
   clearCompletedSyncs: () => void;
@@ -228,7 +228,7 @@ interface SecurityOpsStore {
   updateEmployee: (id: string, updates: Partial<Employee>) => void;
   addShift: (shift: Omit<Shift, 'id' | 'tenantId'>) => void;
   assignShiftEmployee: (shiftId: string, employeeId: string, employeeName: string) => void;
-  addGuardBookEntry: (entry: Omit<GuardBookEntry, 'id' | 'timestamp' | 'tenantId'>) => void;
+  addGuardBookEntry: (entry: Omit<GuardBookEntry, 'id' | 'timestamp' | 'tenantId'>) => Promise<boolean>;
   updateGuardBookStage: (id: string, stage: GuardBookEntry['stage'], note?: string) => void;
   resolveGuardBookEntry: (id: string, note: string) => void;
   acknowledgeSOP: (sopId: string) => void;
@@ -284,7 +284,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     set({ currentUserRole: role, currentUserName: name, currentUserId: uId });
   },
 
-  // Standardmäßig 'dashboard' laden für sofortige sichtbare Leitstellen-Darstellung
   activeTab: 'dashboard',
   setActiveTab: (tab) => set({ activeTab: tab }),
 
@@ -377,7 +376,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   ],
 
-  enqueueOfflineAction: (item) => {
+  enqueueOfflineAction: async (item) => {
     const queueEntry: OfflineQueueItem = {
       ...item,
       id: `queue-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
@@ -386,40 +385,65 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       status: 'pending'
     };
 
-    if (typeof offlineStorage !== 'undefined' && offlineStorage.enqueueOffline) {
-      offlineStorage.enqueueOffline({
-        id: queueEntry.id,
-        tenantId: queueEntry.tenantId,
-        storeName: queueEntry.entityType,
-        action: queueEntry.action,
-        data: queueEntry.payload,
-        timestamp: queueEntry.createdAt,
-        synced: false
-      }).catch(console.error);
-    }
+    try {
+      if (typeof offlineStorage !== 'undefined' && offlineStorage.enqueueOffline) {
+        await offlineStorage.enqueueOffline({
+          id: queueEntry.id,
+          tenantId: queueEntry.tenantId,
+          storeName: queueEntry.entityType,
+          action: queueEntry.action,
+          data: queueEntry.payload,
+          timestamp: queueEntry.createdAt,
+          synced: false
+        });
+      }
 
-    set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
+      set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
+      return true;
+    } catch (err: any) {
+      console.error('[OFFLINE ENQUEUE FAILED]', err);
+      // Eintrag als FEHLGESCHLAGEN markieren, nicht verschlucken!
+      const failedEntry: OfflineQueueItem = {
+        ...queueEntry,
+        status: 'failed',
+        errorMessage: err?.message || 'Speicherfehler in IndexedDB'
+      };
+      set((state) => ({ syncQueue: [failedEntry, ...state.syncQueue] }));
+      get().addNotification(
+        'Offline-Speicherfehler',
+        `Daten konnten nicht lokal gesichert werden: ${err?.message}`,
+        'alert'
+      );
+      return false;
+    }
   },
 
   triggerManualSync: async () => {
     const { syncQueue, isOnline } = get();
     if (!isOnline) {
-      return { success: 0, failed: syncQueue.filter(q => q.status === 'pending').length };
+      return { success: 0, failed: syncQueue.filter((q) => q.status === 'pending').length };
     }
 
     let successCount = 0;
     let failedCount = 0;
 
-    const updated = syncQueue.map((item) => {
-      if (item.status === 'pending') {
-        successCount++;
-        if (typeof offlineStorage !== 'undefined' && offlineStorage.markSynced) {
-          offlineStorage.markSynced(item.id).catch(console.error);
+    const updated = await Promise.all(
+      syncQueue.map(async (item) => {
+        if (item.status === 'pending') {
+          try {
+            if (typeof offlineStorage !== 'undefined' && offlineStorage.markSynced) {
+              await offlineStorage.markSynced(item.id);
+            }
+            successCount++;
+            return { ...item, status: 'synced' as SyncStatus, errorMessage: undefined };
+          } catch (err: any) {
+            failedCount++;
+            return { ...item, status: 'failed' as SyncStatus, errorMessage: err?.message };
+          }
         }
-        return { ...item, status: 'synced' as SyncStatus };
-      }
-      return item;
-    });
+        return item;
+      })
+    );
 
     set({ syncQueue: updated });
     return { success: successCount, failed: failedCount };
@@ -939,7 +963,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   assignShiftEmployee: (shiftId, employeeId, employeeName) => {
-    const { isOnline, currentTenantId, enqueueOfflineAction, employees, shifts } = get();
+    const { isOnline, currentTenantId, enqueueOfflineAction, employees } = get();
     const emp = employees.find((e) => e.id === employeeId);
 
     let conflictReason: string | undefined = undefined;
@@ -974,7 +998,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
-  addGuardBookEntry: (entry) => {
+  addGuardBookEntry: async (entry) => {
     const { currentTenantId, isOnline, enqueueOfflineAction, addTask, addNotification, addAuditLog } = get();
     const entryId = `gb-${Date.now()}`;
     const newEntry: GuardBookEntry = {
@@ -1016,6 +1040,20 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       );
     }
 
+    // Wenn Offline: Speichere primär in IndexedDB und verifiziere Erfolg
+    if (!isOnline) {
+      const savedOk = await enqueueOfflineAction({
+        tenantId: currentTenantId,
+        entityType: 'guardbook',
+        action: 'CREATE',
+        payload: newEntry
+      });
+
+      if (!savedOk) {
+        return false; // Verhindert falsche Erfolgsmeldung im Frontend
+      }
+    }
+
     set((state) => ({
       guardBook: [newEntry, ...state.guardBook]
     }));
@@ -1030,14 +1068,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       ipAddress: '194.25.101.44'
     });
 
-    if (!isOnline) {
-      enqueueOfflineAction({
-        tenantId: currentTenantId,
-        entityType: 'guardbook',
-        action: 'CREATE',
-        payload: newEntry
-      });
-    }
+    return true;
   },
 
   updateGuardBookStage: (id, stage, note) => {

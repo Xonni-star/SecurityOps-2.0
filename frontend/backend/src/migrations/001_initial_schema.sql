@@ -1,15 +1,18 @@
 -- ==============================================================================
--- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 3 FINALE HÄRTUNG)
+-- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 4 HÄRTUNG)
 -- Least-Privilege Rollentrennung, Append-Only Trigger, Composite FKs & RLS
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Erstelle unprivilegierten Anwendungsbenutzer ohne Superuser- oder Bypass-Rechte
+-- Erstelle unprivilegierten Anwendungsbenutzer und stelle sicher, dass dieser
+-- auch bei bereits bestehenden Installationen konsequent NOSUPERUSER und NOBYPASSRLS besitzt!
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'secops_app_user') THEN
         CREATE ROLE secops_app_user WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
+    ELSE
+        ALTER ROLE secops_app_user WITH NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
     END IF;
 END $$;
 
@@ -292,18 +295,12 @@ DECLARE
     ];
 BEGIN
     FOREACH tbl IN ARRAY rls_tables LOOP
-        -- RLS aktivieren und zwingend auch für Tabellenbesitzer erzwingen
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
         
-        -- Alte Policies entfernen
         EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_permissive ON %I;', tbl);
         EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_policy ON %I;', tbl);
         
-        -- Strikte Mandanten-Isolierung:
-        -- Gibt ausschließlich Datensätze frei, wenn app.current_tenant exakt gesetzt ist
-        -- und mit der tenant_id des Datensatzes übereinstimmt.
-        -- Ohne gesetzten Mandantenkontext (NULL oder leer) liefert USING false und WITH CHECK false!
         EXECUTE format('
             CREATE POLICY tenant_isolation_permissive ON %I
                 AS PERMISSIVE
@@ -325,7 +322,6 @@ END $$;
 
 -- ==============================================================================
 -- ECHTER APPEND-ONLY SCHUTZ FÜR WACHBUCH & REVISIONEN AUF DATENBANKEBENE
--- Verhindert nachträgliche Manipulation von Kernfeldern und Löschungen physisch
 -- ==============================================================================
 
 CREATE OR REPLACE FUNCTION prevent_guardbook_tampering()
@@ -334,8 +330,6 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         RAISE EXCEPTION 'Löschen von Einträgen in guardbook_entries ist nach DIN 77200 unzulässig (Append-Only Integrität).';
     ELSIF TG_OP = 'UPDATE' THEN
-        -- Nur kontrollierte Aktualisierungen von stage, resolved und resolution_note zulässig.
-        -- Kernfelder wie entry_timestamp, category, title, description, guard_id, site_id, tenant_id, client_mutation_id dürfen NIEMALS geändert werden!
         IF OLD.entry_timestamp != NEW.entry_timestamp OR
            OLD.category != NEW.category OR
            OLD.title != NEW.title OR
@@ -370,20 +364,13 @@ FOR EACH ROW EXECUTE FUNCTION prevent_revision_tampering();
 
 -- ==============================================================================
 -- LEAST-PRIVILEGE RECHTE FÜR DEN UNPRIVILEGIERTEN ANWENDUNGSBENUTZER
--- Keine Vergabe von ALL PRIVILEGES! Nur minimal notwendige Rechte.
 -- ==============================================================================
 
 REVOKE ALL ON SCHEMA public FROM secops_app_user;
 GRANT USAGE ON SCHEMA public TO secops_app_user;
 
--- Lese- und Schreibrechte für operative Tabellen
 GRANT SELECT, INSERT, UPDATE ON clients, sites, employees, employee_qualifications, shifts, guardbook_entries, tasks, audit_logs, users, user_sessions, user_roles, roles, permissions, role_permissions, tenants TO secops_app_user;
-
--- Revisionshistorie: Streng auf SELECT und INSERT limitiert (KEIN UPDATE, KEIN DELETE)
 GRANT SELECT, INSERT ON guardbook_revisions TO secops_app_user;
-
--- Sequenzen für ID-Generierung
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO secops_app_user;
 
--- Physischer Ausschluss von DELETE-Rechten auf Wachbuch und Revisionen
 REVOKE DELETE ON guardbook_entries, guardbook_revisions FROM secops_app_user;

@@ -1,5 +1,5 @@
-import express from 'express';
-import cors from 'cors';
+import express, { Request, Response } from 'express';
+import cors, { CorsOptions } from 'cors';
 import helmet from 'helmet';
 import { env } from './config/env';
 import { pool } from './config/database';
@@ -12,11 +12,31 @@ import * as guardbookController from './controllers/guardbookController';
 export const app = express();
 
 app.use(helmet());
-app.use(cors({ origin: env.CORS_ORIGIN }));
+
+// Dynamische CORS-Whitelist Prüfung
+export const corsOptions: CorsOptions = {
+  origin: (origin, callback) => {
+    // Erlaube Anfragen ohne Origin (z. B. serverseitige Aufrufe, Curl, mobile PWA App-Shell)
+    if (!origin) {
+      return callback(null, true);
+    }
+
+    if (env.CORS_ALLOWED_ORIGINS.includes('*') || env.CORS_ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+
+    callback(new Error(`CORS-Fehler: Der Ursprung '${origin}' ist nicht in der Whitelist autorisiert.`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '15mb' }));
 
 // Health- & Readiness-Endpunkt
-app.get('/api/v1/health', async (req, res) => {
+app.get('/api/v1/health', async (_req: Request, res: Response) => {
   try {
     const dbRes = await pool.query('SELECT 1 as healthy');
     res.json({

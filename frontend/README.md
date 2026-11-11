@@ -4,37 +4,35 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ---
 
-## 1. Architektur & Sicherheitsgrundlagen (Schritt 3 Finale)
+## 1. Architektur & Sicherheitsgrundlagen (Schritt 4)
 
-- **Backend**: Node.js & TypeScript mit Express REST-API (`/api/v1`).
-- **Least-Privilege Datenbank**: PostgreSQL 16+ mit unprivilegiertem Benutzer `secops_app_user` (`NOSUPERUSER NOBYPASSRLS`).
+- **Backend-Laufzeitumgebung**: Node.js >= 18.0 & TypeScript mit Express REST-API (`/api/v1`).
+- **PostgreSQL 16+ Least-Privilege Rollentrennung**:
+  - `secops_admin` (nur für Schema-Migrationen & DDL).
+  - `secops_app_user` (`NOSUPERUSER, NOBYPASSRLS, NOCREATEROLE, NOCREATEDB`) für die Backend-Laufzeit.
+  - Physisches `REVOKE DELETE ON guardbook_entries, guardbook_revisions` für den Anwendungsbenutzer.
 - **Mandantentrennung & RLS**:
-  - `tenant_id` als UUID auf allen mandantenspezifischen Tabellen.
   - Physische Durchsetzung von **PostgreSQL Row-Level Security (RLS)** via `ENABLE ROW LEVEL SECURITY` und `FORCE ROW LEVEL SECURITY`.
   - Transaktionssichere Mandantenbindung via `SET LOCAL app.current_tenant`. Ohne gesetzten Mandantenkontext werden physisch 0 Datensätze geliefert.
   - Composite Foreign Keys `(parent_id, tenant_id)` verhindern mandantenübergreifende Fremdschlüsselverknüpfungen (z. B. Schichten auf fremde Mitarbeiter oder Schlüssel an fremde Inhaber).
 - **Append-Only Revisionssicherheit**:
   - PostgreSQL-Trigger `prevent_guardbook_tampering()` und `prevent_revision_tampering()` blockieren nachträgliche Manipulationen und Löschungen physisch auf Datenbankebene.
-- **Authentifizierung & Sessions**:
-  - Passwort-Hashing mit **Argon2id**.
-  - Persistente Sitzungsverwaltung und Token-Widerruf über `user_sessions`.
-  - Atomarer Brute-Force Schutz gegen Race Conditions.
-  - Eindeutige Mandantenauswahl bei Mehrfachzugehörigkeiten.
-  - Granulare serverseitige Rollen- und Rechteprüfung (RBAC) **ohne pauschale Systemadministrator-Bypasses**.
-  - Atomare Wachbuch-Idempotenz via `INSERT ... ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`.
+- **CORS-Sicherheit**:
+  - Strikte Whitelist erlaubter Ursprünge; kein Wildcard `*` im Produktivbetrieb.
+- **Offline-First mit echter Fehlerbehandlung**:
+  - IndexedDB Outbox/Inbox Vault (`SecurityOps2_OfflineVault`) mit echter Fehlerüberwachung bei vollem Speicher oder blockierter DB.
 
 ---
 
 ## 2. Installations- und Startanleitung
 
 ### 2.1 Voraussetzungen
-- Node.js >= 18.0.0
-- Docker & Docker Compose v2
-- PostgreSQL 16+
+- Node.js >= 18.0.0 & npm >= 9.0.0
+- PostgreSQL 16+ (lokal installiert oder via Container)
 
 ### 2.2 Schnellstart
 ```bash
-# 1. Repository klonen
+# 1. Repository klonen und in Verzeichnis wechseln
 git clone https://github.com/Xonni-star/SecurityOps-2.0.git
 cd SecurityOps-2.0
 
@@ -42,21 +40,18 @@ cd SecurityOps-2.0
 npm install --prefix backend
 npm install
 
-# 3. Umgebungsvariablen anlegen
+# 3. Umgebungsvariablen für das Backend anlegen
 cp backend/.env.example backend/.env
 # In backend/.env sichere Passwörter, JWT_SECRET und CORS_ORIGIN eintragen!
 
-# 4. PostgreSQL-Container starten (gebunden an 127.0.0.1)
-POSTGRES_PASSWORD=MeinGeheimesPasswort docker compose -f deploy/docker-compose.yml up -d db
-
-# 5. Datenbankmigrationen und Seed ausführen
+# 4. Datenbankmigrationen und Entwicklungs-Seed ausführen
 npm run migrate --prefix backend
 npm run seed --prefix backend
 
-# 6. Automatisierte Integrationstests ausführen
+# 5. Automatisierte Integrationstests ausführen
 npm test --prefix backend
 
-# 7. Backend-Server starten (Port 8000)
+# 6. Backend-Server starten (Port 8000)
 npm run dev --prefix backend
 ```
 
@@ -64,6 +59,6 @@ npm run dev --prefix backend
 
 ## 3. Testdurchführung
 ```bash
-# Führt alle 13 Sicherheits-, RLS-, Append-Only- und Idempotenz-Tests aus:
+# Führt alle Sicherheits-, RLS-, Least-Privilege-, Append-Only- und CORS-Tests aus:
 npm test --prefix backend
 ```
