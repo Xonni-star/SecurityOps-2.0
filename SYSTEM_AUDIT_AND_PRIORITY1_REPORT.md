@@ -250,3 +250,92 @@
 | Produktionsreife | 3/10 |
 
 **Gesamtstatus:** Die Integration ist über Kunden, Objekte, Mitarbeiter und Wachbuch (Lesen) hinausgewachsen, aber **weiterhin nicht vollständig**. Das Projekt ist noch kein produktionsreifes System im Sinne der Abnahmekriterien.
+
+---
+
+# 11. Nachtrag: Dritte Integrationstranche (2026-11-11)
+
+**Code-Commit:** `131773608f371c8b6e26d9d10365acb71c67a579`
+**CI-Run:** `43072597716` – Root, Frontend und Backend erfolgreich
+**CD-Run:** `43072866276` – Release-Paket erfolgreich
+**Artefakte:** `frontend-dist` 341.253 B, `backend-dist` 68.082 B, Release 409.941 B
+
+## 11.1 Neu implementiert
+
+### Backend
+- Vollständige CRUD-Endpunkte für **Schichten**:
+  - `GET/POST /api/v1/shifts`, `PATCH/DELETE /api/v1/shifts/:id`
+  - Berechtigungen `shifts:read` / `shifts:manage`
+- Vollständige CRUD-Endpunkte für **Schlüssel**:
+  - `GET/POST /api/v1/keys`, `PATCH/DELETE /api/v1/keys/:id`
+  - Berechtigungen `keys:read` / `keys:manage`
+- Vollständige CRUD-Endpunkte für **Aufgaben**:
+  - `GET/POST /api/v1/tasks`, `PATCH/DELETE /api/v1/tasks/:id`
+  - Berechtigungen `tasks:read` / `tasks:manage`
+- Alle Schreiboperationen laufen mandantengetrennt über `withTenantTransaction` und RLS.
+- Versionsfeld `revision_version` wird bei Schicht-/Schlüssel-/Aufgabenänderungen erhöht.
+
+### Frontend
+- Hydration aus PostgreSQL für Schichten, Schlüssel und Aufgaben.
+- Neue Mapper für `shifts`, `keys`, `tasks`.
+- Persistente Aktionen:
+  - `addShift` → `POST /shifts`
+  - `assignShiftEmployee` → `PATCH /shifts/:id`
+  - `issueKey` / `returnKey` → `PATCH /keys/:id`
+  - `addTask` → `POST /tasks`
+  - `toggleTaskStatus` → `PATCH /tasks/:id`
+- Lade-/Fehlerbehandlung über `Promise.allSettled`; Teilausfälle werden sichtbar gemeldet.
+
+### Tests
+- Backend: **122/122 Tests, 7/7 Suiten**.
+  - Neu: Schicht, Schlüssel und Aufgabe anlegen, nach erneutem Login laden, aktualisieren.
+  - Neu: Mandant B sieht diese Datensätze nicht.
+- Frontend: **14/14 Tests, 2/2 Dateien**.
+  - Neu: `addShift`, `assignShiftEmployee`, `addTask`, `toggleTaskStatus`, `issueKey`, `returnKey`.
+
+## 11.2 Aktualisierter Status
+
+| Bereich | Status |
+|---|---|
+| Kunden | Anlegen/Lesen persistiert; Ändern/Löschen offen |
+| Objekte | Anlegen/Lesen/Ändern persistiert; Archivieren/Löschen offen |
+| Mitarbeiter | Anlegen/Lesen/Ändern persistiert; Deaktivieren/Qualifikationen offen |
+| Schichten | **Anlegen/Lesen/Ändern/Löschen persistiert** |
+| Wachbuch | Lesen persistiert; Schreiben über Outbox/Sync; Revisionen/Stage teilweise lokal |
+| Schlüssel | **Anlegen/Lesen/Ändern/Löschen persistiert** |
+| Aufgaben | **Anlegen/Lesen/Ändern/Löschen persistiert** |
+| Dokumente/SOPs/Alarme | **keine Tabellen/Endpunkte** |
+| Übergaben/Streifen | lokal |
+| Benutzer/Rechte | keine Verwaltungs-API |
+| Offline-Sync | Outbox teilweise; nicht alle Module angebunden |
+| KI | weiterhin Browser-seitig; nicht serverseitig abgesichert |
+| Produktionsproxy | Caddy zeigt weiterhin auf den FastAPI-Stack |
+
+## 11.3 Verbleibende Arbeiten
+
+1. Migrationen und CRUD für Dokumente, SOPs, Alarme und Notfallpläne.
+2. Übergaben und Streifenkontrollen an API/DB anbinden.
+3. Offline-Outbox für Schichten, Schlüssel, Aufgaben und Stammdaten erweitern.
+4. Reconnect-Hydration und Konfliktauflösung für alle Module.
+5. Wachbuch-Revisionen/Stage serverseitig abschließen; PDF/CSV-Export.
+6. Benutzer-/Rechteverwaltung und serverseitige Berechtigungstests.
+7. Auth-Härtung: HttpOnly-Cookies, CSRF, Login-Rate-Limit.
+8. Serverseitige Gemini-Integration; API-Key aus dem Browser entfernen.
+9. Caddy/Deployment auf das TypeScript-Backend korrigieren.
+10. E2E-Tests A–H, Linting und Security-Scan.
+
+## 11.4 Vorläufige Bewertung (nicht final)
+
+| Kriterium | Note |
+|---|---|
+| Architektur | 6/10 |
+| Funktionalität | 5/10 |
+| Datenbank | 7/10 |
+| Mandantenfähigkeit | 7/10 |
+| Sicherheit | 5/10 |
+| Offlinefähigkeit | 5/10 |
+| Benutzerfreundlichkeit | 6/10 |
+| Testabdeckung | 7/10 |
+| Produktionsreife | 4/10 |
+
+**Gesamtstatus:** Die Kernmodule Kunden, Objekte, Mitarbeiter, Schichten, Schlüssel, Aufgaben und Wachbuch (Lesen) sind jetzt API-/PostgreSQL-gestützt. **Dokumente, SOPs, Alarme, Übergaben, Streifenkontrollen, Offline-Vollabdeckung, Auth-Härtung, KI-Serverseite und Deployment sind weiterhin offen.** Das Projekt ist **nicht vollständig produktionsreif**.
