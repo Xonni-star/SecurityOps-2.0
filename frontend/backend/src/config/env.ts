@@ -6,11 +6,10 @@ dotenv.config();
 const envSchema = z.object({
   PORT: z.string().default('8000').transform((val) => parseInt(val, 10)),
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  DATABASE_URL: z.string().min(10, 'DATABASE_URL muss zwingend konfiguriert sein (secops_app_user).'),
-  DATABASE_MIGRATION_URL: z.string().min(10).optional(),
+  DATABASE_URL: z.string().min(10, 'DATABASE_URL muss zwingend konfiguriert sein.'),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET muss mindestens 32 Zeichen lang sein.'),
   JWT_EXPIRES_IN: z.string().default('8h'),
-  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss explizit konfiguriert werden.'),
+  CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss explizit konfiguriert werden (kein ungesicherter Wildcard).'),
   RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10))
 });
 
@@ -41,45 +40,10 @@ if (knownInsecureSecrets.includes(parsedEnv.data.JWT_SECRET)) {
   }
 }
 
-// Aufgabe 4: CORS Origins strikt parsen, trimmen, Duplikate entfernen und URL-Validierung erzwingen
-const rawCors = parsedEnv.data.CORS_ORIGIN;
-const rawOriginsList = rawCors
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter((origin) => origin.length > 0);
-
-// Duplikate über Set eliminieren
-const uniqueOrigins = Array.from(new Set(rawOriginsList));
-
-// Wildcard '*' grundsätzlich verweigern
-if (uniqueOrigins.includes('*')) {
-  console.error('[SICHERHEITSABBRUCH] CORS_ORIGIN darf kein Wildcard "*" enthalten. Explizite Origins erforderlich.');
+// Im Produktivbetrieb darf CORS_ORIGIN kein Wildcard sein
+if (parsedEnv.data.NODE_ENV === 'production' && parsedEnv.data.CORS_ORIGIN === '*') {
+  console.error('[PRODUKTIONSABBRUCH] CORS_ORIGIN darf in der Produktionsumgebung kein Wildcard "*" sein.');
   process.exit(1);
 }
 
-// Validierung jedes Ursprungs als valide HTTP/HTTPS URL
-export const parsedCorsOrigins: string[] = [];
-for (const origin of uniqueOrigins) {
-  try {
-    const url = new URL(origin);
-    if (!['http:', 'https:'].includes(url.protocol)) {
-      throw new Error(`Ungültiges Protokoll '${url.protocol}'`);
-    }
-    // Herkunft ohne trailing slash normalisieren
-    parsedCorsOrigins.push(url.origin);
-  } catch (err: any) {
-    console.error(`[CORS CONFIG ERROR] Ungültige Origin-URL '${origin}': ${err.message}`);
-    process.exit(1);
-  }
-}
-
-if (parsedCorsOrigins.length === 0) {
-  console.error('[PRODUKTIONSABBRUCH] Keine gültigen CORS-Origins konfiguriert.');
-  process.exit(1);
-}
-
-export const env = {
-  ...parsedEnv.data,
-  DATABASE_MIGRATION_URL: parsedEnv.data.DATABASE_MIGRATION_URL || parsedEnv.data.DATABASE_URL,
-  CORS_ALLOWED_ORIGINS: parsedCorsOrigins
-};
+export const env = parsedEnv.data;

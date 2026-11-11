@@ -1,5 +1,5 @@
-import express, { Request, Response } from 'express';
-import cors, { CorsOptions } from 'cors';
+import express from 'express';
+import cors from 'cors';
 import helmet from 'helmet';
 import { env } from './config/env';
 import { pool } from './config/database';
@@ -8,36 +8,15 @@ import { authenticateJwt, requirePermission } from './middleware/auth';
 import * as authController from './controllers/authController';
 import * as clientController from './controllers/clientController';
 import * as guardbookController from './controllers/guardbookController';
-import * as syncController from './controllers/syncController';
 
 export const app = express();
 
 app.use(helmet());
-
-// Dynamische CORS-Whitelist Prüfung
-export const corsOptions: CorsOptions = {
-  origin: (origin, callback) => {
-    // Erlaube Anfragen ohne Origin (z. B. serverseitige Aufrufe, Curl, mobile PWA App-Shell)
-    if (!origin) {
-      return callback(null, true);
-    }
-
-    if (env.CORS_ALLOWED_ORIGINS.includes(origin)) {
-      return callback(null, true);
-    }
-
-    callback(new Error(`CORS-Fehler: Der Ursprung '${origin}' ist nicht in der Whitelist autorisiert.`));
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Tenant-ID']
-};
-
-app.use(cors(corsOptions));
+app.use(cors({ origin: env.CORS_ORIGIN }));
 app.use(express.json({ limit: '15mb' }));
 
 // Health- & Readiness-Endpunkt
-app.get('/api/v1/health', async (_req: Request, res: Response) => {
+app.get('/api/v1/health', async (req, res) => {
   try {
     const dbRes = await pool.query('SELECT 1 as healthy');
     res.json({
@@ -64,8 +43,5 @@ app.post('/api/v1/customers', authenticateJwt, requirePermission('customers:crea
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
 app.post('/api/v1/logbook/revisions', authenticateJwt, requirePermission('logbook:create'), guardbookController.addGuardbookRevision);
-
-// Offline-Synchronisationsrouten (Aufgabe 1)
-app.post('/api/v1/sync/push', authenticateJwt, syncController.syncPush);
 
 app.use(errorHandler);

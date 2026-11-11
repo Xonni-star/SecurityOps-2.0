@@ -5,9 +5,12 @@ import {
   Building2,
   Clock,
   AlertTriangle,
+  CheckCircle2,
   Calendar,
   Key,
+  ArrowUpRight,
   TrendingUp,
+  FileWarning,
   Building
 } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, BarChart, Bar } from 'recharts';
@@ -36,31 +39,36 @@ export const Dashboard: React.FC = () => {
     isOnline
   } = useSecurityStore();
 
-  const tenant = getCurrentTenant() || {
-    id: 'tenant-frankfurt',
-    name: 'Securitas & Wache Frankfurt GmbH',
-    bwrRegisterId: 'BWR-HE-99201',
-    licenseTier: 'Enterprise (Unbegrenzt)'
-  };
+  const tenant = getCurrentTenant();
+  const employees = getTenantEmployees();
+  const sites = getTenantSites();
+  const clients = getTenantClients();
+  const shifts = getTenantShifts();
+  const guardBook = getTenantGuardBook();
+  const keys = getTenantKeys();
 
-  const employees = typeof getTenantEmployees === 'function' ? (getTenantEmployees() || []) : [];
-  const sites = typeof getTenantSites === 'function' ? (getTenantSites() || []) : [];
-  const clients = typeof getTenantClients === 'function' ? (getTenantClients() || []) : [];
-  const shifts = typeof getTenantShifts === 'function' ? (getTenantShifts() || []) : [];
-  const guardBook = typeof getTenantGuardBook === 'function' ? (getTenantGuardBook() || []) : [];
-  const keys = typeof getTenantKeys === 'function' ? (getTenantKeys() || []) : [];
-
-  const activeEmployees = employees.filter((e) => e && e.status === 'Aktiv').length;
-  const sickEmployees = employees.filter((e) => e && e.status === 'Krank').length;
-  const openShifts = shifts.filter((s) => s && s.status === 'Offen').length;
-  const criticalIncidents = guardBook.filter((g) => g && (g.priority === 'Kritisch' || g.priority === 'Dringend') && !g.resolved);
-  const issuedKeys = keys.filter((k) => k && k.status === 'Ausgegeben').length;
+  const activeEmployees = employees.filter((e) => e.status === 'Aktiv').length;
+  const sickEmployees = employees.filter((e) => e.status === 'Krank').length;
+  const openShifts = shifts.filter((s) => s.status === 'Offen').length;
+  const criticalIncidents = guardBook.filter((g) => g.priority === 'Kritisch' && !g.resolved);
+  const issuedKeys = keys.filter((k) => k.status === 'Ausgegeben').length;
 
   const siteHoursData = sites.map((s) => ({
-    name: s && s.name ? s.name.split(' ')[0] : 'Objekt',
-    soll: ((s?.requiredGuardsDay || 2) + (s?.requiredGuardsNight || 2)) * 12,
-    ist: ((s?.requiredGuardsDay || 2) + (s?.requiredGuardsNight || 2)) * 12
+    name: s.name.split(' ')[0],
+    soll: (s.requiredGuardsDay + s.requiredGuardsNight) * 12,
+    ist: (s.requiredGuardsDay + s.requiredGuardsNight) * 12
   }));
+
+  const expiringQualifications = employees.flatMap((emp) =>
+    emp.qualifications
+      .filter((q) => {
+        const exp = new Date(q.expiryDate).getTime();
+        const now = new Date().getTime();
+        const daysLeft = (exp - now) / (1000 * 3600 * 24);
+        return daysLeft <= 90 || !q.verified;
+      })
+      .map((q) => ({ employeeName: `${emp.firstName} ${emp.lastName}`, qualification: q }))
+  );
 
   return (
     <div className="space-y-6">
@@ -175,7 +183,7 @@ export const Dashboard: React.FC = () => {
       </div>
 
       {/* Critical Alert Bar if alarms exist */}
-      {criticalIncidents.length > 0 && criticalIncidents[0] && (
+      {criticalIncidents.length > 0 && (
         <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-rose-500/20 text-rose-400 rounded-lg animate-pulse">
@@ -201,7 +209,7 @@ export const Dashboard: React.FC = () => {
 
       {/* Charts Section */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 p-5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-sm min-w-0">
+        <div className="lg:col-span-2 p-5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-sm">
           <div className="flex items-center justify-between mb-4">
             <div>
               <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
@@ -237,7 +245,7 @@ export const Dashboard: React.FC = () => {
         </div>
 
         {/* Site Hours Distribution */}
-        <div className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-sm flex flex-col justify-between min-w-0">
+        <div className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-sm flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-2">
               <h3 className="text-sm font-bold text-slate-200">Soll/Ist Stunden (Mandant)</h3>
