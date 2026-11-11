@@ -134,18 +134,45 @@ Datenbank: isoliertes PostgreSQL 16.15 (Docker, Port 55432), Testdatenbank `secu
 
 ## 8. GitHub-Actions-Läufe
 
-Tatsächliche Ergebnisse für Commit `b42d7ec`:
+Es werden ausschließlich durch GitHub Actions belegte Ergebnisse dokumentiert. Die Läufe sind nach Commit getrennt, da beide Commits eigene, vollständige CI-/CD-Läufe ausgelöst haben.
+
+### 8.1 Lauf für `b42d7ec` (Verifikations-Commit)
 
 | Workflow | Run-ID | Job | Ergebnis | Dauer |
 |---|---|---|---|---|
-| SecurityOps 2.0 CI | `43043287310` | Root – npm ci, Strukturprüfung, Gesamtstart | **success** | 44 s |
-| SecurityOps 2.0 CI | `43043287310` | Frontend – npm ci, Vitest, Produktions-Build | **success** | 14 s |
-| SecurityOps 2.0 CI | `43043287310` | Backend – PostgreSQL 16, Migration, Build, Jest | **success** | 1 m 9 s |
-| SecurityOps 2.0 CD | `43043488960` | Release-Paket aus CI-Artefakten bauen | **success** | – |
+| SecurityOps 2.0 CI | [`43043287310`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043287310) | Root – npm ci, Strukturprüfung, Gesamtstart | **success** | 44 s |
+| SecurityOps 2.0 CI | [`43043287310`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043287310) | Frontend – npm ci, Vitest, Produktions-Build | **success** | 14 s |
+| SecurityOps 2.0 CI | [`43043287310`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043287310) | Backend – PostgreSQL 16, Migration, Build, Jest | **success** | 1 m 9 s |
+| SecurityOps 2.0 CD | [`43043488960`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043488960) | Release-Paket aus CI-Artefakten bauen | **success** | – |
 
-Gesamtergebnis des CI-Laufs: **success**. Alle drei Jobs liefen unabhängig voneinander (eigene Runner, eigene PostgreSQL-Services für Root und Backend) und lieferten eigene Logs und Ergebnisse.
+Gesamtergebnis CI: **success** (alle drei Jobs).
 
-Der Root-Job führte dabei nachweislich aus:
+### 8.2 Lauf für `b370ac4` (aktueller Commit)
+
+| Workflow | Run-ID | Job | Ergebnis |
+|---|---|---|---|
+| SecurityOps 2.0 CI | [`43043570746`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043570746) | Root – npm ci, Strukturprüfung, Gesamtstart | **success** |
+| SecurityOps 2.0 CI | [`43043570746`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043570746) | Frontend – npm ci, Vitest, Produktions-Build | **success** |
+| SecurityOps 2.0 CI | [`43043570746`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043570746) | Backend – PostgreSQL 16, Migration, Build, Jest | **success** |
+| SecurityOps 2.0 CD | [`43043863088`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43043863088) | Release-Paket aus CI-Artefakten bauen | **success** |
+
+Gesamtergebnis CI: **success** (alle drei Jobs). CD: **success**.
+
+### 8.3 Artefakte für `b370ac4` (tatsächlich geprüft)
+
+Abgefragt über die GitHub-API für die jeweiligen Runs:
+
+| Run | Artefakt | Größe | Status |
+|---|---|---|---|
+| CI `43043570746` | `frontend-dist` | 337.989 Bytes | vorhanden, nicht abgelaufen |
+| CI `43043570746` | `backend-dist` | 36.529 Bytes | vorhanden, nicht abgelaufen |
+| CD `43043863088` | `securityops-release-b370ac4ddd0e4b6df26ef3f2fe056a8342fcdc26` | 375.061 Bytes | vorhanden, nicht abgelaufen |
+
+Die Artefakte des CI-Laufs wurden am 2026-11-11 um 14:58:31 UTC (`frontend-dist`) bzw. 14:59:27 UTC (`backend-dist`) erzeugt, das Release-Paket um 14:59:53 UTC. Es wurden keine weiteren Ergebnisse behauptet.
+
+### 8.4 Ausführung im Root-Job (belegt durch den CI-Lauf)
+
+Der Root-Job des Laufs `43043570746` führte aus:
 - `npm ci` und `npm ls --depth=0`
 - Installation von Frontend und Backend
 - Migration und Seed auf der isolierten CI-Datenbank
