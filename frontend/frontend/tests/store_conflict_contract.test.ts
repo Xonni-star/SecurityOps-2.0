@@ -3,7 +3,7 @@ import { useSecurityStore } from '../store';
 import { apiClient, ApiError } from '../services/apiClient';
 import { offlineVault } from '../services/indexedDbService';
 
-describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.13 - Vitest)', () => {
+describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.15 - Vitest)', () => {
   const queueId = `test-q-${Date.now()}`;
 
   beforeEach(() => {
@@ -42,8 +42,9 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     vi.restoreAllMocks();
   });
 
-  // Szenario 1: Gültige Serverantwort
+  // Szenario 1: Gültige Serverantwort (apiClient.post liefert bereits entpacktes data-Objekt zurück)
   test('1. Gültige Konfliktantwort mit data, applied: true und serverState entfernt Outbox und aktualisiert Store', async () => {
+    // apiClient.post entpackt envelope.data intern, daher liefert der Mock direkt das data-Objekt zurück
     vi.spyOn(apiClient, 'post').mockResolvedValueOnce({
       applied: true,
       clientUuid: queueId,
@@ -62,7 +63,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     await useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL');
 
     const state = useSecurityStore.getState();
-    // Outbox wurde erst nach erfolgreicher Serverquittung entfernt
+    // Outbox wurde erst nach erfolgreicher Serverbestätigung entfernt
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeUndefined();
     // Store wurde mit vollständigem serverState aktualisiert
     const task = state.tasks.find((t) => t.id === 'task-123');
@@ -71,7 +72,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     expect(task?.revisionVersion).toBe(3);
   });
 
-  // Szenario 2: Fehlendes Response-Objekt
+  // Szenario 2: Fehlendes Response-Objekt / null
   test('2. API liefert kein data-Objekt: Outbox bleibt unverändert erhalten, Fehler wird geworfen', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValueOnce(null as any);
     const markSyncedSpy = vi.spyOn(offlineVault, 'markSynced');
