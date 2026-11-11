@@ -430,10 +430,25 @@ async function findUnexpectedPublicObjects(client: Client): Promise<UnexpectedPu
      WHERE n.nspname = 'public'
     UNION ALL
     SELECT 'type'::text, t.typname,
-           CASE t.typtype WHEN 'e' THEN 'Enum' WHEN 'd' THEN 'Domain' ELSE t.typtype::text END
+           CASE t.typtype
+             WHEN 'e' THEN 'Enum'
+             WHEN 'd' THEN 'Domain'
+             WHEN 'c' THEN 'Zusammengesetzter Typ'
+             WHEN 'r' THEN 'Range-Typ'
+             WHEN 'm' THEN 'Multirange-Typ'
+             ELSE t.typtype::text
+           END AS kind
       FROM pg_type t
       JOIN pg_namespace n ON n.oid = t.typnamespace
-     WHERE n.nspname = 'public' AND t.typtype IN ('e', 'd')
+      LEFT JOIN pg_class rel ON rel.oid = t.typrelid
+     WHERE n.nspname = 'public'
+       AND (
+         t.typtype IN ('e', 'd', 'r', 'm')
+         -- Eigenständige Composite Types haben einen pg_class-Eintrag mit relkind 'c'.
+         -- Zeilentypen von Tabellen/Views/Fremdtabellen (relkind r/p/v/m/f) werden
+         -- bereits über die Relationsprüfung gemeldet und hier ausgeschlossen.
+         OR (t.typtype = 'c' AND (rel.oid IS NULL OR rel.relkind = 'c'))
+       )
     ORDER BY 1, 2
   `);
   return result.rows;

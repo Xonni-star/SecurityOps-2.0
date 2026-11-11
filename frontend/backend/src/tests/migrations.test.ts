@@ -561,4 +561,110 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const rows = await queryInDatabase<{ id: number; name: string }>(db, 'SELECT id, name FROM fremde_fdw_tabelle');
     expect(rows).toEqual([{ id: 1, name: 'fdw-zeile' }]);
   });
+
+  test('30. Eigenständiger Composite Type verhindert die Einstufung als leere Datenbank', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await queryInDatabase(db, 'CREATE TYPE fremder_composite AS (a INT, b TEXT)');
+
+    let message: string | null = null;
+    try {
+      await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toBeTruthy();
+    expect(message).toMatch(/Zusammengesetzter Typ "fremder_composite"/);
+    // Der Zeilentyp darf nicht zusätzlich als Tabelle/Relation gemeldet werden.
+    expect(message!.split('Zusammengesetzter Typ "fremder_composite"').length - 1).toBe(1);
+
+    const type = await queryInDatabase<{ typname: string | null }>(
+      db,
+      `SELECT to_regtype('public.fremder_composite')::text AS typname`
+    );
+    expect(type[0].typname).toBe('fremder_composite');
+
+    const history = await queryInDatabase<{ count: string }>(
+      db,
+      `SELECT COUNT(*)::text AS count FROM schema_migrations`
+    );
+    expect(history[0].count).toBe('0');
+  });
+
+  test('31. Eigenständiger Range Type verhindert die Einstufung als leere Datenbank', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await queryInDatabase(db, 'CREATE TYPE fremder_range AS RANGE (subtype = int4)');
+
+    let message: string | null = null;
+    try {
+      await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toBeTruthy();
+    expect(message).toMatch(/Range-Typ "fremder_range"/);
+
+    const type = await queryInDatabase<{ typname: string | null }>(
+      db,
+      `SELECT to_regtype('public.fremder_range')::text AS typname`
+    );
+    expect(type[0].typname).toBe('fremder_range');
+  });
+
+  test('32. Multirange Type (PostgreSQL 16) wird erkannt', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await queryInDatabase(db, 'CREATE TYPE fremder_range AS RANGE (subtype = int4)');
+
+    const multirange = await queryInDatabase<{ typname: string; typtype: string }>(
+      db,
+      `SELECT typname, typtype FROM pg_type
+        WHERE typnamespace = 'public'::regnamespace AND typname = 'fremder_multirange'`
+    );
+    expect(multirange).toHaveLength(1);
+    expect(multirange[0].typtype).toBe('m');
+
+    let message: string | null = null;
+    try {
+      await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toBeTruthy();
+    expect(message).toMatch(/Multirange-Typ "fremder_multirange"/);
+  });
+
+  test('33. Bestehende Objekte bleiben bei abgelehntem Composite Type unverändert', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await queryInDatabase(
+      db,
+      `CREATE TYPE bestands_typ AS (id INT);
+       CREATE TABLE bestandsdaten (id INT, wert TEXT);
+       INSERT INTO bestandsdaten VALUES (1, 'bleibt');`
+    );
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Zusammengesetzter Typ "bestands_typ"/);
+
+    const type = await queryInDatabase<{ typname: string | null }>(
+      db,
+      `SELECT to_regtype('public.bestands_typ')::text AS typname`
+    );
+    expect(type[0].typname).toBe('bestands_typ');
+
+    const rows = await queryInDatabase<{ wert: string }>(db, 'SELECT wert FROM bestandsdaten');
+    expect(rows[0].wert).toBe('bleibt');
+
+    const history = await queryInDatabase<{ count: string }>(
+      db,
+      `SELECT COUNT(*)::text AS count FROM schema_migrations`
+    );
+    expect(history[0].count).toBe('0');
+  });
 });
