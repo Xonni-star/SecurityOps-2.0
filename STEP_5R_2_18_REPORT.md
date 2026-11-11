@@ -135,12 +135,25 @@ PostgreSQL 16.15 (Docker, `postgres:16-alpine`, Port 55432):
 
 ## 9. GitHub-Actions-Verifikation
 
+### CI-Lauf 1 – `50aa109`
+
 - Run `43040321884` wurde automatisch durch den Push ausgelöst.
 - Beide Jobs **success**, alle Einzelschritte success (inkl. Container-Initialisierung, Migration, Seed, Jest).
 - Artefakte `frontend-dist` und `backend-dist` wurden erzeugt.
 - Warnungen (nicht fehlerhaft):
   - GitHub meldet die Deprecation von Node 20 für `actions/checkout@v4`, `actions/setup-node@v4`, `actions/upload-artifact@v4`; die Actions laufen bereits erzwungen auf Node 24.
   - Hinweis auf die geplante Umstellung von `ubuntu-latest` auf Ubuntu 26 (Oktober 2026).
+
+### CI-Lauf 2 – `26021df` (Berichts-Commit)
+
+- Run `43040787522`, ebenfalls **success** (beide Jobs).
+- Dieser Lauf bestätigt die Reproduzierbarkeit der Pipeline.
+
+### CD-Workflow
+
+- Run `43040835902`: **success**, Event `workflow_run`, Job „Release-Paket aus CI-Artefakten bauen“. Der Workflow wurde automatisch durch den erfolgreichen CI-Lauf ausgelöst.
+- Ein weiterer `workflow_run`-Lauf `43041029332` für denselben Commit wurde ebenfalls **success** abgeschlossen (Doppel-Trigger durch GitHub, beide Läufe fehlerfrei).
+- Damit ist die Kette CI → CD nachweislich aktiv.
 
 ---
 
