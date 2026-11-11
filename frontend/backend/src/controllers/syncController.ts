@@ -78,8 +78,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         // ----------------------------------------------------------------------
         // 0. ATOMARE TRANSACTION ADVISORY LOCKS GEGEN PARALLELE RACE CONDITIONS
         // ----------------------------------------------------------------------
-        // Sperrt den Schlüssel (tenant_id + client_mutation_id) transaktionsweit.
-        // Ein konkurrierender paralleler Request wartet, bis dieser Block committed ist.
         const lockKey = `${tenantId}:${mut.clientUuid}`;
         await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
 
@@ -94,7 +92,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         if (receiptRes.rows.length > 0) {
           const receipt = receiptRes.rows[0];
 
-          // Falls dieselbe Mutation-ID mit abweichendem Inhalt gesendet wurde -> REJECTED!
           if (receipt.payload_hash !== payloadHash) {
             results.push({
               clientUuid: mut.clientUuid,
@@ -106,7 +103,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
             continue;
           }
 
-          // Identisches Quittungsergebnis idempotent zurückgeben
           results.push(receipt.response_json as SyncResultItem);
           continue;
         }
@@ -190,7 +186,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               } else {
                 const note = mut.payload.correctionNote || 'Korrektur aus Offline-Synchronisation';
 
-                // Revision atomar mit eigener client_mutation_id einfügen (Deduplizierung)
                 await client.query(
                   `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note, client_mutation_id)
                    VALUES ($1, $2, $3, $4, $5)
@@ -263,7 +258,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           } else if (mut.action === 'UPDATE') {
             const shiftId = mut.payload.id;
 
-            // Atomares Update mit direktem Vergleich: revision_version = baseVersion
             const updateRes = await client.query(
               `UPDATE shifts 
                SET employee_id = COALESCE($1, employee_id),
@@ -306,7 +300,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           } else if (mut.action === 'DELETE') {
             const shiftId = mut.payload.id;
 
-            // Atomares Löschen mit Versionsprüfung
             const delRes = await client.query(
               'DELETE FROM shifts WHERE id = $1 AND tenant_id = $2 AND revision_version = $3 RETURNING id',
               [shiftId, tenantId, mut.baseVersion]
@@ -387,7 +380,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           } else if (mut.action === 'UPDATE') {
             const taskId = mut.payload.id;
 
-            // ATOMARER VERSIONSSCHUTZ: Prüfung von revision_version = baseVersion direkt in SQL
             const updateRes = await client.query(
               `UPDATE tasks 
                SET status = $1, revision_version = revision_version + 1
@@ -672,6 +664,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
       }
     });
 
+    // Einheitsvertrag: ResponseEnvelope mit data-Array
     res.json({
       success: true,
       message: `${results.length} Synchronisationsoperation(en) verarbeitet`,
@@ -685,9 +678,10 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 /**
  * POST /api/v1/sync/conflicts/resolve
  * Reale Server-Auflösung von Synchronisationskonflikten:
+ * - Liefert ResponseEnvelope mit data: { applied: boolean, serverState: any, clientUuid: string, entityType: string, strategy: string }
  * - USE_LOCAL: Übernimmt den lokalen Stand atomar nur nach Überprüfung von expectedVersion
  * - USE_SERVER: Liefert den tatsächlichen, vollständigen Serverstand zurück
- * Revisionssichere Protokollierung in audit_logs.
+ * - Revisionssichere Protokollierung in audit_logs.
  */
 export async function resolveSyncConflict(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -714,14 +708,24 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         const currentTask = taskCheck.rows[0];
 
         if (body.strategy === 'USE_LOCAL') {
-          // Atomare Versionsprüfung: Darf nur übernehmen, wenn Serverversion exakt expectedVersion entspricht!
           const updRes = await client.query(
             `UPDATE tasks 
              SET status = COALESCE($1, status),
+                 title = COALESCE($2, title),
+                 due_date = COALESCE($3, due_date),
+                 priority = COALESCE($4, priority),
                  revision_version = revision_version + 1
-             WHERE id = $2 AND tenant_id = $3 AND revision_version = $4
+             WHERE id = $5 AND tenant_id = $6 AND revision_version = $7
              RETURNING id, title, assigned_to_name, site_name, due_date, priority, status, category, revision_version`,
-            [body.localPayload?.status || null, taskId, tenantId, body.expectedVersion]
+            [
+              body.localPayload?.status || null,
+              body.localPayload?.title || null,
+              body.localPayload?.dueDate || null,
+              body.localPayload?.priority || null,
+              taskId,
+              tenantId,
+              body.expectedVersion
+            ]
           );
 
           if (updRes.rows.length === 0) {
@@ -759,7 +763,14 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
                  revision_version = revision_version + 1
              WHERE id = $4 AND tenant_id = $5 AND revision_version = $6
              RETURNING id, site_id, employee_id, shift_date, start_time, end_time, type, status, required_qualification, conflict_reason, revision_version`,
-            [body.localPayload?.status || null, body.localPayload?.employeeId || null, body.localPayload?.conflictReason || null, shiftId, tenantId, body.expectedVersion]
+            [
+              body.localPayload?.status || null,
+              body.localPayload?.employeeId || null,
+              body.localPayload?.conflictReason || null,
+              shiftId,
+              tenantId,
+              body.expectedVersion
+            ]
           );
 
           if (updRes.rows.length === 0) {
@@ -821,7 +832,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         }
       }
 
-      // 4. ENTITY: GUARDBOOK (DIN 77200 APPEND-ONLY)
+      // 4. ENTITY: GUARDBOOK (DIN 77200 APPEND-ONLY MIT IDEMPOTENTER CLIENT-UUID)
       else if (body.entityType === 'guardbook') {
         const entryId = body.localPayload?.id || body.clientUuid;
         const gbCheck = await client.query(
@@ -836,18 +847,29 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         const currentGb = gbCheck.rows[0];
 
         if (body.strategy === 'USE_LOCAL') {
-          // Revisionssicheres Ergänzen als neue Revision!
+          // Revisionssicheres Ergänzen als neue Revision mit stabiler client_mutation_id aus body.clientUuid
           const note = body.localPayload?.correctionNote || 'Korrektur aus manueller Konfliktauflösung';
           await client.query(
             `INSERT INTO guardbook_revisions (tenant_id, entry_id, author_name, note, client_mutation_id)
              VALUES ($1, $2, $3, $4, $5)
              ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`,
-            [tenantId, entryId, userEmail, note, `rev-conf-${Date.now()}`]
+            [tenantId, entryId, userEmail, note, body.clientUuid]
           );
 
+          // Hole alle Revisionen des Eintrags
+          const revs = await client.query(
+            'SELECT id, timestamp, author_name, note FROM guardbook_revisions WHERE entry_id = $1 AND tenant_id = $2 ORDER BY created_at ASC',
+            [entryId, tenantId]
+          );
+          currentGb.revisions = revs.rows;
           actualServerData = currentGb;
           updated = true;
         } else if (body.strategy === 'USE_SERVER') {
+          const revs = await client.query(
+            'SELECT id, timestamp, author_name, note FROM guardbook_revisions WHERE entry_id = $1 AND tenant_id = $2 ORDER BY created_at ASC',
+            [entryId, tenantId]
+          );
+          currentGb.revisions = revs.rows;
           actualServerData = currentGb;
           updated = true;
         }
@@ -863,11 +885,17 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       );
     });
 
+    // Einheitlicher Response-Vertrag: data-Envelope enthält applied und vollständigen serverState
     res.json({
       success: true,
       message: `Konflikt ${body.clientUuid} erfolgreich auf dem Server aufgelöst (${body.strategy}).`,
-      applied: updated,
-      serverState: actualServerData
+      data: {
+        applied: updated,
+        clientUuid: body.clientUuid,
+        entityType: body.entityType,
+        strategy: body.strategy,
+        serverState: actualServerData
+      }
     });
   } catch (error) {
     next(error);

@@ -152,6 +152,7 @@ export interface Shift {
   actualStart?: string;
   actualEnd?: string;
   conflictReason?: string;
+  revisionVersion?: number;
 }
 
 export type IncidentWorkflowStage =
@@ -238,6 +239,7 @@ export interface KeyItem {
   issuedAt?: string;
   expectedReturn?: string;
   isOverdue?: boolean;
+  revisionVersion?: number;
 }
 
 export interface TaskItem {
@@ -253,6 +255,7 @@ export interface TaskItem {
   status: 'Offen' | 'In Bearbeitung' | 'Erledigt';
   category: 'Audit' | 'Wartung' | 'Nachschulung' | 'Kundenanforderung' | 'Vorfallsbearbeitung';
   offlineCreated?: boolean;
+  revisionVersion?: number;
 }
 
 export interface ManagedDocument {
@@ -285,8 +288,10 @@ export interface OfflineQueueItem {
   status: SyncStatus;
   errorMessage?: string;
   conflictDetails?: {
-    serverVersion: any;
-    localVersion: any;
+    serverVersion: number;
+    clientVersion: number;
+    serverPayload?: any;
+    clientPayload?: any;
   };
 }
 
@@ -310,56 +315,14 @@ export interface GlobalSearchResult {
   targetTab: string;
 }
 
-export type AutomationTriggerEvent =
-  | 'QUALIFICATION_EXPIRING'
-  | 'CONTRACT_EXPIRING'
-  | 'KEY_OVERDUE'
-  | 'INCIDENT_CREATED'
-  | 'SHIFT_CONFLICT_DETECTED'
-  | 'SOP_UNACKNOWLEDGED'
-  | 'TASK_OVERDUE'
-  | 'SCHEDULED_CRON';
-
-export type ConditionOperator =
-  | 'EQUALS'
-  | 'NOT_EQUALS'
-  | 'LESS_THAN_DAYS'
-  | 'GREATER_THAN'
-  | 'CONTAINS'
-  | 'IN_ARRAY';
-
-export interface AutomationCondition {
-  field: string;
-  operator: ConditionOperator;
-  value: any;
-}
-
-export type ActionType =
-  | 'CREATE_TASK'
-  | 'SEND_NOTIFICATION'
-  | 'DISPATCH_EMAIL'
-  | 'ESCALATE_INCIDENT'
-  | 'SET_KEY_OVERDUE';
-
-export interface AutomationActionConfig {
-  type: ActionType;
-  targetRole?: UserRole;
-  targetRecipient?: string;
-  taskTitleTemplate?: string;
-  taskPriority?: 'Niedrig' | 'Mittel' | 'Hoch';
-  notificationTitle?: string;
-  notificationMessage?: string;
-  notificationSeverity?: 'INFO' | 'WARNUNG' | 'ALARM' | 'KRITISCH';
-}
-
 export interface AutomationRule {
   id: string;
   tenantId?: string;
   name: string;
   description: string;
-  trigger: AutomationTriggerEvent;
-  conditions: AutomationCondition[];
-  actions: AutomationActionConfig[];
+  trigger: string;
+  conditions: any[];
+  actions: any[];
   active: boolean;
   isTemplate?: boolean;
   category: 'Personal' | 'Verträge' | 'Wachbuch' | 'Schlüssel' | 'Dienstplan' | 'QM';
@@ -486,10 +449,6 @@ export interface ControllingKPIs {
   din77200ComplianceScore: number;
 }
 
-// ==============================================================================
-// PHASE 11: MOBILE MITARBEITER-APP & OBJEKTSTEUERUNG
-// ==============================================================================
-
 export interface ShiftSwapRequest {
   id: string;
   tenantId: string;
@@ -545,4 +504,20 @@ export interface ResponseEnvelope<T = any> {
   message: string;
   data?: T;
   errors?: string[];
+}
+
+export interface ConflictResolutionPayload {
+  clientUuid: string;
+  entityType: 'task' | 'shift' | 'key' | 'guardbook';
+  strategy: 'USE_LOCAL' | 'USE_SERVER';
+  expectedVersion: number;
+  localPayload?: Record<string, any>;
+}
+
+export interface ConflictResolutionResult {
+  applied: boolean;
+  clientUuid: string;
+  entityType: string;
+  strategy: 'USE_LOCAL' | 'USE_SERVER';
+  serverState: any;
 }

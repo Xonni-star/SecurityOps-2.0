@@ -27,7 +27,8 @@ import {
   ControllingKPIs,
   ShiftSwapRequest,
   PatrolScanEvent,
-  ShiftHandoverProtocol
+  ShiftHandoverProtocol,
+  ConflictResolutionResult
 } from './types';
 import {
   initialTenants,
@@ -466,38 +467,108 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   /**
-   * Vollständige Konfliktauflösung im Frontend:
-   * Führt einen echten API-Aufruf an POST /api/v1/sync/conflicts/resolve durch.
-   * Erst nach bestätigter Serverquittung wird die Outbox-Mutation als erledigt markiert.
+   * Vollständige Konfliktauflösung im Frontend (Schritt 5R.2.3):
+   * - Sendet echten API-Aufruf an POST /api/v1/sync/conflicts/resolve.
+   * - Validiert apiClient Rückgabe: data.applied === true und data.serverState müssen vorliegen.
+   * - Aktualisiert den vollständigen Datensatz (task, shift, key, guardbook) im Zustand-Store.
+   * - Entfernt die Mutation erst nach bestätigtem Serverabschluss aus der lokalen Outbox.
+   * - Bei Fehlern bleibt der Konflikt in der Outbox erhalten und wirft sauber einen Fehler.
    */
   resolveConflict: async (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER'): Promise<void> => {
     const { syncQueue } = get();
     const item = syncQueue.find((q) => q.id === queueId);
-    if (!item) return;
+    if (!item) {
+      throw new Error(`Konflikt mit ID ${queueId} nicht in der lokalen Warteschlange gefunden.`);
+    }
 
     try {
-      const response = await apiClient.post('/sync/conflicts/resolve', {
+      const response = await apiClient.post<ConflictResolutionResult>('/sync/conflicts/resolve', {
         clientUuid: item.id,
         entityType: item.entityType,
         strategy: resolution,
-        expectedVersion: item.conflictDetails?.serverVersion || 2,
+        expectedVersion: item.conflictDetails?.serverVersion || 1,
         localPayload: item.payload
       });
 
-      if (response && response.serverState) {
-        // Bei USE_SERVER: Übernehme den tatsächlichen Serverstand in den Store
-        if (item.entityType === 'task') {
-          set((state) => ({
-            tasks: state.tasks.map((t) => (t.id === response.serverState.id ? { ...t, status: response.serverState.status } : t))
-          }));
-        } else if (item.entityType === 'shift') {
-          set((state) => ({
-            shifts: state.shifts.map((s) => (s.id === response.serverState.id ? { ...s, status: response.serverState.status } : s))
-          }));
-        }
+      if (!response || response.applied !== true || !response.serverState) {
+        throw new Error('Ungültige Serverantwort: Konflikt konnte serverseitig nicht bestätigt werden.');
       }
 
-      // Erst jetzt aus der Outbox entfernen!
+      const serverState = response.serverState;
+
+      // Vollständige Übernahme aller Datenfelder in den lokalen Store
+      if (item.entityType === 'task') {
+        set((state) => ({
+          tasks: state.tasks.map((t) =>
+            t.id === serverState.id
+              ? {
+                  ...t,
+                  title: serverState.title ?? t.title,
+                  assignedToName: serverState.assigned_to_name ?? t.assignedToName,
+                  siteName: serverState.site_name ?? t.siteName,
+                  dueDate: serverState.due_date ? String(serverState.due_date).slice(0, 10) : t.dueDate,
+                  priority: serverState.priority ?? t.priority,
+                  status: serverState.status ?? t.status,
+                  category: serverState.category ?? t.category,
+                  revisionVersion: serverState.revision_version ?? t.revisionVersion
+                }
+              : t
+          )
+        }));
+      } else if (item.entityType === 'shift') {
+        set((state) => ({
+          shifts: state.shifts.map((s) =>
+            s.id === serverState.id
+              ? {
+                  ...s,
+                  siteId: serverState.site_id ?? s.siteId,
+                  employeeId: serverState.employee_id ?? s.employeeId,
+                  date: serverState.shift_date ? String(serverState.shift_date).slice(0, 10) : s.date,
+                  startTime: serverState.start_time ?? s.startTime,
+                  endTime: serverState.end_time ?? s.endTime,
+                  type: serverState.type ?? s.type,
+                  status: serverState.status ?? s.status,
+                  requiredQualification: serverState.required_qualification ?? s.requiredQualification,
+                  conflictReason: serverState.conflict_reason ?? s.conflictReason,
+                  revisionVersion: serverState.revision_version ?? s.revisionVersion
+                }
+              : s
+          )
+        }));
+      } else if (item.entityType === 'key') {
+        set((state) => ({
+          keys: state.keys.map((k) =>
+            k.id === serverState.id
+              ? {
+                  ...k,
+                  keyNumber: serverState.key_number ?? k.keyNumber,
+                  label: serverState.label ?? k.label,
+                  status: serverState.status ?? k.status,
+                  currentHolderId: serverState.current_holder_id ?? k.currentHolderId,
+                  issuedAt: serverState.issued_at ?? k.issuedAt,
+                  expectedReturn: serverState.expected_return ?? k.expectedReturn,
+                  revisionVersion: serverState.revision_version ?? k.revisionVersion
+                }
+              : k
+          )
+        }));
+      } else if (item.entityType === 'guardbook') {
+        set((state) => ({
+          guardBook: state.guardBook.map((gb) =>
+            gb.id === serverState.id
+              ? {
+                  ...gb,
+                  stage: serverState.stage ?? gb.stage,
+                  resolved: serverState.resolved ?? gb.resolved,
+                  resolutionNote: serverState.resolution_note ?? gb.resolutionNote,
+                  revisions: serverState.revisions ?? gb.revisions
+                }
+              : gb
+          )
+        }));
+      }
+
+      // Erst nach erfolgreicher Validierung und State-Aktualisierung aus der lokalen Outbox löschen!
       await offlineVault.markSynced(queueId);
 
       set((state) => ({
@@ -506,14 +577,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
       get().addNotification(
         'Konflikt aufgelöst',
-        `Konflikt ${queueId} wurde erfolgreich mit Strategie ${resolution} aufgelöst.`,
+        `Konflikt ${queueId} (${item.entityType}) wurde erfolgreich via ${resolution} aufgelöst und synchronisiert.`,
         'info'
       );
     } catch (err: any) {
       console.error('[CONFLICT RESOLUTION FAILED]', err);
       get().addNotification(
         'Fehler bei Konfliktauflösung',
-        `Server konnte Konflikt nicht auflösen: ${err?.message || 'Netzwerkfehler'}`,
+        `Server konnte Konflikt nicht auflösen: ${err?.message || 'Netzwerkfehler'}. Eintrag bleibt in Outbox erhalten.`,
         'alert'
       );
       throw err;
@@ -649,7 +720,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   testRunRule: (id) => {
     const rule = get().automations.find((a) => a.id === id);
     if (!rule) return { matched: false, actions: [], durationMs: 0 };
-    return { matched: true, actions: rule.actions.map((a) => a.type), durationMs: 25 };
+    return { matched: true, actions: rule.actions.map((a: any) => a.type), durationMs: 25 };
   },
 
   runAutomationsNow: () => {
