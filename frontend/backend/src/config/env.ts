@@ -24,11 +24,12 @@ if (!parsedEnv.success) {
   process.exit(1);
 }
 
-// Prüfen auf unsichere Default-Werte
+// Prüfung auf unsichere Default- oder Beispielwerte
 const knownInsecureSecrets = [
   'SEC-OPS-2025-ENTERPRISE-ARGON2-SUPER-SECURE-KEY-VAULT-32CHARS',
   'HIER_MINDESTENS_32_ZEICHEN_LANGES_KRYPTOGRAFISCHES_GEHEIMNIS_EINTRAGEN',
-  'CHANGEME_HEX64_SECRET_KEY_FOR_JWT_AUTHENTICATION'
+  'CHANGEME_HEX64_SECRET_KEY_FOR_JWT_AUTHENTICATION',
+  'test_secret_key_hex_64_characters_minimum_security_length_token_vault'
 ];
 
 if (knownInsecureSecrets.includes(parsedEnv.data.JWT_SECRET)) {

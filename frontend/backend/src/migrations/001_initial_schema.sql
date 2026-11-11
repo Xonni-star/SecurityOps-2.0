@@ -1,10 +1,11 @@
 -- ==============================================================================
--- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (PHASE 1 KORRIGIERT)
+-- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 3 KORRIGIERT)
+-- Erzwingt unprivilegierten Datenbankbenutzer, Composite FKs und striktes RLS
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 
--- Erstelle separaten, unprivilegierten Anwendungsbenutzer falls nicht existent
+-- Erstelle unprivilegierten Anwendungsbenutzer ohne Superuser- oder Bypass-Rechte
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'secops_app_user') THEN
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. KUNDEN UND OBJEKTE (MIT COMPOSITE FOREIGN KEYS ZUR MANDANTENTRENNUNG)
+-- 2. KUNDEN UND OBJEKTE (MIT COMPOSITE FOREIGN KEYS)
 CREATE TABLE IF NOT EXISTS clients (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -159,7 +160,7 @@ CREATE TABLE IF NOT EXISTS employee_qualifications (
         REFERENCES employees(id, tenant_id) ON DELETE CASCADE
 );
 
--- 4. DIENSTPLANUNG
+-- 4. DIENSTPLANUNG (COMPOSITE FOREIGN KEYS GEGEN CROSS-TENANT-ZUWEISUNG)
 CREATE TABLE IF NOT EXISTS shifts (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -176,7 +177,9 @@ CREATE TABLE IF NOT EXISTS shifts (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
     CONSTRAINT fk_shifts_site_tenant FOREIGN KEY (site_id, tenant_id)
-        REFERENCES sites(id, tenant_id) ON DELETE CASCADE
+        REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT fk_shifts_employee_tenant FOREIGN KEY (employee_id, tenant_id)
+        REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
 -- 5. DIGITALES WACHBUCH & VORFÄLLE (APPEND-ONLY MIT IDEMPOTENZ-CONSTRAINT)
@@ -204,7 +207,7 @@ CREATE TABLE IF NOT EXISTS guardbook_entries (
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
--- Revisionshistorie für Korrekturen (Append-Only)
+-- Revisionshistorie für nachträgliche Ergänzungen (Append-Only)
 CREATE TABLE IF NOT EXISTS guardbook_revisions (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -217,7 +220,7 @@ CREATE TABLE IF NOT EXISTS guardbook_revisions (
         REFERENCES guardbook_entries(id, tenant_id) ON DELETE CASCADE
 );
 
--- 6. SCHLÜSSELVERWALTUNG
+-- 6. SCHLÜSSELVERWALTUNG (COMPOSITE FOREIGN KEYS)
 CREATE TABLE IF NOT EXISTS keys (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -233,7 +236,9 @@ CREATE TABLE IF NOT EXISTS keys (
     PRIMARY KEY (id, tenant_id),
     CONSTRAINT uq_key_number_tenant UNIQUE (tenant_id, key_number),
     CONSTRAINT fk_keys_site_tenant FOREIGN KEY (site_id, tenant_id)
-        REFERENCES sites(id, tenant_id) ON DELETE CASCADE
+        REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT fk_keys_holder_tenant FOREIGN KEY (current_holder_id, tenant_id)
+        REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
 -- 7. AUFGABEN
@@ -298,7 +303,7 @@ BEGIN
         -- Strikte Mandanten-Isolierung:
         -- Gibt ausschließlich Datensätze frei, wenn app.current_tenant exakt gesetzt ist
         -- und mit der tenant_id des Datensatzes übereinstimmt.
-        -- Ohne gesetzten Mandantenkontext (NULL/leer) liefert USING false und WITH CHECK false!
+        -- Ohne gesetzten Mandantenkontext (NULL oder leer) liefert USING false und WITH CHECK false!
         EXECUTE format('
             CREATE POLICY tenant_isolation_permissive ON %I
                 AS PERMISSIVE

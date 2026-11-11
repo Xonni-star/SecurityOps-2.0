@@ -81,6 +81,12 @@ export async function authenticateJwt(req: Request, res: Response, next: NextFun
   }
 }
 
+/**
+ * RBAC Berechtigungsprüfung:
+ * WICHTIG (Schritt 3): Keine pauschale Sonderbehandlung 'role === Systemadministrator'.
+ * Alle Benutzer, einschließlich Administratoren, benötigen die ausdrückliche Berechtigung
+ * aus der Datenbank für die jeweilige Ressource/Aktion.
+ */
 export function requirePermission(permissionCode: string) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {
@@ -88,10 +94,9 @@ export function requirePermission(permissionCode: string) {
       return;
     }
 
-    const { role, permissions } = req.user;
+    const { permissions } = req.user;
 
-    // Nur der Systemadministrator oder Träger der expliziten Berechtigung haben Zugriff
-    if (role === 'Systemadministrator' || permissions.includes(permissionCode)) {
+    if (permissions.includes(permissionCode)) {
       next();
       return;
     }

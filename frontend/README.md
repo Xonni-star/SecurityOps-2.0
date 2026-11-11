@@ -4,19 +4,20 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ---
 
-## 1. Phase 1: Architektur & Technische Grundlage
+## 1. Architektur & Sicherheitsgrundlagen (Schritt 3)
 
 - **Backend**: Node.js & TypeScript mit Express REST-API (`/api/v1`).
-- **Datenbank**: PostgreSQL 16+ mit parametrisierten Abfragen (`pg`) und Verbindungspooling.
-- **Mandantentrennung**:
+- **Datenbank**: PostgreSQL 16+ mit unprivilegiertem Benutzer (`secops_app_user`, `NOSUPERUSER NOBYPASSRLS`).
+- **Mandantentrennung & RLS**:
   - `tenant_id` als UUID auf allen mandantenspezifischen Tabellen.
   - Physische Durchsetzung von **PostgreSQL Row-Level Security (RLS)** via `ENABLE ROW LEVEL SECURITY` und `FORCE ROW LEVEL SECURITY`.
-  - Transaktionssichere Mandantenbindung via `SET LOCAL app.current_tenant`.
-  - Composite Foreign Keys `(parent_id, tenant_id)` verhindern mandantenübergreifende Fremdschlüsselverknüpfungen auf Datenbankebene.
-- **Authentifizierung**:
+  - Transaktionssichere Mandantenbindung via `SET LOCAL app.current_tenant`. Ohne gesetzten Mandantenkontext werden 0 Datensätze geliefert.
+  - Composite Foreign Keys `(parent_id, tenant_id)` verhindern mandantenübergreifende Fremdschlüsselverknüpfungen (z. B. Schichten auf fremde Mitarbeiter oder Schlüssel an fremde Inhaber).
+- **Authentifizierung & Sessions**:
   - Passwort-Hashing mit **Argon2id**.
-  - Signierte JWT-Tokens mit Benutzer- und Mandantenkontext.
-  - Granulare serverseitige Rollen- und Rechteprüfung (RBAC).
+  - Persistente Sitzungsverwaltung und Token-Widerruf über `user_sessions`.
+  - Granulare serverseitige Rollen- und Rechteprüfung (RBAC) **ohne pauschale Systemadministrator-Bypasses**.
+  - Atomare Wachbuch-Idempotenz via `INSERT ... ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING`.
 
 ---
 
@@ -39,15 +40,16 @@ npm install
 
 # 3. Umgebungsvariablen anlegen
 cp backend/.env.example backend/.env
+# In backend/.env sichere Passwörter und JWT_SECRET eintragen!
 
-# 4. PostgreSQL-Container starten
-docker compose -f deploy/docker-compose.yml up -d db
+# 4. PostgreSQL-Container starten (gebunden an 127.0.0.1)
+POSTGRES_PASSWORD=MeinGeheimesPasswort docker compose -f deploy/docker-compose.yml up -d db
 
 # 5. Datenbankmigrationen und Seed ausführen
 npm run migrate --prefix backend
 npm run seed --prefix backend
 
-# 6. Automatisierte Tests ausführen
+# 6. Automatisierte Integrationstests ausführen
 npm test --prefix backend
 
 # 7. Backend-Server starten (Port 8000)
@@ -56,8 +58,8 @@ npm run dev --prefix backend
 
 ---
 
-## 3. Testzugangsdaten (Entwicklungs-Seed)
-- **E-Mail**: `a.schmidt@ffm-sec.de`
-- **Passwort**: `SecOpsVault2025SecurePassword!`
-- **Mandant**: Securitas & Wache Frankfurt GmbH (`11111111-1111-1111-1111-111111111111`)
-- **Rolle**: Einsatzleitung
+## 3. Testdurchführung
+```bash
+# Führt alle 12 Sicherheits-, RLS- und Idempotenz-Tests aus:
+npm test --prefix backend
+```

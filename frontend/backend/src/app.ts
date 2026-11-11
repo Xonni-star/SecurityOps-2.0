@@ -33,13 +33,15 @@ app.get('/api/v1/health', async (req, res) => {
 
 // Authentifizierungsrouten
 app.post('/api/v1/auth/login', authController.login);
+app.post('/api/v1/auth/logout', authenticateJwt, authController.logout);
 app.get('/api/v1/auth/me', authenticateJwt, authController.getMe);
 
-// Fachrouten (Alle mit RLS und Authentifizierung geschützt)
+// Fachrouten (Alle mit RLS und granularer Berechtigungsprüfung geschützt)
 app.get('/api/v1/customers', authenticateJwt, requirePermission('customers:read'), clientController.listClients);
 app.post('/api/v1/customers', authenticateJwt, requirePermission('customers:create'), clientController.createClient);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
+app.post('/api/v1/logbook/revisions', authenticateJwt, requirePermission('logbook:create'), guardbookController.addGuardbookRevision);
 
 app.use(errorHandler);

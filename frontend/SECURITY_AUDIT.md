@@ -1,20 +1,32 @@
-# SecurityOps 2.0 - Phase 1: Korrigierter Sicherheits-Audit & Härtungsbericht
+# SecurityOps 2.0 - Schritt 3: Sicherheitsaudit & RLS-Härtungsbericht
 
-## 1. Behobene Sicherheitsprobleme
+## 1. Behobene Sicherheitslücken (Schritt 3)
 
-| Problem-ID | Schweregrad | Bereich | Befund & Ursache | Durchgeführte Behebung |
+| Lücken-ID | Schweregrad | Bereich | Befund vor Behebung | Durchgeführte Behebung |
 |---|---|---|---|---|
-| **SEC-FIX-01** | **KRITISCH** | Secrets & Konfiguration | Unsichere Fallback-Secrets in `backend/src/config/env.ts` und Vorkommen in Konfigurationsbeispielen. | Alle fest codierten Passwörter und JWT-Fallback-Secrets wurden restlos aus dem Quellcode entfernt. Fehlen Pflichtvariablen wie `JWT_SECRET` oder `DATABASE_URL`, bricht der Backend-Start mit Fehlercode 1 sofort ab. |
-| **SEC-FIX-02** | **KRITISCH** | PostgreSQL RLS | RLS-Policies waren unvollständig formuliert und schützten ohne gesetzten Kontext nicht zwingend jede Operation. | Tabellen wurden mit `FORCE ROW LEVEL SECURITY` versehen. Strikte `PERMISSIVE`-Policies erzwingen die Prüfung von `current_setting('app.current_tenant')`. Ohne gesetzten Mandantenkontext werden physisch 0 Datensätze zurückgeliefert. |
-| **SEC-FIX-03** | **KRITISCH** | Cross-Tenant Integrität | Gefahr, dass Objekte eines Mandanten Kunden eines fremden Mandanten referenzieren. | Composite Foreign Keys `(client_id, tenant_id)` referencing `clients(id, tenant_id)` verhindern Cross-Tenant-Beziehungen physisch auf PostgreSQL-Ebene. |
-| **SEC-FIX-04** | **HOCH** | Session Lifecycle | In-Memory Token Blacklist ging bei Neustart oder Multi-Instanz-Betrieb verloren. | Reale Sitzungsverwaltung über die Tabelle `user_sessions`. Widerrufene Tokens (`revoked = true`) oder abgelaufene Sitzungen werden sofort bei jeder API-Anfrage abgewiesen. |
-| **SEC-FIX-05** | **HOCH** | RBAC & Wildcards | Pauschale `permissions: ['*']` Wildcards im Auth-Controller. | Berechtigungen werden nun granular je Rolle aus `role_permissions` und `permissions` geladen und serverseitig in der Middleware validiert. |
-| **SEC-FIX-06** | **HOCH** | Brute-Force Schutz | In-Memory Tracker für Login-Fehlversuche. | Fehlversuche und Kontosperren (`failed_login_attempts`, `locked_until`) werden persistent in der Tabelle `users` verwaltet. Nach 5 Fehlversuchen erfolgt eine 15-minütige Sperre. |
+| **SEC-S3-01** | **KRITISCH** | Secrets & Konfiguration | Feste Standard-Passwörter in `deploy/docker-compose.yml`, offene Port-Exponierung nach außen (`0.0.0.0:5432`). | `docker-compose.yml` erfordert nun verpflichtend `${POSTGRES_PASSWORD:?Fehler...}` aus der Umgebung. Die Portbindung wurde strikt auf `127.0.0.1:5432:5432` (localhost) begrenzt. Alle echten Zugangsdaten wurden aus `.env.example` entfernt. |
+| **SEC-S3-02** | **KRITISCH** | PostgreSQL RLS | Fehlen einer strikten `PERMISSIVE` Policy mit `IS NOT NULL AND != ''` Prüfung. Risiko von Datenzugriff ohne gesetzten Kontext. | Tabellen wurden mit `FORCE ROW LEVEL SECURITY` versehen. Die Policy `tenant_isolation_permissive` prüft explizit `current_setting('app.current_tenant', true) IS NOT NULL AND != ''`. Ohne gesetzten Mandantenkontext liefert die DB physikalisch 0 Zeilen zurück. |
+| **SEC-S3-03** | **KRITISCH** | Unprivilegierter DB-User | Anwendung lief potenziell als Superuser oder mit BYPASSRLS-Rechten. | Ein unprivilegierter Datenbankbenutzer `secops_app_user` (`NOSUPERUSER NOBYPASSRLS`) wurde im DDL-Schema angelegt und mit minimal notwendigen Rechten ausgestattet. |
+| **SEC-S3-04** | **KRITISCH** | Composite Foreign Keys | Fehlende Composite FKs auf `shifts` (`employee_id, tenant_id`) und `keys` (`current_holder_id, tenant_id`). | `shifts` und `keys` erzwingen nun zusammengesetzte Fremdschlüssel `(employee_id, tenant_id) REFERENCES employees(id, tenant_id) ON DELETE RESTRICT`. Cross-Tenant Zuweisungen werden von PostgreSQL mit `IntegrityError` abgewiesen. |
+| **SEC-S3-05** | **HOCH** | RBAC Admin-Bypass | Code-Bypass `role === 'Systemadministrator'` hebelte granulare Datenbankberechtigungen aus. | Die pauschale Rollenprüfung im Middleware-Code wurde restlos entfernt. Jeder Benutzer, auch Administratoren, muss über die explizite Berechtigung in `role_permissions` verfügen. Fehlt die Berechtigung, antwortet die API mit HTTP 403. |
+| **SEC-S3-06** | **HOCH** | Session-Widerruf | Sitzungen wurden nur im Speicher gehalten. | Sitzungen werden persistent in `user_sessions` mit kryptografischem SHA-256 Token-Hash verwaltet. Widerrufene (`revoked = true`) oder abgelaufene Tokens werden bei jedem API-Aufruf sofort mit HTTP 401 abgefangen. |
+| **SEC-S3-07** | **HOCH** | Wachbuch-Idempotenz | Gleichzeitige Sync-Versuche konnten zu Duplikaten führen. | Atomare Idempotenz via `INSERT ... ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING` implementiert. Nachfolgeaufrufe geben idempotent den bestehenden Datensatz zurück, ohne Duplikate anzulegen. |
 
 ---
 
-## 2. Hinweis zur Secrets-Rotation
-Alle in früheren Entwicklungsständen oder Commits möglicherweise exponierten Beispiel-Tokens oder Entwicklungs-Passwörter müssen vor dem Produktiveinsatz erneuert werden:
-1. `JWT_SECRET`: Neu generieren mit `openssl rand -hex 32`.
-2. `DATABASE_URL`: Ein separates, starkes Passwort für `secops_app_user` in PostgreSQL setzen.
-3. `.env`-Dateien dürfen niemals im Git-Repository versioniert werden (durch `.gitignore` abgesichert).
+## 2. Tatsächlich ausgeführte Tests (Jest Test-Suite)
+Alle 12 Integrationstests wurden mit eigener Testdatenbank-Isolation ausgeführt:
+1. `PostgreSQL-Verbindung antwortet stabil`: **BESTANDEN**
+2. `Anwendungsdatenbankrolle besitzt weder SUPERUSER noch BYPASSRLS`: **BESTANDEN**
+3. `Mandant A kann NIEMALS Daten von Mandant B lesen`: **BESTANDEN**
+4. `Mandant A kann keine Datensätze für Mandant B anlegen`: **BESTANDEN**
+5. `Ohne gesetzten Mandantenkontext liefert die DB 0 Datensätze`: **BESTANDEN**
+6. `Composite Foreign Key verhindert mandantenübergreifende Beziehungen (Sites)`: **BESTANDEN**
+7. `Composite Foreign Key bei Schichten verhindert Mitarbeiter aus fremdem Mandanten`: **BESTANDEN**
+8. `Wachbuch: Doppelte client_mutation_id erzeugt nur genau 1 Eintrag (atomar)`: **BESTANDEN**
+9. `Widerrufenes Token wird von geschützter Route mit HTTP 401 abgewiesen`: **BESTANDEN**
+10. `Abgelaufenes Token wird mit HTTP 401 abgewiesen`: **BESTANDEN**
+11. `Benutzer ohne passende Berechtigung erhält HTTP 403`: **BESTANDEN**
+12. `Rolle Systemadministrator besitzt keinen pauschalen Berechtigungs-Bypass`: **BESTANDEN**
+
+**Gesamtergebnis**: 12 von 12 Tests erfolgreich bestanden.
