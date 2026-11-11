@@ -183,6 +183,6 @@ Häufige Ursachen:
 ## 11. Bekannte Einschränkungen
 
 - Dokumente, SOPs und Alarme besitzen weiterhin keine Datenbanktabellen/Endpunkte.
-- Der Gemini-Copilot läuft weiterhin browser-seitig; die CSP erlaubt dafür `generativelanguage.googleapis.com`.
+- Gemini-Vorfallsanalyse und Copilot laufen über authentifizierte, berechtigungsgeprüfte Backend-Endpunkte. `GEMINI_API_KEY` wird ausschließlich dem Backend-Container bereitgestellt.
 - Redis und der frühere Python-Worker wurden entfernt, da das TypeScript-Backend sie nicht verwendet und der Python-Stack nicht lauffähig war.
 - Ein vollständiger Browser-E2E-Test ist nicht Teil dieses Deployment-Schritts.

@@ -91,16 +91,21 @@ export const GuardBookModule: React.FC = () => {
     const siteObj = sites.find((s) => s.id === selectedSiteId);
     const guardObj = employees.find((e) => e.id === selectedGuardId);
 
-    const result = await generateIncidentAnalysis(
-      description,
-      siteObj?.name || 'Sicherheitsobjekt',
-      guardObj ? `${guardObj.firstName} ${guardObj.lastName}` : 'Wachkraft'
-    );
-
-    setAiAnalysis(result);
-    setTitle(result.formalTitle);
-    setDescription(result.formalReportDraft);
-    setIsAnalyzing(false);
+    try {
+      const result = await generateIncidentAnalysis(
+        description,
+        siteObj?.name || 'Sicherheitsobjekt',
+        guardObj ? `${guardObj.firstName} ${guardObj.lastName}` : 'Wachkraft'
+      );
+      setAiAnalysis(result);
+      // Nur den noch nicht gespeicherten Entwurf befüllen; die KI schreibt nie selbst ins Wachbuch.
+      setTitle(result.formalTitle);
+      setDescription(result.formalReportDraft);
+    } catch {
+      alert('Die KI-Analyse ist derzeit nicht verfügbar. Bitte versuchen Sie es später erneut.');
+    } finally {
+      setIsAnalyzing(false);
+    }
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -164,7 +169,7 @@ export const GuardBookModule: React.FC = () => {
           </p>
         </div>
 
-        <button
+                  <button
           onClick={() => setIsModalOpen(true)}
           className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg shadow-blue-600/20 transition flex items-center gap-2 shrink-0 self-start sm:self-auto"
         >
@@ -464,7 +469,7 @@ export const GuardBookModule: React.FC = () => {
                       className="flex items-center gap-1.5 text-blue-400 hover:text-blue-300 text-xs font-semibold px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 transition disabled:opacity-50"
                     >
                       <Sparkles className="w-3.5 h-3.5" />
-                      <span>{isAnalyzing ? 'KI formuliert...' : 'Mit KI behördensicher formulieren'}</span>
+                      <span>{isAnalyzing ? 'KI formuliert...' : 'KI-Vorschlag erstellen (fachlich prüfen)'}</span>
                     </button>
                   )}
                 </div>

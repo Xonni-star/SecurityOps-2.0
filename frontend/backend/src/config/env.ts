@@ -15,6 +15,7 @@ const envSchema = z.object({
   // damit JWT-Ablauf und Sitzungs-Ablaufzeit garantiert identisch sind.
   JWT_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, 'JWT_EXPIRES_IN muss dem Format <Zahl><s|m|h|d> entsprechen (z. B. 8h).').default('8h'),
   CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss konfiguriert sein.'),
+  GEMINI_API_KEY: z.preprocess((value) => typeof value === 'string' && value.trim() === '' ? undefined : value, z.string().trim().min(1).optional()),
   RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10))
 });
 

@@ -57,7 +57,12 @@ Aktive Schichten: ${shifts.length}
 Wachbuch-Vorfälle: ${guardBook.length} (Letzter Vorfall: ${guardBook[0]?.title || 'Keiner'})
 `;
 
-    const reply = await askSecurityCopilot(query, context);
+    let reply: string;
+    try {
+      reply = await askSecurityCopilot(query, context);
+    } catch {
+      reply = 'Der KI-Copilot ist derzeit nicht verfügbar. Bitte versuchen Sie es später erneut.';
+    }
 
     const botMsg: ChatMessage = {
       role: 'assistant',
