@@ -134,14 +134,23 @@ Datenbank: isoliertes PostgreSQL 16.15 (Docker, Port 55432), Testdatenbank `secu
 
 ## 8. GitHub-Actions-Läufe
 
-Die tatsächlichen Run-IDs und Ergebnisse werden nach dem Push ergänzt:
+Tatsächliche Ergebnisse für Commit `b42d7ec`:
 
-| Workflow | Run-ID | Ergebnis |
-|---|---|---|
-| SecurityOps 2.0 CI (Root) | _wird ergänzt_ | _wird ergänzt_ |
-| SecurityOps 2.0 CI (Frontend) | _wird ergänzt_ | _wird ergänzt_ |
-| SecurityOps 2.0 CI (Backend) | _wird ergänzt_ | _wird ergänzt_ |
-| SecurityOps 2.0 CD | _wird ergänzt_ | _wird ergänzt_ |
+| Workflow | Run-ID | Job | Ergebnis | Dauer |
+|---|---|---|---|---|
+| SecurityOps 2.0 CI | `43043287310` | Root – npm ci, Strukturprüfung, Gesamtstart | **success** | 44 s |
+| SecurityOps 2.0 CI | `43043287310` | Frontend – npm ci, Vitest, Produktions-Build | **success** | 14 s |
+| SecurityOps 2.0 CI | `43043287310` | Backend – PostgreSQL 16, Migration, Build, Jest | **success** | 1 m 9 s |
+| SecurityOps 2.0 CD | `43043488960` | Release-Paket aus CI-Artefakten bauen | **success** | – |
+
+Gesamtergebnis des CI-Laufs: **success**. Alle drei Jobs liefen unabhängig voneinander (eigene Runner, eigene PostgreSQL-Services für Root und Backend) und lieferten eigene Logs und Ergebnisse.
+
+Der Root-Job führte dabei nachweislich aus:
+- `npm ci` und `npm ls --depth=0`
+- Installation von Frontend und Backend
+- Migration und Seed auf der isolierten CI-Datenbank
+- `verify-root.mjs` (11 Prüfungen)
+- `smoke-start.mjs` (Frontend + Backend gestartet, Health-Check, HTTP-Prüfung, kontrolliertes Beenden)
 
 ---
 
