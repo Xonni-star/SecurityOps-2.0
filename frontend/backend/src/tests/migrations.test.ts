@@ -512,4 +512,53 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     );
     expect(count[0].count).toBe('0');
   });
+
+  test('29. Echte Fremdtabelle (file_fdw) verhindert die Einstufung als leere Datenbank', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    const csvPath = `/tmp/secops_fdw_${db}.csv`;
+
+    // Echter Foreign-Data-Wrapper + Foreign Server + Foreign Table im Schema public.
+    // Der Test läuft ausschließlich in einer isolierten Testdatenbank mit der
+    // administrativen (Superuser-)Rolle der ephemeren PostgreSQL-Instanz.
+    await queryInDatabase(db, `
+      CREATE EXTENSION IF NOT EXISTS file_fdw;
+      CREATE SERVER secops_file_server FOREIGN DATA WRAPPER file_fdw;
+      COPY (SELECT 1 AS id, 'fdw-zeile' AS name) TO '${csvPath}' WITH (FORMAT csv, HEADER true);
+      CREATE FOREIGN TABLE fremde_fdw_tabelle (id INT, name TEXT)
+        SERVER secops_file_server
+        OPTIONS (filename '${csvPath}', format 'csv', header 'true');
+    `);
+
+    const before = await queryInDatabase<{ relkind: string }>(
+      db,
+      `SELECT relkind FROM pg_class
+        WHERE relname = 'fremde_fdw_tabelle' AND relnamespace = 'public'::regnamespace`
+    );
+    expect(before).toHaveLength(1);
+    expect(before[0].relkind).toBe('f');
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Unerwartetes Objekt im Schema public: Fremdtabelle "fremde_fdw_tabelle"/);
+
+    // Keine Migration darf als ausgeführt eingetragen worden sein.
+    const history = await queryInDatabase<{ count: string }>(
+      db,
+      `SELECT COUNT(*)::text AS count FROM schema_migrations`
+    );
+    expect(history[0].count).toBe('0');
+
+    // Die Fremdtabelle muss nach dem Abbruch unverändert vorhanden und nutzbar sein.
+    const after = await queryInDatabase<{ relkind: string }>(
+      db,
+      `SELECT relkind FROM pg_class
+        WHERE relname = 'fremde_fdw_tabelle' AND relnamespace = 'public'::regnamespace`
+    );
+    expect(after).toHaveLength(1);
+    expect(after[0].relkind).toBe('f');
+
+    const rows = await queryInDatabase<{ id: number; name: string }>(db, 'SELECT id, name FROM fremde_fdw_tabelle');
+    expect(rows).toEqual([{ id: 1, name: 'fdw-zeile' }]);
+  });
 });
