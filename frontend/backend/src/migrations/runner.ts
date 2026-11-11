@@ -1151,8 +1151,20 @@ export function stripTypeModifiers(typeText: string): string {
     result.push(token);
   }
 
-  const normalized = tokensToTypeText(result);
-  return TYPE_ALIASES[normalized] ?? normalized;
+  const firstBracket = result.findIndex((token) => isPunct(token, '['));
+  const baseTokens = firstBracket === -1 ? result : result.slice(0, firstBracket);
+  const arrayTokens = firstBracket === -1 ? [] : result.slice(firstBracket);
+
+  let baseText: string;
+  if (baseTokens.length === 1 && baseTokens[0].type === 'word') {
+    const baseName = baseTokens[0].value.toLowerCase();
+    baseText = TYPE_ALIASES[baseName] ?? tokensToTypeText(baseTokens);
+  } else {
+    baseText = tokensToTypeText(baseTokens);
+  }
+
+  const arrayText = tokensToTypeText(arrayTokens);
+  return `${baseText}${arrayText}`;
 }
 
 interface ActualRelationRow {

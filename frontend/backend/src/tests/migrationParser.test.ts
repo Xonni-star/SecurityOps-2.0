@@ -258,4 +258,22 @@ describe('SQL-Migrationsparser – lexikalische Härtung', () => {
     expect(stripTypeModifiers('character varying(10)')).toBe('character varying');
     expect(stripTypeModifiers('numeric(10,2)[]')).toBe('numeric[]');
   });
+
+  test('19. Array-Typ-Aliase werden auf den Basistyp angewendet', () => {
+    const cases: Array<[string, string]> = [
+      ['int[]', 'integer[]'],
+      ['int[][]', 'integer[][]'],
+      ['int4[]', 'integer[]'],
+      ['varchar(255)[]', 'character varying[]'],
+      ['numeric(10,2)[]', 'numeric[]'],
+      ['timestamp(3)[]', 'timestamp without time zone[]'],
+      ['"MeinSchema"."MeinTyp"[]', '"MeinSchema"."MeinTyp"[]'],
+      ['public."MeinTyp"[][]', 'public."MeinTyp"[][]'],
+      ['integer[][]', 'integer[][]']
+    ];
+
+    for (const [input, expected] of cases) {
+      expect(stripTypeModifiers(input)).toBe(expected);
+    }
+  });
 });
