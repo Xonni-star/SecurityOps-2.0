@@ -938,4 +938,131 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const after = await historyRows(db);
     expect(after).toEqual(before);
   });
+
+  test('51. Migration mit Kommentarzeichen in Zeichenketten wird korrekt erkannt', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({
+      '005_kommentar.sql': `CREATE TABLE kommentar_tabelle (id INT, note TEXT DEFAULT '-- kein Kommentar /* auch nicht */');`
+    });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toContain('005');
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+    expect(await tableExists(db, 'kommentar_tabelle')).toBe(true);
+  });
+
+  test('52. Dollar-quoted Funktionskörper mit Fake-DDL wird nicht als Objekt erkannt', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({
+      '005_funktion.sql': `
+        CREATE FUNCTION body_fn() RETURNS void LANGUAGE plpgsql AS $body$
+        BEGIN
+          -- CREATE TABLE fake_table (id int);
+          /* CREATE TABLE fake_table2 (id int); */
+          RAISE NOTICE 'CREATE TABLE fake_table3 (id int)';
+        END
+        $body$;
+      `
+    });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toContain('005');
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+    expect(await tableExists(db, 'fake_table')).toBe(false);
+
+    const functions = await queryInDatabase<{ proname: string }>(
+      db,
+      `SELECT p.proname FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+       WHERE n.nspname = 'public' AND p.proname = 'body_fn'`
+    );
+    expect(functions).toHaveLength(1);
+  });
+
+  test('53. Gequotete und schemaqualifizierte Objekte werden korrekt zugeordnet', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({
+      '005_quoted.sql': `
+        CREATE SCHEMA IF NOT EXISTS anderesschema;
+        CREATE TABLE public."NeueTabelle" (id INT);
+        CREATE TABLE "Tasks" (id INT);
+        CREATE TABLE anderesschema.priv_table (id INT);
+      `
+    });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toContain('005');
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+
+    expect(await tableExists(db, 'NeueTabelle')).toBe(true);
+    expect(await tableExists(db, 'Tasks')).toBe(true);
+    expect(await tableExists(db, 'priv_table')).toBe(false);
+  });
+
+  test('54. DEFAULT-, VARIADIC- und benutzerdefinierte Parametertypen werden korrekt verglichen', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({
+      '005_parameter.sql': `
+        CREATE TYPE param_typ AS ENUM ('a');
+        CREATE FUNCTION def_fn(x integer DEFAULT 5, y integer DEFAULT 6)
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION var_fn(VARIADIC y param_typ[])
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION nested_fn(a numeric(10,2), b text)
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+      `
+    });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toContain('005');
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+
+    await queryInDatabase(
+      db,
+      `CREATE FUNCTION def_fn(x text) RETURNS integer LANGUAGE sql AS 'SELECT 1'`
+    );
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/def_fn\(text\)/);
+  });
 });

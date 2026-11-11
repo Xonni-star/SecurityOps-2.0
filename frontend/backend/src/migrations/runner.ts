@@ -398,9 +398,16 @@ interface PolicyRow {
 type RelationKind = 'r' | 'p' | 'v' | 'm' | 'S' | 'f';
 type CustomTypeKind = 'c' | 'e' | 'd' | 'r' | 'm';
 
+interface ExpectedRoutine {
+  /** SQL-Identifier inklusive Anführungszeichen, falls der Name gequotet war. */
+  name: string;
+  /** Parametertypen in SQL-Form (ohne Namen, Modes, DEFAULT). */
+  args: string[];
+}
+
 interface ExpectedSchemaObjects {
   relations: Map<string, RelationKind>;
-  routines: Set<string>;
+  routines: ExpectedRoutine[];
   types: Map<string, CustomTypeKind>;
 }
 
@@ -421,45 +428,243 @@ const TYPE_KIND_LABELS: Record<string, string> = {
   m: 'Multirange-Typ'
 };
 
-function stripSqlComments(sql: string): string {
-  return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n\r]*/g, ' ');
+type TokenType = 'word' | 'quoted_ident' | 'string' | 'dollar' | 'number' | 'punct' | 'operator';
+
+interface SqlToken {
+  type: TokenType;
+  value: string;
+  raw: string;
+  position: number;
 }
 
-function maskSqlLiterals(sql: string): string {
-  return sql
-    .replace(/\$([A-Za-z_][A-Za-z0-9_]*)?\$[\s\S]*?\$\1\$/g, "''")
-    .replace(/'(?:''|[^'])*'/g, "''");
+function lexSql(sql: string, source: string): SqlToken[] {
+  const tokens: SqlToken[] = [];
+  let i = 0;
+
+  while (i < sql.length) {
+    const ch = sql[i];
+
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+
+    if (ch === '-' && sql[i + 1] === '-') {
+      i += 2;
+      while (i < sql.length && sql[i] !== '\n' && sql[i] !== '\r') i++;
+      continue;
+    }
+
+    if (ch === '/' && sql[i + 1] === '*') {
+      const start = i;
+      let depth = 1;
+      i += 2;
+      while (i < sql.length && depth > 0) {
+        if (sql[i] === '/' && sql[i + 1] === '*') {
+          depth++;
+          i += 2;
+        } else if (sql[i] === '*' && sql[i + 1] === '/') {
+          depth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (depth !== 0) {
+        throw new Error(`${source}: nicht terminierter Blockkommentar ab Position ${start}`);
+      }
+      continue;
+    }
+
+    const isEscapeString =
+      (ch === 'e' || ch === 'E') && sql[i + 1] === "'";
+
+    if (ch === "'" || isEscapeString) {
+      const start = i;
+      i += isEscapeString ? 2 : 1;
+      let value = '';
+      let closed = false;
+
+      while (i < sql.length) {
+        if (isEscapeString && sql[i] === '\\') {
+          value += sql[i] + (sql[i + 1] ?? '');
+          i += 2;
+          continue;
+        }
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") {
+            value += "'";
+            i += 2;
+            continue;
+          }
+          i++;
+          closed = true;
+          break;
+        }
+        value += sql[i];
+        i++;
+      }
+
+      if (!closed) {
+        throw new Error(`${source}: nicht terminierte Zeichenkette ab Position ${start}`);
+      }
+
+      tokens.push({ type: 'string', value, raw: sql.slice(start, i), position: start });
+      continue;
+    }
+
+    if (ch === '$') {
+      const match = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+      if (match) {
+        const tag = match[0];
+        const start = i;
+        i += tag.length;
+        const end = sql.indexOf(tag, i);
+        if (end === -1) {
+          throw new Error(`${source}: nicht terminierter Dollar-quoted String ab Position ${start}`);
+        }
+        tokens.push({
+          type: 'dollar',
+          value: sql.slice(i, end),
+          raw: sql.slice(start, end + tag.length),
+          position: start
+        });
+        i = end + tag.length;
+        continue;
+      }
+    }
+
+    if (ch === '"') {
+      const start = i;
+      i++;
+      let value = '';
+      let closed = false;
+
+      while (i < sql.length) {
+        if (sql[i] === '"') {
+          if (sql[i + 1] === '"') {
+            value += '"';
+            i += 2;
+            continue;
+          }
+          i++;
+          closed = true;
+          break;
+        }
+        value += sql[i];
+        i++;
+      }
+
+      if (!closed) {
+        throw new Error(`${source}: nicht terminierter Bezeichner ab Position ${start}`);
+      }
+
+      tokens.push({ type: 'quoted_ident', value, raw: sql.slice(start, i), position: start });
+      continue;
+    }
+
+    if (/[A-Za-z_\u0080-\uFFFF]/.test(ch)) {
+      const start = i;
+      i++;
+      while (i < sql.length && /[A-Za-z0-9_$\u0080-\uFFFF]/.test(sql[i])) i++;
+      tokens.push({ type: 'word', value: sql.slice(start, i), raw: sql.slice(start, i), position: start });
+      continue;
+    }
+
+    if (/[0-9]/.test(ch)) {
+      const start = i;
+      i++;
+      while (i < sql.length && /[0-9.]/.test(sql[i])) i++;
+      tokens.push({ type: 'number', value: sql.slice(start, i), raw: sql.slice(start, i), position: start });
+      continue;
+    }
+
+    if ('(),.;[]'.includes(ch)) {
+      tokens.push({ type: 'punct', value: ch, raw: ch, position: i });
+      i++;
+      continue;
+    }
+
+    tokens.push({ type: 'operator', value: ch, raw: ch, position: i });
+    i++;
+  }
+
+  return tokens;
 }
 
-const SQL_IDENTIFIER = `(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)`;
-const SQL_QUALIFIED_NAME = `${SQL_IDENTIFIER}(?:\\s*\\.\\s*${SQL_IDENTIFIER})?`;
-
-function normalizeIdentifier(identifier: string): string {
-  const withoutQuotes = identifier.replace(/"/g, '').trim();
-  const parts = withoutQuotes.split('.');
-  return parts[parts.length - 1].toLowerCase();
+function isWord(token: SqlToken | undefined, value: string): boolean {
+  return !!token && token.type === 'word' && token.value.toLowerCase() === value;
 }
 
-function normalizeTypeName(typeName: string): string {
-  let value = typeName.trim().toLowerCase().replace(/\s+/g, ' ');
-  value = value.replace(/^public\./, '');
-  const aliases: Record<string, string> = {
-    int: 'integer',
-    int4: 'integer',
-    int2: 'smallint',
-    int8: 'bigint',
-    bool: 'boolean',
-    varchar: 'character varying',
-    char: 'character',
-    float4: 'real',
-    float8: 'double precision',
-    decimal: 'numeric',
-    timestamptz: 'timestamp with time zone',
-    timestamp: 'timestamp without time zone',
-    timetz: 'time with time zone',
-    time: 'time without time zone'
+function isPunct(token: SqlToken | undefined, value: string): boolean {
+  return !!token && token.type === 'punct' && token.value === value;
+}
+
+interface ParsedName {
+  schema: string | null;
+  /** Exakter Katalogname (unquoted kleingeschrieben, quoted unverändert). */
+  key: string;
+  /** SQL-Identifier für Signatur-Auflösung (quoted mit Anführungszeichen). */
+  sql: string;
+  quoted: boolean;
+}
+
+function identifierFromToken(token: SqlToken, source: string): { key: string; sql: string; quoted: boolean } {
+  if (token.type === 'quoted_ident') {
+    return {
+      key: token.value,
+      sql: `"${token.value.replace(/"/g, '""')}"`,
+      quoted: true
+    };
+  }
+  if (token.type === 'word') {
+    return { key: token.value.toLowerCase(), sql: token.value.toLowerCase(), quoted: false };
+  }
+  throw new Error(`${source}: Bezeichner erwartet, gefunden "${token.raw}"`);
+}
+
+function parseQualifiedName(
+  tokens: SqlToken[],
+  index: number,
+  source: string
+): { name: ParsedName; next: number } {
+  if (!tokens[index]) {
+    throw new Error(`${source}: Objektname fehlt`);
+  }
+
+  const parts: Array<{ key: string; sql: string; quoted: boolean }> = [];
+  parts.push(identifierFromToken(tokens[index], source));
+  let i = index + 1;
+
+  while (
+    i + 1 < tokens.length &&
+    isPunct(tokens[i], '.') &&
+    (tokens[i + 1].type === 'word' || tokens[i + 1].type === 'quoted_ident')
+  ) {
+    parts.push(identifierFromToken(tokens[i + 1], source));
+    i += 2;
+  }
+
+  if (parts.length > 2) {
+    throw new Error(`${source}: dreiteilige Objektnamen werden nicht unterstützt`);
+  }
+
+  const namePart = parts[parts.length - 1];
+  const schemaPart = parts.length === 2 ? parts[0] : null;
+
+  return {
+    name: {
+      schema: schemaPart ? schemaPart.key : null,
+      key: namePart.key,
+      sql: namePart.sql,
+      quoted: namePart.quoted
+    },
+    next: i
   };
-  return aliases[value] ?? value;
+}
+
+function isPublicName(name: ParsedName): boolean {
+  return name.schema === null || name.schema === 'public';
 }
 
 const KNOWN_TYPE_STARTS = new Set([
@@ -479,7 +684,9 @@ const KNOWN_TYPE_STARTS = new Set([
   'numeric',
   'decimal',
   'real',
+  'float',
   'float4',
+  'float8',
   'double',
   'timestamp',
   'timestamptz',
@@ -502,178 +709,336 @@ const KNOWN_TYPE_STARTS = new Set([
   'public'
 ]);
 
-function removeTopLevelDefault(value: string): string {
-  let depth = 0;
-  for (let i = 0; i < value.length; i++) {
-    const char = value[i];
-    if (char === '(' || char === '[') depth++;
-    else if (char === ')' || char === ']') depth--;
-    else if (depth === 0 && value.slice(i, i + 7).toUpperCase() === 'DEFAULT') {
-      const before = value.slice(0, i).trimEnd();
-      const after = value.slice(i + 7);
-      if (before.length > 0 && /[\s,]/.test(value[i - 1] ?? '') && /^\s/.test(after)) {
-        return before;
-      }
-    }
-  }
-  return value;
+const MULTIWORD_TYPE_PREFIXES: string[][] = [
+  ['double', 'precision'],
+  ['timestamp', 'with', 'time', 'zone'],
+  ['timestamp', 'without', 'time', 'zone'],
+  ['time', 'with', 'time', 'zone'],
+  ['time', 'without', 'time', 'zone'],
+  ['character', 'varying'],
+  ['bit', 'varying'],
+  ['national', 'character'],
+  ['interval', 'year'],
+  ['interval', 'month'],
+  ['interval', 'day'],
+  ['interval', 'hour'],
+  ['interval', 'minute'],
+  ['interval', 'second']
+];
+
+function startsMultiwordType(tokens: SqlToken[]): boolean {
+  const words = tokens
+    .filter((token) => token.type === 'word')
+    .slice(0, 4)
+    .map((token) => token.value.toLowerCase());
+
+  return MULTIWORD_TYPE_PREFIXES.some(
+    (prefix) => prefix.length <= words.length && prefix.every((word, index) => words[index] === word)
+  );
 }
 
-function splitTopLevel(value: string, separator: string): string[] {
-  const parts: string[] = [];
-  let current = '';
+function tokensToTypeText(tokens: SqlToken[]): string {
+  const pieces = tokens.map((token) => {
+    if (token.type === 'quoted_ident') {
+      return `"${token.value.replace(/"/g, '""')}"`;
+    }
+    if (token.type === 'word') {
+      return token.value.toLowerCase();
+    }
+    return token.raw;
+  });
+
+  let result = '';
+  for (const piece of pieces) {
+    if (result.length === 0) {
+      result = piece;
+      continue;
+    }
+
+    const previous = result[result.length - 1];
+    const noSpaceBefore = ['(', '[', ')', ']', ',', '.'].includes(piece);
+    const noSpaceAfter = ['(', '[', '.'].includes(previous);
+
+    result += noSpaceBefore || noSpaceAfter ? piece : ` ${piece}`;
+  }
+
+  return result.trim();
+}
+
+function splitTokensByComma(tokens: SqlToken[]): SqlToken[][] {
+  const parts: SqlToken[][] = [];
+  let current: SqlToken[] = [];
   let depth = 0;
-  for (const char of value) {
-    if (char === '(' || char === '[') depth++;
-    else if (char === ')' || char === ']') depth--;
-    if (char === separator && depth === 0) {
+
+  for (const token of tokens) {
+    if (token.type === 'punct' && (token.value === '(' || token.value === '[')) depth++;
+    if (token.type === 'punct' && (token.value === ')' || token.value === ']')) depth--;
+
+    if (depth === 0 && token.type === 'punct' && token.value === ',') {
       parts.push(current);
-      current = '';
+      current = [];
     } else {
-      current += char;
+      current.push(token);
     }
   }
+
   parts.push(current);
   return parts;
 }
 
-function normalizeArgumentList(args: string): string {
-  return splitTopLevel(args, ',')
-    .map((part) => {
-      let value = removeTopLevelDefault(part.trim());
-      if (!value) return '';
-      value = value.replace(/^(IN|OUT|INOUT|VARIADIC)\s+/i, '');
-      const tokens = value.split(/\s+/);
-      if (tokens.length > 1) {
-        const first = tokens[0].toLowerCase();
-        if (!KNOWN_TYPE_STARTS.has(first) && !first.includes('.') && !first.includes('[')) {
-          value = tokens.slice(1).join(' ');
-        }
-      }
-      return normalizeTypeName(value);
-    })
-    .filter((part) => part.length > 0)
-    .join(',');
+interface ParsedParameter {
+  mode: 'IN' | 'OUT' | 'INOUT' | 'VARIADIC';
+  typeText: string;
 }
 
-function extractParenthesized(text: string, startIndex: number): { content: string; endIndex: number } | null {
+function parseParameter(tokens: SqlToken[], source: string): ParsedParameter | null {
+  let work = tokens.slice();
+
+  // DEFAULT bzw. "=" auf oberster Ebene abschneiden.
   let depth = 0;
-  for (let i = startIndex; i < text.length; i++) {
-    const char = text[i];
-    if (char === '(') depth++;
-    else if (char === ')') {
-      depth--;
-      if (depth === 0) {
-        return { content: text.slice(startIndex + 1, i), endIndex: i };
+  for (let i = 0; i < work.length; i++) {
+    const token = work[i];
+    if (token.type === 'punct' && (token.value === '(' || token.value === '[')) depth++;
+    if (token.type === 'punct' && (token.value === ')' || token.value === ']')) depth--;
+    if (depth !== 0) continue;
+    if (isWord(token, 'default') || (token.type === 'operator' && token.value === '=')) {
+      work = work.slice(0, i);
+      break;
+    }
+  }
+
+  let mode: ParsedParameter['mode'] = 'IN';
+  while (work.length > 0 && work[0].type === 'word') {
+    const keyword = work[0].value.toLowerCase();
+    if (keyword === 'in') {
+      mode = 'IN';
+      work = work.slice(1);
+    } else if (keyword === 'out') {
+      mode = 'OUT';
+      work = work.slice(1);
+    } else if (keyword === 'inout') {
+      mode = 'INOUT';
+      work = work.slice(1);
+    } else if (keyword === 'variadic') {
+      mode = 'VARIADIC';
+      work = work.slice(1);
+    } else {
+      break;
+    }
+  }
+
+  if (work.length === 0) {
+    return null;
+  }
+
+  // Optionalen Parameternamen entfernen.
+  if (work.length > 1) {
+    const first = work[0];
+    const second = work[1];
+
+    if (first.type === 'quoted_ident') {
+      if (!isPunct(second, '[')) {
+        work = work.slice(1);
+      }
+    } else if (first.type === 'word') {
+      const firstLower = first.value.toLowerCase();
+      const schemaQualified = isPunct(second, '.');
+      const arraySuffix = isPunct(second, '[');
+
+      if (KNOWN_TYPE_STARTS.has(firstLower) || schemaQualified || arraySuffix || startsMultiwordType(work)) {
+        // Erster Token gehört zum Typ.
+      } else if (second.type === 'word' || second.type === 'quoted_ident') {
+        // Erster Token ist ein Parametername.
+        work = work.slice(1);
+      } else {
+        throw new Error(`${source}: Parameter "${tokensToTypeText(work)}" ist nicht eindeutig analysierbar`);
       }
     }
   }
-  return null;
+
+  if (work.length === 0) {
+    throw new Error(`${source}: Parameter ohne Typangabe`);
+  }
+
+  return { mode, typeText: tokensToTypeText(work) };
 }
 
-export function extractSchemaObjects(sql: string): ExpectedSchemaObjects {
-  const cleaned = maskSqlLiterals(stripSqlComments(sql));
+function parseRoutineArguments(tokens: SqlToken[], source: string): string[] {
+  if (tokens.length === 0) return [];
+
+  const args: string[] = [];
+  for (const part of splitTokensByComma(tokens)) {
+    if (part.length === 0) {
+      throw new Error(`${source}: leerer Parameter in Routine`);
+    }
+    const parameter = parseParameter(part, source);
+    if (!parameter) continue;
+    if (parameter.mode === 'OUT') continue;
+    args.push(parameter.typeText);
+  }
+
+  return args;
+}
+
+function findMatchingParen(tokens: SqlToken[], openIndex: number, source: string): number {
+  let depth = 0;
+  for (let i = openIndex; i < tokens.length; i++) {
+    if (isPunct(tokens[i], '(')) depth++;
+    if (isPunct(tokens[i], ')')) {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  throw new Error(`${source}: nicht geschlossene Parameterliste`);
+}
+
+function skipIfNotExists(tokens: SqlToken[], index: number): number {
+  if (isWord(tokens[index], 'if') && isWord(tokens[index + 1], 'not') && isWord(tokens[index + 2], 'exists')) {
+    return index + 3;
+  }
+  return index;
+}
+
+function determineTableKind(tokens: SqlToken[], start: number): RelationKind {
+  let depth = 0;
+  for (let i = start; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (token.type === 'punct' && (token.value === '(' || token.value === '[')) depth++;
+    if (token.type === 'punct' && (token.value === ')' || token.value === ']')) depth--;
+    if (depth === 0 && isPunct(token, ';')) break;
+    if (depth === 0 && isWord(token, 'partition') && isWord(tokens[i + 1], 'by')) {
+      return 'p';
+    }
+  }
+  return 'r';
+}
+
+export function extractSchemaObjects(sql: string, source = 'Migration'): ExpectedSchemaObjects {
+  const tokens = lexSql(sql, source);
   const relations = new Map<string, RelationKind>();
-  const routines = new Set<string>();
+  const routines: ExpectedRoutine[] = [];
   const types = new Map<string, CustomTypeKind>();
 
-  const relationPatterns: Array<{ pattern: RegExp; kind: RelationKind }> = [
-    {
-      pattern: new RegExp(
-        `\\bCREATE\\s+FOREIGN\\s+TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
-        'gi'
-      ),
-      kind: 'f'
-    },
-    {
-      pattern: new RegExp(
-        `\\bCREATE\\s+(?:UNLOGGED\\s+|TEMP(?:ORARY)?\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
-        'gi'
-      ),
-      kind: 'r'
-    },
-    {
-      pattern: new RegExp(
-        `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?MATERIALIZED\\s+VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
-        'gi'
-      ),
-      kind: 'm'
-    },
-    {
-      pattern: new RegExp(
-        `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
-        'gi'
-      ),
-      kind: 'v'
-    },
-    {
-      pattern: new RegExp(
-        `\\bCREATE\\s+(?:UNLOGGED\\s+)?SEQUENCE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${SQL_QUALIFIED_NAME})`,
-        'gi'
-      ),
-      kind: 'S'
+  let i = 0;
+  while (i < tokens.length) {
+    if (!isWord(tokens[i], 'create')) {
+      i++;
+      continue;
     }
-  ];
 
-  for (const { pattern, kind } of relationPatterns) {
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(cleaned)) !== null) {
-      const name = normalizeIdentifier(match[1]);
-      if (relations.has(name)) continue;
+    let j = i + 1;
+    if (isWord(tokens[j], 'or') && isWord(tokens[j + 1], 'replace')) {
+      j += 2;
+    }
 
-      let actualKind = kind;
-      if (kind === 'r') {
-        const statementEnd = cleaned.indexOf(';', match.index);
-        const statement = cleaned.slice(match.index, statementEnd === -1 ? undefined : statementEnd);
-        if (/\bPARTITION\s+BY\b/i.test(statement)) actualKind = 'p';
+    if (isWord(tokens[j], 'unlogged') || isWord(tokens[j], 'temp') || isWord(tokens[j], 'temporary')) {
+      j++;
+    }
+
+    if (isWord(tokens[j], 'foreign') && isWord(tokens[j + 1], 'table')) {
+      j += 2;
+      j = skipIfNotExists(tokens, j);
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (isPublicName(parsed.name)) relations.set(parsed.name.key, 'f');
+      i = parsed.next;
+      continue;
+    }
+
+    if (isWord(tokens[j], 'table')) {
+      j++;
+      j = skipIfNotExists(tokens, j);
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (isPublicName(parsed.name)) relations.set(parsed.name.key, determineTableKind(tokens, parsed.next));
+      i = parsed.next;
+      continue;
+    }
+
+    if (isWord(tokens[j], 'materialized') && isWord(tokens[j + 1], 'view')) {
+      j += 2;
+      j = skipIfNotExists(tokens, j);
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (isPublicName(parsed.name)) relations.set(parsed.name.key, 'm');
+      i = parsed.next;
+      continue;
+    }
+
+    if (isWord(tokens[j], 'view')) {
+      j++;
+      j = skipIfNotExists(tokens, j);
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (isPublicName(parsed.name)) relations.set(parsed.name.key, 'v');
+      i = parsed.next;
+      continue;
+    }
+
+    if (isWord(tokens[j], 'sequence')) {
+      j++;
+      j = skipIfNotExists(tokens, j);
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (isPublicName(parsed.name)) relations.set(parsed.name.key, 'S');
+      i = parsed.next;
+      continue;
+    }
+
+    if (isWord(tokens[j], 'type')) {
+      j++;
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (!isWord(tokens[parsed.next], 'as')) {
+        throw new Error(`${source}: CREATE TYPE ${parsed.name.key} ohne AS ist nicht sicher analysierbar`);
       }
 
-      relations.set(name, actualKind);
+      const afterAs = parsed.next + 1;
+      let kind: CustomTypeKind | null = null;
+      if (isWord(tokens[afterAs], 'enum')) kind = 'e';
+      else if (isWord(tokens[afterAs], 'range')) kind = 'r';
+      else if (isPunct(tokens[afterAs], '(')) kind = 'c';
+
+      if (!kind) {
+        throw new Error(`${source}: CREATE TYPE ${parsed.name.key} hat eine nicht unterstützte Form`);
+      }
+
+      if (isPublicName(parsed.name)) types.set(parsed.name.key, kind);
+      i = afterAs;
+      continue;
     }
-  }
 
-  const typePatterns: Array<{ pattern: RegExp; kind: CustomTypeKind }> = [
-    {
-      pattern: new RegExp(`\\bCREATE\\s+TYPE\\s+(${SQL_QUALIFIED_NAME})\\s+AS\\s+ENUM\\b`, 'gi'),
-      kind: 'e'
-    },
-    {
-      pattern: new RegExp(`\\bCREATE\\s+TYPE\\s+(${SQL_QUALIFIED_NAME})\\s+AS\\s+RANGE\\b`, 'gi'),
-      kind: 'r'
-    },
-    {
-      pattern: new RegExp(`\\bCREATE\\s+TYPE\\s+(${SQL_QUALIFIED_NAME})\\s+AS\\s*\\(`, 'gi'),
-      kind: 'c'
-    },
-    {
-      pattern: new RegExp(`\\bCREATE\\s+DOMAIN\\s+(${SQL_QUALIFIED_NAME})`, 'gi'),
-      kind: 'd'
+    if (isWord(tokens[j], 'domain')) {
+      j++;
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (isPublicName(parsed.name)) types.set(parsed.name.key, 'd');
+      i = parsed.next;
+      continue;
     }
-  ];
 
-  for (const { pattern, kind } of typePatterns) {
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(cleaned)) !== null) {
-      types.set(normalizeIdentifier(match[1]), kind);
+    if (isWord(tokens[j], 'function') || isWord(tokens[j], 'procedure')) {
+      j++;
+      const parsed = parseQualifiedName(tokens, j, source);
+      if (!isPunct(tokens[parsed.next], '(')) {
+        throw new Error(`${source}: Routine ${parsed.name.key} ohne Parameterliste`);
+      }
+
+      const close = findMatchingParen(tokens, parsed.next, source);
+      const args = parseRoutineArguments(tokens.slice(parsed.next + 1, close), source);
+
+      if (isPublicName(parsed.name)) {
+        const existing = routines.find((routine) => routine.name === parsed.name.sql);
+        if (existing) {
+          const signature = args.join(',');
+          const existingSignature = existing.args.join(',');
+          if (signature !== existingSignature) {
+            // Überladung: gleicher Name, andere Signatur ist zulässig.
+            routines.push({ name: parsed.name.sql, args });
+          }
+        } else {
+          routines.push({ name: parsed.name.sql, args });
+        }
+      }
+
+      i = close + 1;
+      continue;
     }
-  }
 
-  const routinePattern = new RegExp(
-    `\\bCREATE\\s+(?:OR\\s+REPLACE\\s+)?(FUNCTION|PROCEDURE)\\s+(${SQL_QUALIFIED_NAME})\\s*\\(`,
-    'gi'
-  );
-
-  let routineMatch: RegExpExecArray | null;
-  while ((routineMatch = routinePattern.exec(cleaned)) !== null) {
-    const openParenIndex = cleaned.indexOf('(', routineMatch.index + routineMatch[0].length - 1);
-    if (openParenIndex === -1) continue;
-
-    const paren = extractParenthesized(cleaned, openParenIndex);
-    if (!paren) continue;
-
-    const name = normalizeIdentifier(routineMatch[2]);
-    const args = normalizeArgumentList(paren.content);
-    routines.add(`${name}(${args})`);
+    i = j;
   }
 
   return { relations, routines, types };
@@ -682,29 +1047,35 @@ export function extractSchemaObjects(sql: string): ExpectedSchemaObjects {
 export function deriveExpectedSchemaObjects(migrations: MigrationFile[]): ExpectedSchemaObjects {
   const result: ExpectedSchemaObjects = {
     relations: new Map(),
-    routines: new Set(),
+    routines: [],
     types: new Map()
   };
 
   for (const migration of migrations) {
-    const extracted = extractSchemaObjects(migration.sql);
+    const extracted = extractSchemaObjects(migration.sql, migration.filename);
     for (const [name, kind] of extracted.relations) result.relations.set(name, kind);
-    for (const signature of extracted.routines) result.routines.add(signature);
+    for (const routine of extracted.routines) {
+      if (!result.routines.some((existing) => existing.name === routine.name && existing.args.join(',') === routine.args.join(','))) {
+        result.routines.push(routine);
+      }
+    }
     for (const [name, kind] of extracted.types) result.types.set(name, kind);
   }
 
   return result;
 }
 
+function stripTypeModifiers(typeText: string): string {
+  const match = typeText.match(/^([^()]+)\(([^()]*)\)(.*)$/);
+  if (match && !match[1].trim().endsWith('"')) {
+    return `${match[1]}${match[3]}`.trim();
+  }
+  return typeText;
+}
+
 interface ActualRelationRow {
   name: string;
   kind: string;
-  extension_owned: boolean;
-}
-
-interface ActualRoutineRow {
-  name: string;
-  args: string;
   extension_owned: boolean;
 }
 
@@ -761,9 +1132,9 @@ async function compareSchemaObjects(client: Client, expected: ExpectedSchemaObje
     }
   }
 
-  // Routinen inklusive Signatur
-  const routineResult = await client.query<ActualRoutineRow>(`
-    SELECT p.proname AS name, pg_get_function_identity_arguments(p.oid) AS args,
+  // Routinen über PostgreSQLs eigene Identitätsauflösung vergleichen.
+  const routineResult = await client.query<{ signature: string; extension_owned: boolean }>(`
+    SELECT p.oid::regprocedure::text AS signature,
            EXISTS (
              SELECT 1 FROM pg_depend d
               WHERE d.classid = 'pg_proc'::regclass
@@ -777,19 +1148,40 @@ async function compareSchemaObjects(client: Client, expected: ExpectedSchemaObje
 
   const actualRoutines = new Set<string>();
   for (const row of routineResult.rows) {
-    if (row.extension_owned) continue;
+    if (!row.extension_owned) actualRoutines.add(row.signature);
+  }
 
-    const signature = `${row.name}(${normalizeArgumentList(row.args)})`;
-    actualRoutines.add(signature);
+  const expectedSignatures = new Set<string>();
+  for (const routine of expected.routines) {
+    const candidate = `${routine.name}(${routine.args.map(stripTypeModifiers).join(',')})`;
+    const resolved = await client.query<{ oid: string | null }>(
+      `SELECT to_regprocedure($1)::oid::text AS oid`,
+      [candidate]
+    );
 
-    if (!expected.routines.has(signature)) {
+    const oid = resolved.rows[0]?.oid ?? null;
+    if (!oid) {
+      problems.push(`Erwartete Routine nicht eindeutig auflösbar oder fehlend: ${candidate}`);
+      continue;
+    }
+
+    const canonical = await client.query<{ signature: string }>(
+      `SELECT $1::oid::regprocedure::text AS signature`,
+      [oid]
+    );
+    expectedSignatures.add(canonical.rows[0].signature);
+  }
+
+  for (const signature of actualRoutines) {
+    if (!expectedSignatures.has(signature)) {
+      const name = signature.slice(0, signature.indexOf('('));
       problems.push(
-        `Unerwartetes Objekt im Schema public: Funktion/Prozedur "${row.name}" mit Signatur "${signature}"`
+        `Unerwartetes Objekt im Schema public: Funktion/Prozedur "${name}" mit Signatur "${signature}"`
       );
     }
   }
 
-  for (const signature of expected.routines) {
+  for (const signature of expectedSignatures) {
     if (!actualRoutines.has(signature)) {
       problems.push(`Erwartete Routine fehlt: ${signature}`);
     }
@@ -804,9 +1196,9 @@ async function compareSchemaObjects(client: Client, expected: ExpectedSchemaObje
 
   const allowedMultiranges = new Set<string>();
   for (const row of rangeResult.rows) {
-    const rangeName = normalizeIdentifier(row.range_name);
+    const rangeName = row.range_name.split('.').pop() ?? row.range_name;
     if (expected.types.get(rangeName) === 'r') {
-      allowedMultiranges.add(normalizeIdentifier(row.multirange_name));
+      allowedMultiranges.add(row.multirange_name.split('.').pop() ?? row.multirange_name);
     }
   }
 
