@@ -66,7 +66,10 @@ app.post('/api/v1/customers/sync', authenticateJwt, clientController.syncClientM
 
 app.get('/api/v1/sites', authenticateJwt, requirePermission('sites:read'), resourceController.listSites);
 app.post('/api/v1/sites', authenticateJwt, requirePermission('sites:create'), resourceController.createSite);
-app.patch('/api/v1/sites/:id', authenticateJwt, requirePermission('sites:create'), resourceController.updateSite);
+app.patch('/api/v1/sites/:id', authenticateJwt, requirePermission('sites:update'), resourceController.updateSite);
+app.post('/api/v1/sites/:id/archive', authenticateJwt, requirePermission('sites:archive'), resourceController.archiveSite);
+app.post('/api/v1/sites/:id/restore', authenticateJwt, requirePermission('sites:restore'), resourceController.restoreSite);
+app.post('/api/v1/sites/sync', authenticateJwt, resourceController.syncSiteMutations);
 
 app.get('/api/v1/shifts', authenticateJwt, requirePermission('shifts:read'), resourceController.listShifts);
 app.post('/api/v1/shifts', authenticateJwt, requirePermission('shifts:manage'), resourceController.createShift);

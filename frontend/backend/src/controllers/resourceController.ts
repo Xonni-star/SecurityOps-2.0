@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
+import crypto from 'crypto';
 
 /**
  * Tenant-scoped reference data and CRUD endpoints for the operational modules.
@@ -22,7 +23,7 @@ const siteCreateSchema = z.object({
   accessRules: z.string().optional().default('')
 });
 
-const siteUpdateSchema = siteCreateSchema.partial();
+const siteUpdateSchema = siteCreateSchema.partial().extend({ revisionVersion: z.number().int().positive() }).strict();
 
 const employeeCreateSchema = z.object({
   personnelNumber: z.string().min(2).max(50),
@@ -64,8 +65,8 @@ const EMPLOYEE_COLUMNS: Record<string, string> = {
   dateOfJoining: 'date_of_joining'
 };
 
-const SITE_SELECT = `id, client_id, site_code, name, address, security_level,
-  required_guards_day, required_guards_night, alarm_system, access_rules`;
+const SITE_SELECT = `id, tenant_id, client_id, site_code, name, address, security_level,
+  required_guards_day, required_guards_night, alarm_system, access_rules, archived_at, revision_version`;
 
 const EMPLOYEE_SELECT = `id, personnel_number, first_name, last_name, email, phone,
   role, status, weekly_hours, hourly_rate, date_of_joining`;
@@ -79,7 +80,7 @@ export async function listSites(req: Request, res: Response, next: NextFunction)
         `SELECT s.id, s.client_id, c.company_name AS client_name,
                 s.site_code, s.name, s.address, s.security_level,
                 s.required_guards_day, s.required_guards_night,
-                s.alarm_system, s.access_rules
+                s.alarm_system, s.access_rules, s.archived_at, s.revision_version
            FROM sites s
            JOIN clients c ON c.id = s.client_id AND c.tenant_id = s.tenant_id
           ORDER BY s.name`
@@ -145,7 +146,8 @@ export async function updateSite(req: Request, res: Response, next: NextFunction
     const id = z.string().uuid().parse(req.params.id);
     const body = siteUpdateSchema.parse(req.body);
 
-    const entries = Object.entries(body).filter(([, value]) => value !== undefined);
+    const { revisionVersion, ...changes } = body;
+    const entries = Object.entries(changes).filter(([, value]) => value !== undefined);
     if (entries.length === 0) {
       res.status(400).json({ success: false, message: 'Keine aktualisierbaren Felder übermittelt.' });
       return;
@@ -153,20 +155,22 @@ export async function updateSite(req: Request, res: Response, next: NextFunction
 
     const assignments = entries.map(([key], index) => `${SITE_COLUMNS[key]} = $${index + 1}`);
     const values = entries.map(([, value]) => value);
-    values.push(id, tenantId);
+    values.push(id, tenantId, revisionVersion);
 
     const result = await withTenantTransaction(tenantId, (client) =>
       client.query(
         `UPDATE sites
-            SET ${assignments.join(', ')}, updated_at = CURRENT_TIMESTAMP
-          WHERE id = $${values.length - 1} AND tenant_id = $${values.length}
+            SET ${assignments.join(', ')}, revision_version = revision_version + 1, updated_at = CURRENT_TIMESTAMP
+          WHERE id = $${values.length - 2} AND tenant_id = $${values.length - 1}
+            AND archived_at IS NULL AND revision_version = $${values.length}
           RETURNING ${SITE_SELECT}`,
         values
       )
     );
 
     if (result.rows.length === 0) {
-      res.status(404).json({ success: false, message: 'Objekt nicht gefunden.' });
+      const current = await withTenantTransaction(tenantId, (client) => client.query('SELECT revision_version, archived_at FROM sites WHERE id=$1 AND tenant_id=$2', [id, tenantId]));
+      res.status(current.rows.length ? 409 : 404).json({ success: false, message: current.rows.length ? 'Objekt wurde zwischenzeitlich geändert oder archiviert.' : 'Objekt nicht gefunden.', data: current.rows[0] });
       return;
     }
 
@@ -174,6 +178,104 @@ export async function updateSite(req: Request, res: Response, next: NextFunction
   } catch (error) {
     next(error);
   }
+}
+
+export async function archiveSite(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+    const { revisionVersion } = z.object({ revisionVersion: z.number().int().positive() }).strict().parse(req.body);
+    const result = await withTenantTransaction(tenantId, (db) => db.query(
+      `UPDATE sites SET archived_at=CURRENT_TIMESTAMP, revision_version=revision_version+1, updated_at=CURRENT_TIMESTAMP
+       WHERE id=$1 AND tenant_id=$2 AND archived_at IS NULL AND revision_version=$3 RETURNING id, archived_at, revision_version`, [id, tenantId, revisionVersion]
+    ));
+    if (!result.rows.length) {
+      const current = await withTenantTransaction(tenantId, (db) => db.query('SELECT revision_version, archived_at FROM sites WHERE id=$1 AND tenant_id=$2', [id, tenantId]));
+      res.status(current.rows.length ? 409 : 404).json({ success: false, message: current.rows.length ? 'Objekt wurde geändert oder ist bereits archiviert.' : 'Objekt nicht gefunden.', data: current.rows[0] }); return;
+    }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) { next(error); }
+}
+
+export async function restoreSite(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const id = z.string().uuid().parse(req.params.id);
+    const { revisionVersion } = z.object({ revisionVersion: z.number().int().positive() }).strict().parse(req.body);
+    const result = await withTenantTransaction(tenantId, (db) => db.query(
+      `UPDATE sites SET archived_at=NULL, revision_version=revision_version+1, updated_at=CURRENT_TIMESTAMP
+       WHERE id=$1 AND tenant_id=$2 AND archived_at IS NOT NULL AND revision_version=$3 RETURNING id, archived_at, revision_version`, [id, tenantId, revisionVersion]
+    ));
+    if (!result.rows.length) {
+      const current = await withTenantTransaction(tenantId, (db) => db.query('SELECT revision_version, archived_at FROM sites WHERE id=$1 AND tenant_id=$2', [id, tenantId]));
+      res.status(current.rows.length ? 409 : 404).json({ success: false, message: current.rows.length ? 'Objekt wurde geändert oder ist bereits aktiv.' : 'Objekt nicht gefunden.', data: current.rows[0] }); return;
+    }
+    res.json({ success: true, data: result.rows[0] });
+  } catch (error) { next(error); }
+}
+
+const siteSyncSchema = z.object({
+  deviceId: z.string().min(4).max(128).optional(),
+  mutations: z.array(z.object({ clientUuid: z.string().min(8).max(64), action: z.enum(['CREATE', 'UPDATE', 'DELETE', 'RESTORE']), baseVersion: z.number().int().positive(), payload: z.record(z.any()) }).strict()).min(1).max(100)
+}).strict();
+
+export async function syncSiteMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId; const permissions = req.user!.permissions;
+    const body = siteSyncSchema.parse(req.body);
+    const results = await withTenantTransaction(tenantId, async db => {
+      const outputs: any[] = [];
+      for (const mutation of body.mutations) {
+        const permission = mutation.action === 'CREATE' ? 'sites:create' : mutation.action === 'UPDATE' ? 'sites:update' : mutation.action === 'RESTORE' ? 'sites:restore' : 'sites:archive';
+        if (!permissions.includes(permission)) { outputs.push({ clientUuid: mutation.clientUuid, status: 'REJECTED', message: `Fehlende Berechtigung '${permission}'` }); continue; }
+        const hash = crypto.createHash('sha256').update(JSON.stringify({ action: mutation.action, baseVersion: mutation.baseVersion, payload: mutation.payload })).digest('hex');
+        await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${tenantId}:site:${mutation.clientUuid}`]);
+        const prior = await db.query('SELECT payload_hash,response_json FROM sync_idempotency_receipts WHERE tenant_id=$1 AND client_mutation_id=$2', [tenantId, mutation.clientUuid]);
+        if (prior.rows.length) { outputs.push(prior.rows[0].payload_hash === hash ? prior.rows[0].response_json : { clientUuid: mutation.clientUuid, status: 'REJECTED', message: 'Mutation-ID mit abweichendem Inhalt wiederverwendet.' }); continue; }
+        let result: any;
+        {
+          const p = mutation.payload; const id = z.string().uuid().safeParse(p.id);
+          if (mutation.action === 'CREATE') {
+            const data = siteCreateSchema.safeParse(p);
+            if (!id.success || !data.success) result = { clientUuid: mutation.clientUuid, status: 'REJECTED', message: 'Ungültige Standortdaten.' };
+            else {
+              const d = data.data;
+              const inserted = await db.query(`INSERT INTO sites (id,tenant_id,client_id,site_code,name,address,security_level,required_guards_day,required_guards_night,alarm_system,access_rules,client_mutation_id)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (tenant_id,client_mutation_id) DO NOTHING RETURNING id,revision_version`,
+                [id.data,tenantId,d.clientId,d.siteCode,d.name,d.address,d.securityLevel,d.requiredGuardsDay,d.requiredGuardsNight,d.alarmSystem,d.accessRules,mutation.clientUuid]);
+              const row = inserted.rows[0] || (await db.query('SELECT id,revision_version FROM sites WHERE tenant_id=$1 AND client_mutation_id=$2',[tenantId,mutation.clientUuid])).rows[0];
+              result = { clientUuid: mutation.clientUuid, serverId: row.id, status: 'SYNCED', serverVersion: row.revision_version };
+            }
+          } else if (!id.success) result = { clientUuid: mutation.clientUuid, status: 'REJECTED', message: 'Ungültige Standort-ID.' };
+          else if (mutation.action === 'UPDATE') {
+            const { id: _id, ...changes } = p; const v = siteUpdateSchema.safeParse({ ...changes, revisionVersion: mutation.baseVersion });
+            if (!v.success || !Object.keys(changes).length) result = { clientUuid: mutation.clientUuid, serverId: id.data, status: 'REJECTED', message: 'Ungültige Standortdaten.' };
+            else {
+              const { revisionVersion, ...fields } = v.data; const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+              const values: any[] = entries.map(([,value])=>value); const setSql = entries.map(([key],i)=>`${SITE_COLUMNS[key]}=$${i+1}`);
+              values.push(id.data,tenantId,revisionVersion);
+              const updated = await db.query(`UPDATE sites SET ${setSql.join(',')},revision_version=revision_version+1,updated_at=CURRENT_TIMESTAMP WHERE id=$${values.length-2} AND tenant_id=$${values.length-1} AND archived_at IS NULL AND revision_version=$${values.length} RETURNING revision_version`,values);
+              result = updated.rows.length ? { clientUuid: mutation.clientUuid, serverId: id.data, status: 'SYNCED', serverVersion: updated.rows[0].revision_version } : await siteSyncConflict(db, tenantId, id.data, mutation.clientUuid, mutation.baseVersion, p);
+            }
+          } else {
+            const restoring = mutation.action === 'RESTORE';
+            const changed = await db.query(`UPDATE sites SET archived_at=${restoring ? 'NULL' : 'CURRENT_TIMESTAMP'},revision_version=revision_version+1,updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND tenant_id=$2 AND archived_at IS ${restoring ? 'NOT NULL' : 'NULL'} AND revision_version=$3 RETURNING revision_version`, [id.data,tenantId,mutation.baseVersion]);
+            result = changed.rows.length ? { clientUuid: mutation.clientUuid, serverId: id.data, status: 'SYNCED', serverVersion: changed.rows[0].revision_version } : await siteSyncConflict(db,tenantId,id.data,mutation.clientUuid,mutation.baseVersion,p);
+          }
+        }
+        const status = result.status || 'REJECTED';
+        await db.query(`INSERT INTO sync_idempotency_receipts (tenant_id,client_mutation_id,entity_type,action,payload_hash,status,server_id,server_version,response_json) VALUES ($1,$2,'site',$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, [tenantId,mutation.clientUuid,mutation.action,hash,status,result.serverId||null,result.serverVersion||mutation.baseVersion,JSON.stringify(result)]);
+        outputs.push(result);
+      }
+      return outputs;
+    });
+    res.json({ success: true, data: results });
+  } catch (error) { next(error); }
+}
+
+async function siteSyncConflict(db: any, tenantId: string, id: string, clientUuid: string, baseVersion: number, payload: any): Promise<any> {
+  const current = await db.query('SELECT revision_version,archived_at FROM sites WHERE id=$1 AND tenant_id=$2',[id,tenantId]);
+  return current.rows.length ? { clientUuid,serverId:id,status:'CONFLICT',serverVersion:current.rows[0].revision_version,conflictData:{serverVersion:current.rows[0].revision_version,clientVersion:baseVersion,clientPayload:payload,archivedAt:current.rows[0].archived_at} } : { clientUuid,serverId:id,status:'REJECTED',message:'Standort nicht gefunden.' };
 }
 
 export async function createEmployee(req: Request, res: Response, next: NextFunction): Promise<void> {

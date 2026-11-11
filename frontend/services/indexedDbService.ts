@@ -10,8 +10,8 @@ export interface OutboxMutation {
   tenantId: string;
   userId: string;
   deviceId: string;
-  entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'attachment' | 'patrol' | 'handover' | 'client';
-  action: 'CREATE' | 'UPDATE' | 'DELETE';
+  entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'attachment' | 'patrol' | 'handover' | 'client' | 'site';
+  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RESTORE';
   payload: any;
   occurredAt: string;
   baseVersion: number;

@@ -125,7 +125,9 @@ function mapSiteRow(row: any, tenantId: string): Site {
     alarmSystem: asString(row.alarm_system),
     instructionsCount: 0,
     accessRules: asString(row.access_rules),
-    activeAlarms: 0
+    activeAlarms: 0,
+    revisionVersion: asNumber(row.revision_version ?? row.revisionVersion, 1),
+    archivedAt: row.archived_at ?? row.archivedAt ?? null
   };
 }
 
@@ -347,6 +349,9 @@ interface SecurityOpsStore {
   updateClient: (id: string, updates: Partial<Client>) => Promise<void>;
   archiveClient: (id: string) => Promise<void>;
   addSite: (site: Omit<Site, 'id' | 'tenantId'>) => Promise<void>;
+  updateSite: (id: string, updates: Partial<Site>) => Promise<void>;
+  archiveSite: (id: string) => Promise<void>;
+  restoreSite: (id: string) => Promise<void>;
   addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => Promise<void>;
   updateEmployee: (id: string, updates: Partial<Employee>) => Promise<void>;
   addShift: (shift: Omit<Shift, 'id' | 'tenantId'>) => Promise<void>;
@@ -675,7 +680,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         action: queueEntry.action,
         payload: queueEntry.payload,
         occurredAt: new Date().toISOString(),
-        baseVersion: 1
+        baseVersion: queueEntry.baseVersion ?? 1
       });
 
       set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
@@ -731,10 +736,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       });
 
       try {
-        for (const items of [pendingItems.filter((p) => p.entityType !== 'client'), pendingItems.filter((p) => p.entityType === 'client')]) {
+        for (const items of [pendingItems.filter((p) => !['client', 'site'].includes(p.entityType)), pendingItems.filter((p) => p.entityType === 'client'), pendingItems.filter((p) => p.entityType === 'site')]) {
           if (!items.length) continue;
-          const path = items[0].entityType === 'client' ? '/customers/sync' : '/sync/push';
-          const serverResponse: any = await apiClient.post(path, makeSyncPayload(items));
+          const path = items[0].entityType === 'client' ? '/customers/sync' : items[0].entityType === 'site' ? '/sites/sync' : '/sync/push';
+          const orderedItems = items[0].entityType === 'site' ? [...items].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)) : items;
+          const serverResponse: any = await apiClient.post(path, makeSyncPayload(orderedItems));
           const receipts = Array.isArray(serverResponse) ? serverResponse : serverResponse?.data;
           if (!Array.isArray(receipts)) continue;
           for (const receipt of receipts) {
@@ -1214,7 +1220,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     const { currentTenantId } = get();
 
     try {
-      const created = await apiClient.post<any>('/sites', {
+      const payload = {
         clientId: s.clientId,
         siteCode: s.siteCode,
         name: s.name,
@@ -1224,7 +1230,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         requiredGuardsNight: s.requiredGuardsNight,
         alarmSystem: s.alarmSystem,
         accessRules: s.accessRules
-      });
+      };
+      if (!get().isOnline) {
+        const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `site-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        await get().enqueueOfflineAction({ tenantId: currentTenantId, entityType: 'site', action: 'CREATE', payload: { id, ...payload }, baseVersion: 1 });
+        set(state => ({ sites: [mapSiteRow({ id, ...payload, client_name: s.clientName }, currentTenantId), ...state.sites] }));
+        get().addNotification('Objekt vorgemerkt', `${s.name} wird bei Verbindung synchronisiert.`, 'info'); return;
+      }
+      const created = await apiClient.post<any>('/sites', payload);
 
       const newSite = mapSiteRow(
         {
@@ -1250,6 +1263,49 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
         'alert'
       );
+    }
+  },
+
+  updateSite: async (id, updates) => {
+    const site = get().sites.find(s => s.id === id); if (!site) return;
+    const revisionVersion = site.revisionVersion || 1;
+    const changes = { clientId: updates.clientId ?? site.clientId, siteCode: updates.siteCode ?? site.siteCode, name: updates.name ?? site.name, address: updates.address ?? site.address, securityLevel: updates.securityLevel ?? site.securityLevel };
+    try {
+      if (!get().isOnline) throw new Error('offline');
+      const result = await apiClient.patch<any>(`/sites/${id}`, { ...changes, revisionVersion });
+      const updated = mapSiteRow({ ...result, client_name: get().clients.find(c=>c.id===changes.clientId)?.companyName, ...changes, revision_version: result.revision_version }, site.tenantId);
+      set(state => ({ sites: state.sites.map(s => s.id === id ? updated : s) }));
+      get().addNotification('Objekt aktualisiert', `${site.name} wurde gespeichert.`, 'info');
+    } catch (error: any) {
+      if (get().isOnline) { get().addNotification(error?.status === 409 ? 'Versionskonflikt' : 'Objekt nicht gespeichert', error?.message || 'Änderung fehlgeschlagen.', 'alert'); return; }
+      await get().enqueueOfflineAction({ tenantId: site.tenantId, entityType: 'site', action: 'UPDATE', payload: { id, ...changes }, baseVersion: revisionVersion });
+      set(state => ({ sites: state.sites.map(s => s.id === id ? { ...s, ...changes, revisionVersion: revisionVersion + 1 } : s) }));
+    }
+  },
+
+  archiveSite: async (id) => {
+    const site = get().sites.find(s=>s.id===id); if (!site) return;
+    const revisionVersion = site.revisionVersion || 1;
+    try { if (!get().isOnline) throw new Error('offline');
+      const result = await apiClient.post<any>(`/sites/${id}/archive`, { revisionVersion });
+      set(state => ({ sites: state.sites.map(s => s.id === id ? { ...s, archivedAt: result.archived_at, revisionVersion: result.revision_version } : s) }));
+      get().addNotification('Standort archiviert', `${site.name} wurde archiviert. Verknüpfte Einsatzdaten bleiben erhalten.`, 'info');
+    } catch (error: any) { if (get().isOnline) { get().addNotification(error?.status === 409 ? 'Versionskonflikt' : 'Archivierung fehlgeschlagen', error?.message || 'Objekt nicht archiviert.', 'alert'); return; }
+      await get().enqueueOfflineAction({ tenantId: site.tenantId, entityType: 'site', action: 'DELETE', payload: { id }, baseVersion: revisionVersion });
+      set(state => ({ sites: state.sites.map(s => s.id === id ? { ...s, archivedAt: new Date().toISOString(), revisionVersion: revisionVersion + 1 } : s) }));
+    }
+  },
+
+  restoreSite: async (id) => {
+    const site = get().sites.find(s=>s.id===id); if (!site) return;
+    const revisionVersion = site.revisionVersion || 1;
+    try { if (!get().isOnline) throw new Error('offline');
+      const result = await apiClient.post<any>(`/sites/${id}/restore`, { revisionVersion });
+      set(state => ({ sites: state.sites.map(s => s.id === id ? { ...s, archivedAt: null, revisionVersion: result.revision_version } : s) }));
+      get().addNotification('Standort wiederhergestellt', `${site.name} ist wieder aktiv.`, 'info');
+    } catch (error: any) { if (get().isOnline) { get().addNotification(error?.status === 409 ? 'Versionskonflikt' : 'Wiederherstellung fehlgeschlagen', error?.message || 'Objekt nicht wiederhergestellt.', 'alert'); return; }
+      await get().enqueueOfflineAction({ tenantId: site.tenantId, entityType: 'site', action: 'RESTORE', payload: { id }, baseVersion: revisionVersion });
+      set(state => ({ sites: state.sites.map(s => s.id === id ? { ...s, archivedAt: null, revisionVersion: revisionVersion + 1 } : s) }));
     }
   },
 

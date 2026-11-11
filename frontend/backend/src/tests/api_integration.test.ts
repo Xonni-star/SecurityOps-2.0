@@ -7,6 +7,7 @@ import { pool, migrationPool } from '../config/database';
 const SEED_PASSWORD = 'SecOpsVault2025SecurePassword!';
 const SEED_USER_EMAIL = 'a.schmidt@ffm-sec.de';
 const BAVARIA_USER_EMAIL = 'api.bavaria@secops.local';
+const SITE_RESTRICTED_USER_EMAIL = 'api.site-restricted@secops.local';
 const TENANT_BAVARIA_ID = '22222222-2222-2222-2222-222222222222';
 const clientNumber = `API-TEST-${Date.now()}`;
 const siteCode = `API-SITE-${Date.now()}`;
@@ -33,6 +34,7 @@ beforeAll(async () => {
     BAVARIA_USER_EMAIL
   ]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [BAVARIA_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM users WHERE email = $1', [SITE_RESTRICTED_USER_EMAIL]);
 
   const passwordHash = await argon2.hash(SEED_PASSWORD, { type: argon2.argon2id });
   const userResult = await migrationPool.query(
@@ -55,6 +57,14 @@ beforeAll(async () => {
      ON CONFLICT DO NOTHING`,
     [userResult.rows[0].id, roleResult.rows[0].id, TENANT_BAVARIA_ID]
   );
+
+  const restrictedUser = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone) VALUES ($1,$2,'API','Restricted','+49 30 001') RETURNING id`,
+    [SITE_RESTRICTED_USER_EMAIL, passwordHash]
+  );
+  const restrictedRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter' LIMIT 1");
+  if (!restrictedRole.rows.length) throw new Error('Seed-Rolle Wachdienstmitarbeiter fehlt.');
+  await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [restrictedUser.rows[0].id, restrictedRole.rows[0].id, '11111111-1111-1111-1111-111111111111']);
 });
 
 afterAll(async () => {
@@ -70,6 +80,8 @@ afterAll(async () => {
     BAVARIA_USER_EMAIL
   ]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [BAVARIA_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email=$1)', [SITE_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM users WHERE email = $1', [SITE_RESTRICTED_USER_EMAIL]);
   await pool.end();
   await migrationPool.end();
 });
@@ -391,6 +403,50 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect((shiftsResponse.body.data as Array<{ id: string }>).some((row) => row.id === createdShiftId)).toBe(false);
     expect((keysResponse.body.data as Array<{ key_number: string }>).some((row) => row.key_number === keyNumber)).toBe(false);
     expect((tasksResponse.body.data as Array<{ id: string }>).some((row) => row.id === createdTaskId)).toBe(false);
+  });
+
+  test('Standorte werden revisionsgeschützt archiviert/wiederhergestellt; operative Beziehungen bleiben erhalten', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    expect(createdSiteId).toBeTruthy();
+    const update = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set('Authorization', `Bearer ${token}`).send({ name: 'API Testobjekt aktualisiert', revisionVersion: 1 });
+    expect(update.status).toBe(200);
+    expect(update.body.data.revision_version).toBe(2);
+    const stale = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set('Authorization', `Bearer ${token}`).send({ name: 'Veraltet', revisionVersion: 1 });
+    expect(stale.status).toBe(409);
+    const foreign = await request(app).post(`/api/v1/sites/${createdSiteId}/archive`).set('Authorization', `Bearer ${await login(BAVARIA_USER_EMAIL)}`).send({ revisionVersion: 2 });
+    expect(foreign.status).toBe(404);
+    const archive = await request(app).post(`/api/v1/sites/${createdSiteId}/archive`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 2 });
+    expect(archive.status).toBe(200);
+    expect(archive.body.data.revision_version).toBe(3);
+    const staleRestore = await request(app).post(`/api/v1/sites/${createdSiteId}/restore`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 2 });
+    expect(staleRestore.status).toBe(409);
+    const rows = await migrationPool.query('SELECT (SELECT count(*) FROM shifts WHERE id=$1) AS shifts, (SELECT count(*) FROM keys WHERE id=$2) AS keys, (SELECT count(*) FROM tasks WHERE id=$3) AS tasks FROM sites WHERE id=$4', [createdShiftId, createdKeyId, createdTaskId, createdSiteId]);
+    expect(rows.rows[0]).toMatchObject({ shifts: '1', keys: '1', tasks: '1' });
+    const restore = await request(app).post(`/api/v1/sites/${createdSiteId}/restore`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 3 });
+    expect(restore.status).toBe(200);
+    expect(restore.body.data.revision_version).toBe(4);
+  });
+
+  test('Site-Outbox unterstützt idempotente Offline-Anlage und weist Mutation-ID-Inhaltsänderung ab', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    const mutationId = `site-offline-${Date.now()}`;
+    const id = crypto.randomUUID();
+    const payload = { id, clientId: 'c1111111-1111-1111-1111-111111111111', siteCode: `OFF-${Date.now()}`, name: 'Offline Standort', address: 'Offlineweg 1', securityLevel: 'Mittel', requiredGuardsDay: 1, requiredGuardsNight: 1, alarmSystem: '', accessRules: '' };
+    const send = (p: any) => request(app).post('/api/v1/sites/sync').set('Authorization', `Bearer ${token}`).send({ mutations: [{ clientUuid: mutationId, action: 'CREATE', baseVersion: 1, payload: p }] });
+    const first = await send(payload); const replay = await send(payload); const altered = await send({ ...payload, name: 'Manipuliert' });
+    expect(first.status).toBe(200); expect(first.body.data[0].status).toBe('SYNCED'); expect(replay.body.data).toEqual(first.body.data); expect(altered.body.data[0].status).toBe('REJECTED');
+    await migrationPool.query('DELETE FROM sites WHERE id=$1', [id]);
+  });
+
+  test('Site-API weist unauthentifizierte Änderungsanfragen zurück', async () => {
+    const response = await request(app).post(`/api/v1/sites/${createdSiteId}/archive`).send({ revisionVersion: 1 });
+    expect(response.status).toBe(401);
+  });
+
+  test('Standortänderungen ohne sites:update-Berechtigung werden abgewiesen', async () => {
+    const token = await login(SITE_RESTRICTED_USER_EMAIL);
+    const response = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set('Authorization', `Bearer ${token}`).send({ name: 'Nicht erlaubt', revisionVersion: 4 });
+    expect(response.status).toBe(403);
   });
 
   test('8. Wachbucheinträge können weiterhin manuell über die geschützte API gespeichert und geladen werden', async () => {

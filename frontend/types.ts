@@ -135,6 +135,8 @@ export interface Site {
   instructionsCount: number;
   accessRules: string;
   activeAlarms: number;
+  revisionVersion?: number;
+  archivedAt?: string | null;
 }
 
 export interface Shift {
@@ -281,13 +283,14 @@ export type SyncStatus = 'synced' | 'pending' | 'conflict' | 'failed';
 export interface OfflineQueueItem {
   id: string;
   tenantId: string;
-  entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'document' | 'patrol' | 'handover';
-  action: 'CREATE' | 'UPDATE' | 'DELETE';
+  entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'document' | 'patrol' | 'handover' | 'site' | 'client';
+  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RESTORE';
   payload: any;
   createdAt: string;
   retryCount: number;
   status: SyncStatus;
   errorMessage?: string;
+  baseVersion?: number;
   conflictDetails?: {
     serverVersion: number;
     clientVersion: number;

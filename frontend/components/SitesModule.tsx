@@ -14,7 +14,10 @@ import {
   Siren,
   Clock,
   History,
-  BookOpen
+  BookOpen,
+  Archive,
+  RotateCcw,
+  Pencil
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
 import { Site } from '../types';
@@ -28,7 +31,7 @@ export const SitesModule: React.FC = () => {
     getTenantGuardBook,
     getTenantKeys,
     getTenantEmergencyPlans,
-    addSite
+    addSite, updateSite, archiveSite, restoreSite
   } = useSecurityStore();
 
   const sites = getTenantSites();
@@ -39,9 +42,13 @@ export const SitesModule: React.FC = () => {
   const keys = getTenantKeys();
   const emergencyPlans = getTenantEmergencyPlans();
 
-  const [selectedSite, setSelectedSite] = useState<Site | null>(sites[0] || null);
+  const [selectedSiteId, setSelectedSiteId] = useState<string | null>(sites[0]?.id || null);
+  const selectedSite = sites.find(site => site.id === selectedSiteId) || sites[0] || null;
   const [activeSiteTab, setActiveSiteTab] = useState<'overview' | 'contacts' | 'roster' | 'guardbook' | 'keys' | 'alarms' | 'checkpoints'>('overview');
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSiteActionPending, setIsSiteActionPending] = useState(false);
+  const [editingSiteId, setEditingSiteId] = useState<string | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
 
   // New site form
   const [newSiteCode, setNewSiteCode] = useState('');
@@ -50,11 +57,13 @@ export const SitesModule: React.FC = () => {
   const [selectedClientId, setSelectedClientId] = useState(clients[0]?.id || '');
   const [securityLevel, setSecurityLevel] = useState<Site['securityLevel']>('Hoch (KRITIS / BSI)');
 
-  const handleCreateSite = (e: React.FormEvent) => {
+  const openCreate = () => { setEditingSiteId(null); setNewSiteCode(''); setNewSiteName(''); setNewAddress(''); setSelectedClientId(clients[0]?.id || ''); setSecurityLevel('Hoch (KRITIS / BSI)'); setIsModalOpen(true); };
+  const openEdit = (site: Site) => { setEditingSiteId(site.id); setNewSiteCode(site.siteCode); setNewSiteName(site.name); setNewAddress(site.address); setSelectedClientId(site.clientId); setSecurityLevel(site.securityLevel); setIsModalOpen(true); };
+  const handleCreateSite = async (e: React.FormEvent) => {
     e.preventDefault();
     const client = clients.find((c) => c.id === selectedClientId);
 
-    addSite({
+    const input = {
       clientId: selectedClientId,
       clientName: client?.companyName || 'Mandant',
       siteCode: newSiteCode,
@@ -72,12 +81,19 @@ export const SitesModule: React.FC = () => {
       checkpoints: [
         { id: `cp-${Date.now()}-1`, code: 'CP-01', name: 'Haupteingang', locationDetails: 'Foyer', rfidTag: 'RFID-1001', requiredIntervalMinutes: 60 }
       ]
-    });
+    };
+    setIsSiteActionPending(true);
+    try { if (editingSiteId) await updateSite(editingSiteId, input); else await addSite(input); }
+    finally { setIsSiteActionPending(false); }
 
     setIsModalOpen(false);
     setNewSiteCode('');
     setNewSiteName('');
     setNewAddress('');
+  };
+  const runSiteAction = async (action: () => Promise<void>) => {
+    setIsSiteActionPending(true);
+    try { await action(); } finally { setIsSiteActionPending(false); }
   };
 
   // Filter object-scoped data
@@ -100,7 +116,7 @@ export const SitesModule: React.FC = () => {
         </div>
 
         <button
-          onClick={() => setIsModalOpen(true)}
+          onClick={openCreate}
           className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg shadow-blue-600/20 transition flex items-center gap-2 shrink-0 self-start sm:self-auto"
         >
           <Plus className="w-4 h-4" />
@@ -111,14 +127,12 @@ export const SitesModule: React.FC = () => {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Sites List Column */}
         <div className="space-y-3">
-          <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-            Aktive Schutzobjekte ({sites.length}):
-          </span>
+          <div className="flex items-center justify-between"><span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">{showArchived ? 'Archivierte' : 'Aktive'} Schutzobjekte ({sites.filter(s => Boolean(s.archivedAt) === showArchived).length})</span><button className="text-[10px] text-blue-400" onClick={() => setShowArchived(v=>!v)}>{showArchived ? 'Aktive anzeigen' : 'Archiv anzeigen'}</button></div>
 
-          {sites.map((site) => (
+          {sites.filter(site => Boolean(site.archivedAt) === showArchived).map((site) => (
             <div
               key={site.id}
-              onClick={() => setSelectedSite(site)}
+              onClick={() => setSelectedSiteId(site.id)}
               className={`p-4 rounded-xl cursor-pointer transition border ${
                 selectedSite?.id === site.id
                   ? 'bg-blue-600/10 border-blue-500/50 shadow-md'
@@ -131,6 +145,7 @@ export const SitesModule: React.FC = () => {
                     {site.siteCode}
                   </span>
                   <h3 className="font-bold text-slate-200 text-sm mt-1">{site.name}</h3>
+                  {site.archivedAt && <span className="text-[10px] text-amber-400">Archiviert · {new Date(site.archivedAt).toLocaleDateString('de-DE')}</span>}
                   <p className="text-xs text-slate-400 mt-0.5 truncate max-w-[220px]">{site.address}</p>
                 </div>
               </div>
@@ -157,9 +172,10 @@ export const SitesModule: React.FC = () => {
                 <p className="text-xs text-slate-400 mt-1">{selectedSite.address} (Kunde: {selectedSite.clientName})</p>
               </div>
 
-              <span className="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-300 border border-indigo-500/30 self-start">
+              <div className="flex flex-wrap gap-2 self-start"><span className={`px-3 py-1 rounded-full text-xs font-semibold border ${selectedSite.archivedAt ? 'bg-amber-500/10 text-amber-300 border-amber-500/30' : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30'}`}>{selectedSite.archivedAt ? 'Archiviert' : 'Aktiv'} · Revision {selectedSite.revisionVersion || 1}</span><span className="px-3 py-1 rounded-full text-xs font-semibold bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
                 {selectedSite.securityLevel}
-              </span>
+              </span></div>
+              <div className="flex gap-2">{!selectedSite.archivedAt ? <><button disabled={isSiteActionPending} onClick={() => openEdit(selectedSite)} className="text-xs px-3 py-1.5 rounded-lg bg-slate-800 text-slate-200 disabled:opacity-50"><Pencil className="inline w-3 h-3 mr-1"/>Bearbeiten</button><button disabled={isSiteActionPending} onClick={() => void runSiteAction(() => archiveSite(selectedSite.id))} className="text-xs px-3 py-1.5 rounded-lg bg-amber-900/40 text-amber-200 disabled:opacity-50"><Archive className="inline w-3 h-3 mr-1"/>{isSiteActionPending ? 'Wird archiviert…' : 'Archivieren'}</button></> : <button disabled={isSiteActionPending} onClick={() => void runSiteAction(() => restoreSite(selectedSite.id))} className="text-xs px-3 py-1.5 rounded-lg bg-emerald-900/40 text-emerald-200 disabled:opacity-50"><RotateCcw className="inline w-3 h-3 mr-1"/>{isSiteActionPending ? 'Wird wiederhergestellt…' : 'Wiederherstellen'}</button>}</div>
             </div>
 
             {/* Object Sub-Tabs */}
@@ -348,7 +364,7 @@ export const SitesModule: React.FC = () => {
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-[#0f172a] border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-base font-bold text-white">Neues Sicherheitsobjekt erfassen</h3>
+              <h3 className="text-base font-bold text-white">{editingSiteId ? 'Sicherheitsobjekt bearbeiten' : 'Neues Sicherheitsobjekt erfassen'}</h3>
               <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
             </div>
 
@@ -421,6 +437,7 @@ export const SitesModule: React.FC = () => {
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
                 <button
                   type="button"
+                  disabled={isSiteActionPending}
                   onClick={() => setIsModalOpen(false)}
                   className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
                 >
@@ -430,7 +447,7 @@ export const SitesModule: React.FC = () => {
                   type="submit"
                   className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold"
                 >
-                  Objekt anlegen
+                  {isSiteActionPending ? 'Wird gespeichert…' : editingSiteId ? 'Änderungen speichern' : 'Objekt anlegen'}
                 </button>
               </div>
             </form>

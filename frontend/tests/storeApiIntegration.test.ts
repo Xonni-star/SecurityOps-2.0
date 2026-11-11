@@ -370,6 +370,28 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(state.notifications[0].title).toBe('Objekt gespeichert');
   });
 
+  test('Standortänderungen werden offline mit Basisrevision in der Outbox gesichert und an Site-Sync gesendet', async () => {
+    const mutationWrite = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
+    useSecurityStore.setState({ isOnline: false, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-regression', sites: [{
+      id: siteRow.id, tenantId: 'tenant-frankfurt', clientId: customerRow.id, clientName: customerRow.company_name,
+      siteCode: siteRow.site_code, name: siteRow.name, address: siteRow.address, securityLevel: 'Mittel',
+      siteManagerId: '', siteManagerName: '', requiredGuardsDay: 1, requiredGuardsNight: 1, checkpoints: [], alarmSystem: '', instructionsCount: 0, accessRules: '', activeAlarms: 0, revisionVersion: 7
+    }] });
+
+    await useSecurityStore.getState().updateSite(siteRow.id, { name: 'Lokal geändert' });
+    expect(mutationWrite).toHaveBeenCalledWith(expect.objectContaining({ entityType: 'site', action: 'UPDATE', baseVersion: 7, payload: expect.objectContaining({ name: 'Lokal geändert' }) }));
+
+    const pending = [{ id: 'site-mutation-1234', tenantId: 'tenant-frankfurt', userId: 'user-regression', deviceId: 'device-test', entityType: 'site', action: 'UPDATE', payload: { id: siteRow.id, name: 'Lokal geändert' }, occurredAt: new Date().toISOString(), baseVersion: 7, retryCount: 0, status: 'PENDING' }];
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue(pending as any);
+    vi.spyOn(offlineVault, 'getDeviceId').mockReturnValue('device-test');
+    vi.spyOn(offlineVault, 'markSynced').mockResolvedValue();
+    mockedApi.post.mockResolvedValueOnce([{ clientUuid: pending[0].id, status: 'SYNCED', serverVersion: 8 }]);
+    useSecurityStore.setState({ isOnline: true });
+    const result = await useSecurityStore.getState().triggerManualSync();
+    expect(mockedApi.post).toHaveBeenCalledWith('/sites/sync', expect.objectContaining({ mutations: [expect.objectContaining({ baseVersion: 7, action: 'UPDATE' })] }));
+    expect(result.success).toBe(1);
+  });
+
   test('6. addEmployee und updateEmployee persistieren über POST/PATCH', async () => {
     mockedApi.post.mockResolvedValueOnce({
       id: '77777777-7777-7777-7777-777777777777',
