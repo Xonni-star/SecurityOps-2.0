@@ -418,4 +418,98 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
     ).rejects.toThrow(/Inkonsistente Versionskennung: Datenbank meldet "3"/);
   });
+
+  test('22. Zusätzliche permissive RLS-Policy verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `CREATE POLICY extra_permissive ON clients
+         AS PERMISSIVE FOR SELECT TO PUBLIC USING (true)`
+    );
+
+    await expectBaselineRejected(db, dir, /RLS-Policy clients: 2 Policies gefunden .*extra_permissive.*PERMISSIVE/);
+  });
+
+  test('23. Zusätzliche restrictive RLS-Policy verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `CREATE POLICY extra_restrictive ON clients
+         AS RESTRICTIVE FOR SELECT TO PUBLIC USING (true)`
+    );
+
+    await expectBaselineRejected(db, dir, /RLS-Policy clients: 2 Policies gefunden .*extra_restrictive.*RESTRICTIVE/);
+  });
+
+  test('24. Mehrere zusätzliche Policies werden vollständig erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `CREATE POLICY extra_a ON clients AS PERMISSIVE FOR SELECT TO PUBLIC USING (true);
+       CREATE POLICY extra_b ON clients AS PERMISSIVE FOR INSERT TO PUBLIC WITH CHECK (true);`
+    );
+
+    await expectBaselineRejected(
+      db,
+      dir,
+      /RLS-Policy clients: 3 Policies gefunden .*extra_a.*extra_b/
+    );
+  });
+
+  test('25. Eine tatsächlich leere Datenbank wird weiterhin akzeptiert', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+
+    const result = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+
+    expect(result.applied).toEqual(['001', '002', '003', '004']);
+    expect(result.baselined).toEqual([]);
+    expect((await historyRows(db))).toHaveLength(4);
+  });
+
+  test('26. Fremde Tabelle verhindert die Einstufung als leere Datenbank', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await queryInDatabase(db, `CREATE TABLE fremde_tabelle (id INT); INSERT INTO fremde_tabelle VALUES (1);`);
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Unerwartetes Objekt im Schema public: Tabelle "fremde_tabelle"/);
+
+    const rows = await queryInDatabase<{ count: string }>(db, 'SELECT COUNT(*)::text AS count FROM fremde_tabelle');
+    expect(rows[0].count).toBe('1');
+  });
+
+  test('27. Vorhandene View ohne erwartete Tabellen verhindert die Einstufung als leer', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await queryInDatabase(db, 'CREATE VIEW fremde_view AS SELECT 1 AS x');
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Unerwartetes Objekt im Schema public: View "fremde_view"/);
+  });
+
+  test('28. Bestehende Daten bleiben bei abgelehnter Leer-Erkennung unverändert', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await queryInDatabase(db, `CREATE TABLE bestandsdaten (id INT, wert TEXT); INSERT INTO bestandsdaten VALUES (1, 'bleibt');`);
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Unerwartetes Objekt im Schema public/);
+
+    const rows = await queryInDatabase<{ wert: string }>(db, 'SELECT wert FROM bestandsdaten');
+    expect(rows[0].wert).toBe('bleibt');
+
+    const count = await queryInDatabase<{ count: string }>(
+      db,
+      `SELECT COUNT(*)::text AS count FROM schema_migrations`
+    );
+    expect(count[0].count).toBe('0');
+  });
 });

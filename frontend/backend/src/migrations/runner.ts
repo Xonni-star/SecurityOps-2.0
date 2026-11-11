@@ -385,6 +385,60 @@ interface SchemaInspection {
   problems: string[];
 }
 
+interface PolicyRow {
+  tablename: string;
+  policyname: string;
+  permissive: string;
+  roles: string;
+  cmd: string;
+  qual: string | null;
+  with_check: string | null;
+}
+
+interface UnexpectedPublicObject {
+  object_type: string;
+  name: string;
+  kind: string;
+}
+
+/**
+ * Ermittelt sämtliche Objekte im Schema `public`, die nicht zur erwarteten
+ * SecurityOps-Struktur gehören. Wird nur für die Leer-Datenbank-Erkennung
+ * verwendet und verändert keine Objekte.
+ */
+async function findUnexpectedPublicObjects(client: Client): Promise<UnexpectedPublicObject[]> {
+  const result = await client.query<UnexpectedPublicObject>(`
+    SELECT 'relation'::text AS object_type, c.relname AS name,
+           CASE c.relkind
+             WHEN 'r' THEN 'Tabelle'
+             WHEN 'p' THEN 'partitionierte Tabelle'
+             WHEN 'v' THEN 'View'
+             WHEN 'm' THEN 'Materialized View'
+             WHEN 'S' THEN 'Sequenz'
+             WHEN 'f' THEN 'Fremdtabelle'
+             ELSE c.relkind::text
+           END AS kind
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+       AND c.relname <> '${HISTORY_TABLE}'
+    UNION ALL
+    SELECT 'routine'::text, p.proname, 'Funktion/Prozedur'
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+     WHERE n.nspname = 'public'
+    UNION ALL
+    SELECT 'type'::text, t.typname,
+           CASE t.typtype WHEN 'e' THEN 'Enum' WHEN 'd' THEN 'Domain' ELSE t.typtype::text END
+      FROM pg_type t
+      JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname = 'public' AND t.typtype IN ('e', 'd')
+    ORDER BY 1, 2
+  `);
+  return result.rows;
+}
+
 async function inspectSchema(client: Client): Promise<SchemaInspection> {
   const problems: string[] = [];
 
@@ -396,13 +450,21 @@ async function inspectSchema(client: Client): Promise<SchemaInspection> {
   const existingTables = tableResult.rows.filter((row) => row.present).map((row) => row.name);
   const missingTables = tableResult.rows.filter((row) => !row.present).map((row) => row.name);
 
-  for (const table of missingTables) {
-    problems.push(`Tabelle fehlt: ${table}`);
+  // Eine Datenbank gilt nur dann als leer, wenn neben den erwarteten Tabellen
+  // auch keine fremden Tabellen, Views, Materialized Views, Sequenzen,
+  // Fremdtabellen, Funktionen, Prozeduren, Enums oder Domains existieren.
+  if (existingTables.length === 0) {
+    const unexpected = await findUnexpectedPublicObjects(client);
+    return {
+      existingTables,
+      problems: unexpected.map(
+        (object) => `Unerwartetes Objekt im Schema public: ${object.kind} "${object.name}"`
+      )
+    };
   }
 
-  // Eine leere Datenbank ist der einzige Zustand ohne weitere Prüfungen.
-  if (existingTables.length === 0) {
-    return { existingTables, problems: [] };
+  for (const table of missingTables) {
+    problems.push(`Tabelle fehlt: ${table}`);
   }
 
   // Spalten
@@ -538,21 +600,21 @@ async function inspectSchema(client: Client): Promise<SchemaInspection> {
   );
   const rlsByTable = new Map(rlsResult.rows.map((row) => [row.relname, row]));
 
-  const policyResult = await client.query<{
-    tablename: string;
-    policyname: string;
-    permissive: string;
-    roles: string;
-    cmd: string;
-    qual: string | null;
-    with_check: string | null;
-  }>(
+  const policyResult = await client.query<PolicyRow>(
     `SELECT tablename, policyname, permissive, roles::text AS roles, cmd, qual, with_check
        FROM pg_policies
       WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
     [EXPECTED_RLS_TABLES]
   );
-  const policiesByTable = new Map(policyResult.rows.map((row) => [row.tablename, row]));
+
+  // Alle Policies je Tabelle sammeln – nicht nur die letzte. Mehrere Policies
+  // auf derselben Tabelle dürfen nicht durch eine Map überschrieben werden.
+  const policiesByTable = new Map<string, PolicyRow[]>();
+  for (const row of policyResult.rows) {
+    const rows = policiesByTable.get(row.tablename) ?? [];
+    rows.push(row);
+    policiesByTable.set(row.tablename, rows);
+  }
 
   for (const table of EXPECTED_RLS_TABLES) {
     const rls = rlsByTable.get(table);
@@ -567,11 +629,24 @@ async function inspectSchema(client: Client): Promise<SchemaInspection> {
       problems.push(`RLS nicht erzwungen (FORCE): ${table}`);
     }
 
-    const policy = policiesByTable.get(table);
-    if (!policy) {
+    const policies = policiesByTable.get(table) ?? [];
+    if (policies.length === 0) {
       problems.push(`RLS-Policy fehlt: ${table}.${EXPECTED_RLS_POLICY_NAME}`);
       continue;
     }
+
+    if (policies.length > 1) {
+      const summary = policies
+        .map((policy) => `${policy.policyname} (${policy.permissive}, ${policy.cmd})`)
+        .join(', ');
+      problems.push(
+        `RLS-Policy ${table}: ${policies.length} Policies gefunden (${summary}); erwartet wird genau eine Policy "${EXPECTED_RLS_POLICY_NAME}". ` +
+          'Zusätzliche permissive Policies werden von PostgreSQL mit ODER verknüpft und können die Mandantentrennung aufweichen.'
+      );
+      continue;
+    }
+
+    const policy = policies[0];
 
     if (policy.policyname !== EXPECTED_RLS_POLICY_NAME) {
       problems.push(`RLS-Policy ${table}: Name "${policy.policyname}" statt "${EXPECTED_RLS_POLICY_NAME}"`);
@@ -727,14 +802,15 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
 
     if (appliedRows.length === 0) {
       const inspection = await inspectSchema(client);
+      const isTrulyEmpty = inspection.existingTables.length === 0 && inspection.problems.length === 0;
 
-      if (inspection.existingTables.length === 0) {
+      if (isTrulyEmpty) {
         logger('[MIGRATION] Leere Datenbank erkannt – alle Migrationen werden angewendet.');
       } else {
         if (inspection.problems.length > 0) {
           throw new Error(
             'Bestehende Datenbank entspricht nicht exakt dem erwarteten Stand nach Migration 004. ' +
-              `Gefundene Objekte: ${inspection.existingTables.length} von ${EXPECTED_TABLES.length} Tabellen. ` +
+              `Gefundene erwartete Tabellen: ${inspection.existingTables.length} von ${EXPECTED_TABLES.length}. ` +
               `Details: ${describeProblems(inspection.problems)}. ` +
               'Abbruch, um Migrationen nicht blind als ausgeführt zu markieren.'
           );
