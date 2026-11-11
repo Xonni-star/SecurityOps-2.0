@@ -831,22 +831,48 @@ function parseParameter(tokens: SqlToken[], source: string): ParsedParameter | n
     return null;
   }
 
-  // Optionalen Parameternamen entfernen.
+  // Optionalen Parameternamen entfernen. Die Entscheidung hängt von der
+  // vollständigen Tokenfolge ab: Ein gequoteter erster Bezeichner kann sowohl
+  // Parametername als auch Teil eines Typnamens sein.
   if (work.length > 1) {
     const first = work[0];
     const second = work[1];
 
     if (first.type === 'quoted_ident') {
-      if (!isPunct(second, '[')) {
+      const typeContinuation =
+        isPunct(second, '.') || isPunct(second, '[') || isPunct(second, '(');
+
+      if (!typeContinuation) {
         work = work.slice(1);
       }
     } else if (first.type === 'word') {
       const firstLower = first.value.toLowerCase();
       const schemaQualified = isPunct(second, '.');
       const arraySuffix = isPunct(second, '[');
+      const typeModifier = isPunct(second, '(');
+      const multiwordType = startsMultiwordType(work);
 
-      if (KNOWN_TYPE_STARTS.has(firstLower) || schemaQualified || arraySuffix || startsMultiwordType(work)) {
-        // Erster Token gehört zum Typ.
+      if (
+        KNOWN_TYPE_STARTS.has(firstLower) ||
+        schemaQualified ||
+        arraySuffix ||
+        typeModifier ||
+        multiwordType
+      ) {
+        // Erster Token gehört zum Typ. Zwei aufeinanderfolgende Typwörter ohne
+        // bekannten Mehrwort-Typ sind nicht eindeutig (Name vs. Typ).
+        if (
+          KNOWN_TYPE_STARTS.has(firstLower) &&
+          !schemaQualified &&
+          !arraySuffix &&
+          !typeModifier &&
+          !multiwordType &&
+          (second.type === 'word' || second.type === 'quoted_ident')
+        ) {
+          throw new Error(
+            `${source}: Parameter "${tokensToTypeText(work)}" ist nicht eindeutig analysierbar`
+          );
+        }
       } else if (second.type === 'word' || second.type === 'quoted_ident') {
         // Erster Token ist ein Parametername.
         work = work.slice(1);

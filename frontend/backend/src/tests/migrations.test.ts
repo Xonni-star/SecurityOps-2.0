@@ -1065,4 +1065,51 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/def_fn\(text\)/);
   });
+
+  test('55. Gequotete und schemaqualifizierte Parametertypen werden korrekt verglichen', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({
+      '005_quoted_params.sql': `
+        CREATE SCHEMA "MeinSchema";
+        CREATE TYPE "MeinSchema"."MeinTyp" AS ENUM ('a');
+        CREATE TYPE public."OeffentlicherTyp" AS ENUM ('b');
+        CREATE FUNCTION quoted_fn("Parametername" "MeinSchema"."MeinTyp")
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION quoted_fn2("Parametername" public."OeffentlicherTyp")
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION quoted_fn3("Parametername" integer)
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION array_fn(x integer[])
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION numeric_fn(x numeric(10,2))
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_fn(x "MeinSchema"."MeinTyp")
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_fn(x public."OeffentlicherTyp")
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+      `
+    });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toContain('005');
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+
+    await queryInDatabase(
+      db,
+      `CREATE FUNCTION quoted_fn(x integer) RETURNS integer LANGUAGE sql AS 'SELECT 1'`
+    );
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/quoted_fn\(integer\)/);
+  });
 });

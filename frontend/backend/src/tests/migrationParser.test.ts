@@ -165,4 +165,73 @@ describe('SQL-Migrationsparser – lexikalische Härtung', () => {
       'prevent_revision_tampering'
     ]);
   });
+
+  test('13. Gequotete und schemaqualifizierte Parametertypen bleiben erhalten', () => {
+    const cases: Array<[string, string]> = [
+      ['"MeinSchema"."MeinTyp"', '"MeinSchema"."MeinTyp"'],
+      ['public."MeinTyp"', 'public."MeinTyp"'],
+      ['"MeinTyp"[]', '"MeinTyp"[]'],
+      ['"Parametername" "MeinSchema"."MeinTyp"', '"MeinSchema"."MeinTyp"'],
+      ['"Parametername" public."MeinTyp"', 'public."MeinTyp"'],
+      ['"Parametername" integer', 'integer'],
+      ['integer[]', 'integer[]'],
+      ['numeric(10,2)', 'numeric(10, 2)']
+    ];
+
+    for (const [parameter, expected] of cases) {
+      const result = extractSchemaObjects(
+        `CREATE FUNCTION variant_fn(${parameter}) RETURNS integer LANGUAGE sql AS 'SELECT 1';`,
+        'test.sql'
+      );
+
+      expect(result.routines[0].args).toEqual([expected]);
+    }
+  });
+
+  test('14. Unquotierte Parameternamen vor schemaqualifizierten Typen', () => {
+    const cases: Array<[string, string]> = [
+      ['p "MeinSchema"."MeinTyp"', '"MeinSchema"."MeinTyp"'],
+      ['p public."MeinTyp"', 'public."MeinTyp"'],
+      ['p "MeinTyp"[]', '"MeinTyp"[]']
+    ];
+
+    for (const [parameter, expected] of cases) {
+      const result = extractSchemaObjects(
+        `CREATE FUNCTION unquoted_fn(${parameter}) RETURNS integer LANGUAGE sql AS 'SELECT 1';`,
+        'test.sql'
+      );
+
+      expect(result.routines[0].args).toEqual([expected]);
+    }
+  });
+
+  test('15. Mehrdeutige und fehlerhafte Signaturen führen zum Abbruch', () => {
+    expect(() =>
+      extractSchemaObjects(
+        `CREATE FUNCTION ambiguous_fn(integer text) RETURNS integer LANGUAGE sql AS 'SELECT 1';`,
+        'test.sql'
+      )
+    ).toThrow(/nicht eindeutig analysierbar/);
+
+    expect(() => extractSchemaObjects('CREATE FUNCTION broken_fn("MeinTyp"', 'test.sql')).toThrow(
+      /nicht geschlossene Parameterliste/
+    );
+  });
+
+  test('16. Überladungen mit gequoteten und schemaqualifizierten Typen', () => {
+    const result = extractSchemaObjects(
+      `
+        CREATE FUNCTION overload_q("MeinSchema"."MeinTyp") RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_q(public."MeinTyp") RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_q(integer) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+      `,
+      'test.sql'
+    );
+
+    expect(result.routines.map((routine) => routine.args[0])).toEqual([
+      '"MeinSchema"."MeinTyp"',
+      'public."MeinTyp"',
+      'integer'
+    ]);
+  });
 });
