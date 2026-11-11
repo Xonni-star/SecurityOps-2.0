@@ -1,6 +1,6 @@
 -- ==============================================================================
--- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 5R.1 KORRIGIERT)
--- Least-Privilege Rollentrennung, Idempotenz-Constraints, Composite FKs & RLS
+-- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (SCHRITT 5R.2.1 KORRIGIERT)
+-- Least-Privilege Rollentrennung, Idempotenz-Quittungen, Versionsschutz & RLS
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -166,7 +166,7 @@ CREATE TABLE IF NOT EXISTS employee_qualifications (
         REFERENCES employees(id, tenant_id) ON DELETE CASCADE
 );
 
--- 4. DIENSTPLANUNG (COMPOSITE FOREIGN KEYS GEGEN CROSS-TENANT-ZUWEISUNG)
+-- 4. DIENSTPLANUNG (MIT ATOMARER VERSIONIERUNG)
 CREATE TABLE IF NOT EXISTS shifts (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -179,6 +179,7 @@ CREATE TABLE IF NOT EXISTS shifts (
     status VARCHAR(30) NOT NULL DEFAULT 'Besetzt',
     required_qualification VARCHAR(100) NOT NULL,
     conflict_reason TEXT,
+    revision_version INT NOT NULL DEFAULT 1,
     client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -215,19 +216,22 @@ CREATE TABLE IF NOT EXISTS guardbook_entries (
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
+-- Revisionshistorie mit eigener client_mutation_id zur Verhinderung doppelter Korrekturen
 CREATE TABLE IF NOT EXISTS guardbook_revisions (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
     entry_id UUID NOT NULL,
     author_name VARCHAR(100) NOT NULL,
     note TEXT NOT NULL,
+    client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
+    CONSTRAINT uq_revisions_client_mutation UNIQUE (tenant_id, client_mutation_id),
     CONSTRAINT fk_revisions_guardbook_tenant FOREIGN KEY (entry_id, tenant_id)
         REFERENCES guardbook_entries(id, tenant_id) ON DELETE CASCADE
 );
 
--- 6. SCHLÜSSELVERWALTUNG (COMPOSITE FOREIGN KEYS & IDEMPOTENZ)
+-- 6. SCHLÜSSELVERWALTUNG (COMPOSITE FOREIGN KEYS & VERSIONIERUNG)
 CREATE TABLE IF NOT EXISTS keys (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -239,6 +243,7 @@ CREATE TABLE IF NOT EXISTS keys (
     current_holder_id UUID,
     issued_at TIMESTAMP WITH TIME ZONE,
     expected_return TIMESTAMP WITH TIME ZONE,
+    revision_version INT NOT NULL DEFAULT 1,
     client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
@@ -250,7 +255,7 @@ CREATE TABLE IF NOT EXISTS keys (
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
--- 7. AUFGABEN (IDEMPOTENZ-CONSTRAINT & VERSIONIERUNG)
+-- 7. AUFGABEN (IDEMPOTENZ-CONSTRAINT & ATOMARE VERSIONIERUNG)
 CREATE TABLE IF NOT EXISTS tasks (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -315,7 +320,22 @@ CREATE TABLE IF NOT EXISTS shift_handovers (
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
 );
 
--- 10. AUDIT PROTOKOLLE
+-- 10. ZENTRALE IDEMPOTENZ-QUITTUNGEN (SCHRITT 5R.2.1)
+CREATE TABLE IF NOT EXISTS sync_idempotency_receipts (
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    client_mutation_id VARCHAR(64) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    action VARCHAR(20) NOT NULL,
+    payload_hash VARCHAR(64) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    server_id VARCHAR(64) NOT NULL,
+    server_version INT NOT NULL,
+    response_json JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (tenant_id, client_mutation_id)
+);
+
+-- 11. AUDIT PROTOKOLLE
 CREATE TABLE IF NOT EXISTS audit_logs (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -349,6 +369,7 @@ DECLARE
         'tasks',
         'patrol_scans',
         'shift_handovers',
+        'sync_idempotency_receipts',
         'audit_logs'
     ];
 BEGIN
@@ -406,7 +427,7 @@ $$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION prevent_revision_tampering()
 RETURNS TRIGGER AS $$
 BEGIN
-    RAISE EXCEPTION 'Revisionen in guardbook_revisions sind unumstößlich und können weder geändert noch gelöscht werden.';
+    RAISE EXCEPTION 'Revisionen in guardbook_revisions sind unveränderlich und unlöschbar.';
 END;
 $$ LANGUAGE plpgsql;
 
@@ -427,7 +448,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_revision_tampering();
 REVOKE ALL ON SCHEMA public FROM secops_app_user;
 GRANT USAGE ON SCHEMA public TO secops_app_user;
 
-GRANT SELECT, INSERT, UPDATE ON clients, sites, employees, employee_qualifications, shifts, guardbook_entries, keys, tasks, patrol_scans, shift_handovers, audit_logs, users, user_sessions, user_roles, roles, permissions, role_permissions, tenants TO secops_app_user;
+GRANT SELECT, INSERT, UPDATE ON clients, sites, employees, employee_qualifications, shifts, guardbook_entries, keys, tasks, patrol_scans, shift_handovers, sync_idempotency_receipts, audit_logs, users, user_sessions, user_roles, roles, permissions, role_permissions, tenants TO secops_app_user;
 
 GRANT SELECT, INSERT ON guardbook_revisions TO secops_app_user;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO secops_app_user;

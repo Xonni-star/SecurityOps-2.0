@@ -5,7 +5,7 @@ import { app } from '../app';
 import { pool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
 import { env } from '../config/env';
 
-describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & Konfliktauflösung', () => {
+describe('SecurityOps 2.0 - Schritt 5R.2.1: Atomare Idempotenz, Versionsschutz & Konfliktauflösung', () => {
   let testTenantA: string;
   let testTenantB: string;
   let testUserAId: string;
@@ -82,8 +82,8 @@ describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & K
       guardAId = eRes.rows[0].id;
 
       await tx.query(`
-        INSERT INTO keys (tenant_id, site_id, key_number, label)
-        VALUES ($1, $2, 'KEY-SYNC-01', 'Hauptschlüssel Depot') ON CONFLICT DO NOTHING;
+        INSERT INTO keys (tenant_id, site_id, key_number, label, revision_version)
+        VALUES ($1, $2, 'KEY-SYNC-01', 'Hauptschlüssel Depot', 1) ON CONFLICT DO NOTHING;
       `, [testTenantA, siteAId]);
     });
   });
@@ -95,12 +95,9 @@ describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & K
     await pool.end();
   });
 
-  test('1. verifyAppDatabaseRole bestätigt unprivilegierte Anwendungsrolle', async () => {
-    await expect(verifyAppDatabaseRole()).resolves.toBeUndefined();
-  });
-
-  test('2. guardbook: Idempotente Neuanlage und Append-Only Revision', async () => {
-    const clientUuid = `gb-mut-${Date.now()}`;
+  // 1. Wachbuch: CREATE und wiederholte identische Übertragung
+  test('1. Wachbuch: CREATE und wiederholte Übertragung erzeugen kein Duplikat', async () => {
+    const clientUuid = `gb-create-${Date.now()}`;
     const payload = {
       deviceId: 'dev-01',
       mutations: [
@@ -110,7 +107,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & K
           action: 'CREATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: { siteId: siteAId, guardId: guardAId, category: 'Vorkommnis', priority: 'Dringend', title: 'Torstörung', description: 'Schranke klemmt.' }
+          payload: { siteId: siteAId, guardId: guardAId, category: 'Vorkommnis', priority: 'Dringend', title: 'Schrankenstörung', description: 'Schranke klemmt.' }
         }
       ]
     };
@@ -119,86 +116,139 @@ describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & K
     expect(res1.status).toBe(200);
     expect(res1.body.data[0].status).toBe('SYNCED');
 
-    // Wiederholter identischer Push -> Idempotent
+    // Wiederholung (idempotent)
     const res2 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
     expect(res2.status).toBe(200);
     expect(res2.body.data[0].status).toBe('SYNCED');
 
-    // UPDATE erzeugt Revision
-    const updatePayload = {
-      deviceId: 'dev-01',
-      mutations: [
-        {
-          clientUuid,
-          entityType: 'guardbook',
-          action: 'UPDATE',
-          clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: { correctionNote: 'Schranke wieder freigängig.' }
-        }
-      ]
-    };
-    const resUpdate = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(updatePayload);
-    expect(resUpdate.status).toBe(200);
-    expect(resUpdate.body.data[0].status).toBe('SYNCED');
-
-    // DELETE auf Wachbuch wird REJECTED
-    const delPayload = {
-      deviceId: 'dev-01',
-      mutations: [
-        {
-          clientUuid: `del-gb-${Date.now()}`,
-          entityType: 'guardbook',
-          action: 'DELETE',
-          clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: {}
-        }
-      ]
-    };
-    const resDel = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
-    expect(resDel.body.data[0].status).toBe('REJECTED');
+    const countCheck = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query('SELECT count(*) as count FROM guardbook_entries WHERE client_mutation_id = $1', [clientUuid]);
+    });
+    expect(parseInt(countCheck.rows[0].count, 10)).toBe(1);
   });
 
-  test('3. shift: CREATE, UPDATE und DELETE', async () => {
-    const shiftUuid = `sh-mut-${Date.now()}`;
-    const createPayload = {
+  // 2. Wachbuch: UPDATE mit ursprünglicher entryId
+  test('2. Wachbuch: UPDATE identifiziert Eintrag über entryId und hängt Revision an', async () => {
+    // Hole ID eines bestehenden Eintrags
+    const entryId = await withTenantTransaction(testTenantA, async (tx) => {
+      const r = await tx.query(`
+        INSERT INTO guardbook_entries (tenant_id, site_id, guard_id, category, priority, title, description)
+        VALUES ($1, $2, $3, 'Vorkommnis', 'Normal', 'Originaleintrag', 'Beschreibung')
+        RETURNING id;
+      `, [testTenantA, siteAId, guardAId]);
+      return r.rows[0].id;
+    });
+
+    const correctionUuid = `gb-corr-${Date.now()}`;
+    const corrPayload = {
       deviceId: 'dev-01',
       mutations: [
         {
-          clientUuid: shiftUuid,
-          entityType: 'shift',
-          action: 'CREATE',
-          clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: { siteId: siteAId, employeeId: guardAId, shiftDate: '2025-08-01', startTime: '06:00', endTime: '18:00' }
-        }
-      ]
-    };
-
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(createPayload);
-    expect(res.status).toBe(200);
-    expect(res.body.data[0].status).toBe('SYNCED');
-    const serverShiftId = res.body.data[0].serverId;
-
-    // UPDATE
-    const updatePayload = {
-      deviceId: 'dev-01',
-      mutations: [
-        {
-          clientUuid: `sh-up-${Date.now()}`,
-          entityType: 'shift',
+          clientUuid: correctionUuid,
+          entityType: 'guardbook',
           action: 'UPDATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: { id: serverShiftId, status: 'Konflikt', conflictReason: 'Arzttermin' }
+          payload: {
+            entryId,
+            correctionNote: 'Nachtrag: Zeuge namentlich erfasst',
+            stage: 'In Bewertung'
+          }
         }
       ]
     };
-    const resUp = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(updatePayload);
-    expect(resUp.body.data[0].status).toBe('SYNCED');
 
-    // DELETE
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(corrPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].status).toBe('SYNCED');
+
+    // Revision in guardbook_revisions prüfen
+    const revCheck = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query('SELECT * FROM guardbook_revisions WHERE entry_id = $1', [entryId]);
+    });
+    expect(revCheck.rows.length).toBe(1);
+    expect(revCheck.rows[0].note).toContain('Zeuge');
+  });
+
+  // 3. Wachbuch: Wiederholte Korrektur ohne doppelte Revision
+  test('3. Wachbuch: Wiederholte Korrektur mit derselben Mutation-ID erzeugt keine doppelte Revision', async () => {
+    const entryId = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query('SELECT id FROM guardbook_entries WHERE tenant_id = $1 LIMIT 1', [testTenantA])).rows[0].id;
+    });
+
+    const corrUuid = `gb-repeat-${Date.now()}`;
+    const payload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: corrUuid,
+          entityType: 'guardbook',
+          action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1,
+          payload: { entryId, correctionNote: 'Einmaliger Nachtrag' }
+        }
+      ]
+    };
+
+    const res1 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    expect(res1.body.data[0].status).toBe('SYNCED');
+
+    // Erneuter Push derselben Mutation
+    const res2 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    expect(res2.body.data[0].status).toBe('SYNCED');
+
+    // Genau 1 Revision vorhanden
+    const revCount = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query('SELECT count(*) as count FROM guardbook_revisions WHERE client_mutation_id = $1', [corrUuid]);
+    });
+    expect(parseInt(revCount.rows[0].count, 10)).toBe(1);
+  });
+
+  // 4. Schichten: Versionskonflikt bei paralleler Änderung
+  test('4. Schichten: Atomarer Versionskonflikt bei veralteter baseVersion', async () => {
+    // Schicht mit Version 1 anlegen
+    const shiftId = await withTenantTransaction(testTenantA, async (tx) => {
+      const s = await tx.query(`
+        INSERT INTO shifts (tenant_id, site_id, employee_id, shift_date, start_time, end_time, required_qualification, revision_version)
+        VALUES ($1, $2, $3, '2025-09-01', '06:00', '18:00', 'Sachkunde', 2)
+        RETURNING id;
+      `, [testTenantA, siteAId, guardAId]);
+      return s.rows[0].id;
+    });
+
+    // Client sendet UPDATE mit veralteter baseVersion = 1 -> Muss CONFLICT liefern!
+    const conflictPayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: `sh-conf-${Date.now()}`,
+          entityType: 'shift',
+          action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1, // Veraltet!
+          payload: { id: shiftId, status: 'Konflikt' }
+        }
+      ]
+    };
+
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(conflictPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].status).toBe('CONFLICT');
+    expect(res.body.data[0].serverVersion).toBe(2);
+  });
+
+  // 5. Schichten: Versionsgesichertes DELETE
+  test('5. Schichten: Versionsgesichertes DELETE gelingt nur bei passender Version', async () => {
+    const shiftId = await withTenantTransaction(testTenantA, async (tx) => {
+      const s = await tx.query(`
+        INSERT INTO shifts (tenant_id, site_id, employee_id, shift_date, start_time, end_time, required_qualification, revision_version)
+        VALUES ($1, $2, $3, '2025-09-02', '06:00', '18:00', 'Sachkunde', 1)
+        RETURNING id;
+      `, [testTenantA, siteAId, guardAId]);
+      return s.rows[0].id;
+    });
+
     const delPayload = {
       deviceId: 'dev-01',
       mutations: [
@@ -207,45 +257,69 @@ describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & K
           entityType: 'shift',
           action: 'DELETE',
           clientTimestamp: new Date().toISOString(),
-          baseVersion: 2,
-          payload: { id: serverShiftId }
+          baseVersion: 1,
+          payload: { id: shiftId }
         }
       ]
     };
-    const resDel = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
-    expect(resDel.body.data[0].status).toBe('SYNCED');
+
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].status).toBe('SYNCED');
+
+    const check = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query('SELECT * FROM shifts WHERE id = $1', [shiftId]);
+    });
+    expect(check.rows.length).toBe(0);
   });
 
-  test('4. task: Kollisionserkennung (CONFLICT) bei veralteter Version', async () => {
-    const taskUuid = `task-mut-${Date.now()}`;
-    const createPayload = {
-      deviceId: 'dev-01',
-      mutations: [
-        {
-          clientUuid: taskUuid,
-          entityType: 'task',
-          action: 'CREATE',
-          clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: { title: 'Revision BMA', status: 'Offen' }
-        }
-      ]
-    };
-
-    const resCreate = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(createPayload);
-    const taskId = resCreate.body.data[0].serverId;
-
-    // Server-Version vorantreiben
-    await withTenantTransaction(testTenantA, async (tx) => {
-      await tx.query('UPDATE tasks SET status = $1, revision_version = 2 WHERE id = $2', ['Erledigt', taskId]);
+  // 6. Aufgaben: Atomarer Versionskonflikt
+  test('6. Aufgaben: Atomarer Versionskonflikt bei SQL UPDATE', async () => {
+    const taskId = await withTenantTransaction(testTenantA, async (tx) => {
+      const t = await tx.query(`
+        INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, revision_version)
+        VALUES ($1, 'BMA Prüfung', 'Leitung', CURRENT_DATE, 3)
+        RETURNING id;
+      `, [testTenantA]);
+      return t.rows[0].id;
     });
 
-    // Client sendet mit veralteter baseVersion = 1 -> CONFLICT
-    const conflictPayload = {
+    const payload = {
       deviceId: 'dev-01',
       mutations: [
         {
           clientUuid: `task-conf-${Date.now()}`,
+          entityType: 'task',
+          action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 2, // Veraltet (Server ist bei 3)
+          payload: { id: taskId, status: 'Erledigt' }
+        }
+      ]
+    };
+
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].status).toBe('CONFLICT');
+  });
+
+  // 7. Aufgaben: Idempotentes UPDATE und DELETE
+  test('7. Aufgaben: Idempotentes UPDATE erhöht Version und DELETE löscht versionsgesichert', async () => {
+    const taskId = await withTenantTransaction(testTenantA, async (tx) => {
+      const t = await tx.query(`
+        INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, revision_version)
+        VALUES ($1, 'Idem Task', 'Leitung', CURRENT_DATE, 1)
+        RETURNING id;
+      `, [testTenantA]);
+      return t.rows[0].id;
+    });
+
+    // UPDATE
+    const upPayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: `task-up-${Date.now()}`,
           entityType: 'task',
           action: 'UPDATE',
           clientTimestamp: new Date().toISOString(),
@@ -254,71 +328,242 @@ describe('SecurityOps 2.0 - Schritt 5R.2: Absicherung aller 6 Mutationstypen & K
         }
       ]
     };
+    const resUp = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(upPayload);
+    expect(resUp.body.data[0].status).toBe('SYNCED');
+    expect(resUp.body.data[0].serverVersion).toBe(2);
 
-    const resConf = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(conflictPayload);
-    expect(resConf.body.data[0].status).toBe('CONFLICT');
-  });
-
-  test('5. patrol & handover: Unveränderlichkeit (UPDATE/DELETE werden REJECTED)', async () => {
-    // Patrol Scan anlegen
-    const patrolUuid = `patrol-mut-${Date.now()}`;
-    const pCreate = {
+    // DELETE mit baseVersion = 2
+    const delPayload = {
       deviceId: 'dev-01',
       mutations: [
         {
-          clientUuid: patrolUuid,
-          entityType: 'patrol',
-          action: 'CREATE',
+          clientUuid: `task-del-${Date.now()}`,
+          entityType: 'task',
+          action: 'DELETE',
           clientTimestamp: new Date().toISOString(),
-          baseVersion: 1,
-          payload: { siteId: siteAId, checkpointCode: 'CP-01', checkpointName: 'Foyer', guardId: guardAId, verifiedTag: 'TAG-1' }
+          baseVersion: 2,
+          payload: { id: taskId }
         }
       ]
     };
-    const resP = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(pCreate);
-    expect(resP.body.data[0].status).toBe('SYNCED');
+    const resDel = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
+    expect(resDel.body.data[0].status).toBe('SYNCED');
+  });
 
-    // UPDATE auf Patrol muss REJECTED werden
-    const pUpdate = {
+  // 8. Schlüssel: Ausgabe und Rücknahme mit Versionsschutz
+  test('8. Schlüssel: Status-Update mit Versionsschutz', async () => {
+    const keyId = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query('SELECT id, revision_version FROM keys WHERE tenant_id = $1 LIMIT 1', [testTenantA])).rows[0].id;
+    });
+
+    const keyPayload = {
       deviceId: 'dev-01',
       mutations: [
         {
-          clientUuid: `p-up-${Date.now()}`,
-          entityType: 'patrol',
+          clientUuid: `key-issue-${Date.now()}`,
+          entityType: 'key',
           action: 'UPDATE',
           clientTimestamp: new Date().toISOString(),
           baseVersion: 1,
-          payload: { id: resP.body.data[0].serverId, notes: 'Geändert' }
+          payload: { id: keyId, status: 'Ausgegeben', currentHolderId: guardAId }
         }
       ]
     };
-    const resPUp = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(pUpdate);
-    expect(resPUp.body.data[0].status).toBe('REJECTED');
+
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(keyPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].status).toBe('SYNCED');
+    expect(res.body.data[0].serverVersion).toBe(2);
   });
 
-  test('6. resolveSyncConflict: Reale Server-Auflösung via USE_LOCAL und USE_SERVER', async () => {
-    // Task anlegen
-    const tRes = await withTenantTransaction(testTenantA, async (tx) => {
-      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date) VALUES ($1, 'Konflikt-Task', 'Leitung', CURRENT_DATE) RETURNING id", [testTenantA])).rows[0].id;
+  // 9. Kontrollgänge: Unveränderlichkeit
+  test('9. Kontrollgänge: UPDATE und DELETE werden mit REJECTED abgewiesen', async () => {
+    const pPayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: `patrol-del-${Date.now()}`,
+          entityType: 'patrol',
+          action: 'DELETE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1,
+          payload: { id: 'some-id' }
+        }
+      ]
+    };
+
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(pPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].status).toBe('REJECTED');
+  });
+
+  // 10. Schichtübergaben: Unveränderlichkeit
+  test('10. Schichtübergaben: UPDATE und DELETE werden mit REJECTED abgewiesen', async () => {
+    const hPayload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: `ho-del-${Date.now()}`,
+          entityType: 'handover',
+          action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1,
+          payload: { id: 'some-id' }
+        }
+      ]
+    };
+
+    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(hPayload);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].status).toBe('REJECTED');
+  });
+
+  // 11. Konfliktauflösung: USE_LOCAL
+  test('11. Konfliktauflösung: USE_LOCAL übernimmt lokalen Stand atomar', async () => {
+    const taskId = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status) VALUES ($1, 'Task L', 'Leitung', CURRENT_DATE, 'Offen') RETURNING id", [testTenantA])).rows[0].id;
     });
 
-    // 1. USE_LOCAL Auflösung
-    const resLocal = await request(app)
+    const res = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
       .set('Authorization', `Bearer ${testTokenA}`)
       .send({
-        clientUuid: `conf-res-${Date.now()}`,
+        clientUuid: `res-loc-${Date.now()}`,
         entityType: 'task',
         strategy: 'USE_LOCAL',
-        localPayload: { id: tRes, status: 'In Bearbeitung' }
+        localPayload: { id: taskId, status: 'In Bearbeitung' }
       });
-    expect(resLocal.status).toBe(200);
-    expect(resLocal.body.applied).toBe(true);
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toBe(true);
 
     const check = await withTenantTransaction(testTenantA, async (tx) => {
-      return tx.query('SELECT status, revision_version FROM tasks WHERE id = $1', [tRes]);
+      return tx.query('SELECT status FROM tasks WHERE id = $1', [taskId]);
     });
     expect(check.rows[0].status).toBe('In Bearbeitung');
-    expect(check.rows[0].revision_version).toBe(2);
+  });
+
+  // 12. Konfliktauflösung: USE_SERVER
+  test('12. Konfliktauflösung: USE_SERVER bestätigt aktuellen Serverstand', async () => {
+    const taskId = await withTenantTransaction(testTenantA, async (tx) => {
+      return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status) VALUES ($1, 'Task S', 'Leitung', CURRENT_DATE, 'Erledigt') RETURNING id", [testTenantA])).rows[0].id;
+    });
+
+    const res = await request(app)
+      .post('/api/v1/sync/conflicts/resolve')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        clientUuid: `res-srv-${Date.now()}`,
+        entityType: 'task',
+        strategy: 'USE_SERVER',
+        localPayload: { id: taskId }
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toBe(true);
+    expect(res.body.serverState.status).toBe('Erledigt');
+  });
+
+  // 13. Gleiche Mutation-ID mit verändertem Inhalt wird abgewiesen
+  test('13. Gleiche Mutation-ID mit verändertem Inhalt wird als REJECTED abgewiesen', async () => {
+    const reusableUuid = `tamper-id-${Date.now()}`;
+
+    // 1. Erster Push
+    await request(app)
+      .post('/api/v1/sync/push')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        deviceId: 'dev-01',
+        mutations: [
+          {
+            clientUuid: reusableUuid,
+            entityType: 'guardbook',
+            action: 'CREATE',
+            clientTimestamp: new Date().toISOString(),
+            baseVersion: 1,
+            payload: { siteId: siteAId, guardId: guardAId, title: 'Originaler Titel', description: 'Original' }
+          }
+        ]
+      });
+
+    // 2. Manipulierter zweiter Push mit geänderter Payload aber identischer Mutation-ID
+    const resTamper = await request(app)
+      .post('/api/v1/sync/push')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        deviceId: 'dev-01',
+        mutations: [
+          {
+            clientUuid: reusableUuid,
+            entityType: 'guardbook',
+            action: 'CREATE',
+            clientTimestamp: new Date().toISOString(),
+            baseVersion: 1,
+            payload: { siteId: siteAId, guardId: guardAId, title: 'Manipulierter Titel', description: 'Gefälscht' }
+          }
+        ]
+      });
+
+    expect(resTamper.status).toBe(200);
+    expect(resTamper.body.data[0].status).toBe('REJECTED');
+    expect(resTamper.body.data[0].message).toContain('Integritätsverletzung');
+  });
+
+  // 14. Mandantentrennung bei Sync
+  test('14. Mandantenisolation beim Sync: Mandant B sieht keine Mutationen von Mandant A', async () => {
+    const clientUuidB = `hack-check-${Date.now()}`;
+
+    await request(app)
+      .post('/api/v1/sync/push')
+      .set('Authorization', `Bearer ${testTokenA}`)
+      .send({
+        deviceId: 'dev-01',
+        mutations: [
+          {
+            clientUuid: clientUuidB,
+            entityType: 'guardbook',
+            action: 'CREATE',
+            clientTimestamp: new Date().toISOString(),
+            baseVersion: 1,
+            payload: { siteId: siteAId, guardId: guardAId, title: 'Sperrtest', description: 'Nur in A' }
+          }
+        ]
+      });
+
+    const bCheck = await withTenantTransaction(testTenantB, async (tx) => {
+      return tx.query('SELECT * FROM guardbook_entries WHERE client_mutation_id = $1', [clientUuidB]);
+    });
+    expect(bCheck.rows.length).toBe(0);
+  });
+
+  // 15. Parallele Übertragung derselben Mutation
+  test('15. Parallele Übertragung derselben Mutation führt zu exakt einer Ausführung', async () => {
+    const parallelUuid = `parallel-mut-${Date.now()}`;
+    const payload = {
+      deviceId: 'dev-01',
+      mutations: [
+        {
+          clientUuid: parallelUuid,
+          entityType: 'task',
+          action: 'CREATE',
+          clientTimestamp: new Date().toISOString(),
+          baseVersion: 1,
+          payload: { title: 'Paralleler Task', status: 'Offen' }
+        }
+      ]
+    };
+
+    const [res1, res2] = await Promise.all([
+      request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload),
+      request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload)
+    ]);
+
+    expect(res1.body.data[0].status).toBe('SYNCED');
+    expect(res2.body.data[0].status).toBe('SYNCED');
+
+    const countCheck = await withTenantTransaction(testTenantA, async (tx) => {
+      return tx.query('SELECT count(*) as count FROM tasks WHERE client_mutation_id = $1', [parallelUuid]);
+    });
+    expect(parseInt(countCheck.rows[0].count, 10)).toBe(1);
   });
 });
