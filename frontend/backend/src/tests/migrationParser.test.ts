@@ -276,4 +276,50 @@ describe('SQL-Migrationsparser – lexikalische Härtung', () => {
       expect(stripTypeModifiers(input)).toBe(expected);
     }
   });
+
+  test('20. Vollständige PostgreSQL-16-Alias-Normalisierung', () => {
+    const cases: Array<[string, string]> = [
+      ['int', 'integer'],
+      ['int4', 'integer'],
+      ['int2', 'smallint'],
+      ['int8', 'bigint'],
+      ['bool', 'boolean'],
+      ['float4', 'real'],
+      ['float8', 'double precision'],
+      ['float', 'double precision'],
+      ['float(1)', 'real'],
+      ['float(24)', 'real'],
+      ['float(25)', 'double precision'],
+      ['float(53)', 'double precision'],
+      ['decimal', 'numeric'],
+      ['dec', 'numeric'],
+      ['varchar', 'character varying'],
+      ['char', 'character'],
+      ['bpchar', 'character'],
+      ['nchar', 'character'],
+      ['varbit', 'bit varying'],
+      ['timestamptz', 'timestamp with time zone'],
+      ['timestamp', 'timestamp without time zone'],
+      ['timetz', 'time with time zone'],
+      ['time', 'time without time zone'],
+      ['int2[]', 'smallint[]'],
+      ['int2[][]', 'smallint[][]'],
+      ['varbit(10)[]', 'bit varying[]'],
+      ['float(24)[][]', 'real[][]'],
+      ['float(25)[]', 'double precision[]'],
+      ['"float"', '"float"'],
+      ['public."int"', 'public."int"'],
+      ['"MeinSchema"."MeinTyp"[]', '"MeinSchema"."MeinTyp"[]']
+    ];
+
+    for (const [input, expected] of cases) {
+      expect(stripTypeModifiers(input)).toBe(expected);
+    }
+  });
+
+  test('21. Ungültige float-Präzisionen werden abgelehnt', () => {
+    for (const value of ['float(0)', 'float(54)', 'float(2.5)', 'float()', 'float(1,2)']) {
+      expect(() => stripTypeModifiers(value)).toThrow(/float-Präzision/);
+    }
+  });
 });

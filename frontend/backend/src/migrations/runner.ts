@@ -1099,9 +1099,13 @@ const TYPE_ALIASES: Record<string, string> = {
   bool: 'boolean',
   varchar: 'character varying',
   char: 'character',
+  bpchar: 'character',
+  nchar: 'character',
+  varbit: 'bit varying',
   float4: 'real',
   float8: 'double precision',
   decimal: 'numeric',
+  dec: 'numeric',
   timestamptz: 'timestamp with time zone',
   timestamp: 'timestamp without time zone',
   timetz: 'time with time zone',
@@ -1125,6 +1129,31 @@ export function stripTypeModifiers(typeText: string): string {
   const tokens = lexSql(typeText, 'Typnormalisierung');
   const result: SqlToken[] = [];
   let removed = false;
+  let floatPrecision: number | null = null;
+
+  // PostgreSQL kennt float(p) mit p = 1–24 (real) und p = 25–53
+  // (double precision). Ohne Präzision ist float ein Alias für
+  // double precision. Die Präzision muss vor dem Entfernen des
+  // Typmodifikators ausgewertet werden.
+  if (
+    tokens[0]?.type === 'word' &&
+    tokens[0].value.toLowerCase() === 'float' &&
+    isPunct(tokens[1], '(')
+  ) {
+    const close = findMatchingParen(tokens, 1, 'Typnormalisierung');
+    const inner = tokens.slice(2, close);
+
+    if (inner.length !== 1 || inner[0].type !== 'number' || !/^\d+$/.test(inner[0].value)) {
+      throw new Error('Typnormalisierung: ungültige float-Präzision');
+    }
+
+    const precision = parseInt(inner[0].value, 10);
+    if (precision < 1 || precision > 53) {
+      throw new Error('Typnormalisierung: float-Präzision muss zwischen 1 und 53 liegen');
+    }
+
+    floatPrecision = precision;
+  }
 
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens.at(i)!;
@@ -1158,7 +1187,16 @@ export function stripTypeModifiers(typeText: string): string {
   let baseText: string;
   if (baseTokens.length === 1 && baseTokens[0].type === 'word') {
     const baseName = baseTokens[0].value.toLowerCase();
-    baseText = TYPE_ALIASES[baseName] ?? tokensToTypeText(baseTokens);
+
+    if (baseName === 'float') {
+      if (floatPrecision === null) {
+        baseText = 'double precision';
+      } else {
+        baseText = floatPrecision <= 24 ? 'real' : 'double precision';
+      }
+    } else {
+      baseText = TYPE_ALIASES[baseName] ?? tokensToTypeText(baseTokens);
+    }
   } else {
     baseText = tokensToTypeText(baseTokens);
   }

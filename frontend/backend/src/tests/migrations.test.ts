@@ -1197,4 +1197,44 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/alias_array_fn\(integer\[\]\)/);
   });
+
+  test('58. Vollständige Alias-Normalisierung wird von PostgreSQL 16 bestätigt', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({
+      '005_aliases.sql': `
+        CREATE FUNCTION alias_canonical_fn(
+          a int, b integer, c int2, d smallint, e int8, f bigint,
+          g float(24), h real, i float, j double precision,
+          k varchar(10), l character varying(20), m varbit(5), n bpchar,
+          o timestamptz, p timestamp with time zone, q timetz, r time with time zone
+        ) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_alias_fn(x int) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_alias_fn(x bigint) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_alias_fn(x varchar(10)) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_alias_fn(x text) RETURNS integer LANGUAGE sql AS 'SELECT 1';
+      `
+    });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toContain('005');
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+
+    await queryInDatabase(
+      db,
+      `CREATE FUNCTION alias_canonical_fn(x bigint) RETURNS integer LANGUAGE sql AS 'SELECT 1'`
+    );
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/alias_canonical_fn\(bigint\)/);
+  });
 });
