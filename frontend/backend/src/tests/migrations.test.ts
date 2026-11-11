@@ -793,4 +793,68 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(result.applied).toEqual([]);
     expect(result.skipped).toEqual(['001', '002', '003', '004']);
   });
+
+  test('41. Zusätzliche Tabelle in gültiger Baseline wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'CREATE TABLE fremde_tabelle (id INT)');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremde_tabelle"/);
+    expect(await historyRows(db)).toHaveLength(4);
+  });
+
+  test('42. Zusätzliche View in gültiger Baseline wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'CREATE VIEW fremde_view AS SELECT 1 AS x');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Unerwartetes Objekt im Schema public: View "fremde_view"/);
+    expect(await historyRows(db)).toHaveLength(4);
+  });
+
+  test('43. Zusätzliche Sequenz in gültiger Baseline wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'CREATE SEQUENCE fremde_sequenz');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Unerwartetes Objekt im Schema public: Sequenz "fremde_sequenz"/);
+    expect(await historyRows(db)).toHaveLength(4);
+  });
+
+  test('44. Zusätzliche Funktion in gültiger Baseline wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, `CREATE FUNCTION fremde_funktion() RETURNS integer LANGUAGE sql AS 'SELECT 1'`);
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Unerwartetes Objekt im Schema public: Funktion\/Prozedur "fremde_funktion"/);
+    expect(await historyRows(db)).toHaveLength(4);
+  });
+
+  test('45. Daten und Migrationseinträge bleiben nach abgelehnter Baseline unverändert', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `INSERT INTO tenants (name, subdomain, tax_number, bwr_register_id)
+       VALUES ('Bestandsobjekt', 'bestand-objekt', 'DE-OBJ-1', 'BWR-OBJ-1')`
+    );
+    const before = await historyRows(db);
+
+    await queryInDatabase(
+      db,
+      `CREATE TABLE bestandstabelle (id INT);
+       INSERT INTO bestandstabelle VALUES (1);`
+    );
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "bestandstabelle"/);
+
+    const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
+    expect(tenants.some((row) => row.name === 'Bestandsobjekt')).toBe(true);
+
+    const rows = await queryInDatabase<{ id: number }>(db, 'SELECT id FROM bestandstabelle');
+    expect(rows).toEqual([{ id: 1 }]);
+
+    const after = await historyRows(db);
+    expect(after).toEqual(before);
+  });
 });

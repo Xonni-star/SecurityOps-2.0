@@ -395,20 +395,28 @@ interface PolicyRow {
   with_check: string | null;
 }
 
-interface UnexpectedPublicObject {
-  object_type: string;
-  name: string;
+interface UnexpectedSchemaObject {
   kind: string;
+  name: string;
 }
 
+/** Erlaubte Routinen aus Migration 001 (append-only Triggerfunktionen). */
+const EXPECTED_ROUTINE_NAMES = EXPECTED_FUNCTIONS.map((fn) => fn.name);
+
 /**
- * Ermittelt fremde Relationen und Routinen im Schema `public`, die nicht zur
- * erwarteten SecurityOps-Struktur gehören. Wird für die Leer-Datenbank- und
- * Baseline-Erkennung verwendet und verändert keine Objekte.
+ * Ermittelt sämtliche unerwarteten Objekte im Schema `public`:
+ * Relationen (Tabellen, partitionierte Tabellen, Views, Materialized Views,
+ * Sequenzen, Fremdtabellen), Funktionen/Prozeduren und eigenständige Typen.
+ *
+ * Erlaubt bleiben:
+ * - die 21 SecurityOps-Tabellen und `schema_migrations`,
+ * - die beiden Triggerfunktionen aus Migration 001,
+ * - automatische Zeilentypen, Array-Typen und Erweiterungsobjekte.
  */
-async function findUnexpectedPublicObjects(client: Client): Promise<UnexpectedPublicObject[]> {
-  const result = await client.query<UnexpectedPublicObject>(`
-    SELECT 'relation'::text AS object_type, c.relname AS name,
+async function findUnexpectedSchemaObjects(client: Client): Promise<UnexpectedSchemaObject[]> {
+  const relationResult = await client.query<UnexpectedSchemaObject>(
+    `
+    SELECT c.relname AS name,
            CASE c.relkind
              WHEN 'r' THEN 'Tabelle'
              WHEN 'p' THEN 'partitionierte Tabelle'
@@ -422,15 +430,41 @@ async function findUnexpectedPublicObjects(client: Client): Promise<UnexpectedPu
       JOIN pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = 'public'
        AND c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
-       AND c.relname <> '${HISTORY_TABLE}'
-    UNION ALL
-    SELECT 'routine'::text, p.proname, 'Funktion/Prozedur'
+       AND c.relname <> ALL($1::text[])
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_depend d
+          WHERE d.classid = 'pg_class'::regclass
+            AND d.objid = c.oid
+            AND d.deptype = 'e'
+       )
+  `,
+    [[...EXPECTED_TABLES, HISTORY_TABLE]]
+  );
+
+  const routineResult = await client.query<UnexpectedSchemaObject>(
+    `
+    SELECT p.proname AS name, 'Funktion/Prozedur' AS kind
       FROM pg_proc p
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
-    ORDER BY 1, 2
-  `);
-  return result.rows;
+       AND p.proname <> ALL($1::text[])
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_depend d
+          WHERE d.classid = 'pg_proc'::regclass
+            AND d.objid = p.oid
+            AND d.deptype = 'e'
+       )
+  `,
+    [EXPECTED_ROUTINE_NAMES]
+  );
+
+  const typeResult = await findUnexpectedCustomTypes(client);
+
+  return [
+    ...relationResult.rows,
+    ...routineResult.rows,
+    ...typeResult.map((type) => ({ kind: type.kind, name: type.typname }))
+  ].sort((a, b) => `${a.kind} ${a.name}`.localeCompare(`${b.kind} ${b.name}`));
 }
 
 interface UnexpectedCustomType {
@@ -495,23 +529,10 @@ async function inspectSchema(client: Client): Promise<SchemaInspection> {
   const existingTables = tableResult.rows.filter((row) => row.present).map((row) => row.name);
   const missingTables = tableResult.rows.filter((row) => !row.present).map((row) => row.name);
 
-  // Eine Datenbank gilt nur dann als leer, wenn neben den erwarteten Tabellen
-  // auch keine fremden Tabellen, Views, Materialized Views, Sequenzen,
-  // Fremdtabellen, Funktionen, Prozeduren, Enums oder Domains existieren.
+  // Unerwartete Objekte (Relationen, Routinen, Typen) wurden bereits vor der
+  // Pfadentscheidung in runMigrations() geprüft.
   if (existingTables.length === 0) {
-    const unexpected = await findUnexpectedPublicObjects(client);
-    const unexpectedTypes = await findUnexpectedCustomTypes(client);
-    return {
-      existingTables,
-      problems: [
-        ...unexpected.map(
-          (object) => `Unerwartetes Objekt im Schema public: ${object.kind} "${object.name}"`
-        ),
-        ...unexpectedTypes.map(
-          (type) => `Unerwartetes Objekt im Schema public: ${type.kind} "${type.typname}"`
-        )
-      ]
-    };
+    return { existingTables, problems: [] };
   }
 
   for (const table of missingTables) {
@@ -789,14 +810,6 @@ async function inspectSchema(client: Client): Promise<SchemaInspection> {
     }
   }
 
-  // Unerwartete benutzerdefinierte Typen auch bei einer bestehenden Baseline
-  // erkennen. Automatische Zeilentypen, Arrays und Erweiterungstypen sind
-  // in findUnexpectedCustomTypes() ausgeschlossen.
-  const unexpectedTypes = await findUnexpectedCustomTypes(client);
-  for (const type of unexpectedTypes) {
-    problems.push(`Unerwartetes Objekt im Schema public: ${type.kind} "${type.typname}"`);
-  }
-
   // Erweiterung, die von Migration 001 benötigt wird
   const extensionResult = await client.query(`SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp'`);
   if (extensionResult.rowCount === 0) {
@@ -857,16 +870,26 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
     const appliedRows = await readAppliedMigrations(client);
     verifyAppliedMigrations(appliedRows, migrations);
 
-    // Unerwartete benutzerdefinierte Typen werden unabhängig davon geprüft,
-    // ob bereits eine Historie existiert. Automatische Zeilentypen, Arrays und
-    // Erweiterungstypen sind in findUnexpectedCustomTypes() ausgeschlossen.
-    const unexpectedTypes = await findUnexpectedCustomTypes(client);
-    if (unexpectedTypes.length > 0) {
-      throw new Error(
-        'Unerwartete benutzerdefinierte Typen im Schema public: ' +
-          unexpectedTypes.map((type) => `${type.kind} "${type.typname}"`).join(', ') +
-          '. Abbruch, um keine Migrationen auf einem unbekannten Schema auszuführen.'
-      );
+    const maxAppliedVersion = appliedRows.reduce(
+      (max, row) => Math.max(max, parseInt(row.version, 10)),
+      0
+    );
+
+    // Die statische Objekt-Whitelist beschreibt exakt den Stand nach 001–004.
+    // Sind bereits neuere, diesem Runner unbekannte Migrationen angewendet,
+    // würden deren Objekte fälschlich als fremd gelten. In diesem Fall wird
+    // die Whitelist-Prüfung übersprungen; die Prüfsummen gelten weiterhin.
+    if (maxAppliedVersion <= BASELINE_MAX_VERSION) {
+      const unexpectedObjects = await findUnexpectedSchemaObjects(client);
+      if (unexpectedObjects.length > 0) {
+        const details = unexpectedObjects
+          .map((object) => `Unerwartetes Objekt im Schema public: ${object.kind} "${object.name}"`)
+          .join('; ');
+        throw new Error(
+          `Bestehende Datenbank enthält unerwartete Schemaobjekte. ${details}. ` +
+            'Abbruch, um keine Migrationen auf einem unbekannten Schema auszuführen.'
+        );
+      }
     }
 
     const appliedVersions = new Set(appliedRows.map((row) => parseInt(row.version, 10)));
