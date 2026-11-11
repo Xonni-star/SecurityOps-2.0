@@ -667,4 +667,130 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     );
     expect(history[0].count).toBe('0');
   });
+
+  async function captureMigrationError(db: string, dir: string): Promise<string> {
+    try {
+      await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    throw new Error('Runner hätte die Baseline ablehnen müssen, hat sie aber akzeptiert.');
+  }
+
+  test('34. Korrekte bestehende SecurityOps-Baseline wird weiterhin akzeptiert', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+
+    const result = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+
+    expect(result.applied).toEqual([]);
+    expect(result.baselined).toEqual([]);
+    expect(result.skipped).toEqual(['001', '002', '003', '004']);
+  });
+
+  test('35. Zusätzlicher Composite Type in gültiger Baseline wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'CREATE TYPE zusatz_composite AS (a INT)');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Zusammengesetzter Typ "zusatz_composite"/);
+
+    const type = await queryInDatabase<{ typname: string | null }>(
+      db,
+      `SELECT to_regtype('public.zusatz_composite')::text AS typname`
+    );
+    expect(type[0].typname).toBe('zusatz_composite');
+
+    const history = await queryInDatabase<{ count: string }>(
+      db,
+      `SELECT COUNT(*)::text AS count FROM schema_migrations`
+    );
+    expect(history[0].count).toBe('4');
+  });
+
+  test('36. Zusätzlicher Range Type in gültiger Baseline wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'CREATE TYPE zusatz_range AS RANGE (subtype = int4)');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Range-Typ "zusatz_range"/);
+    // PostgreSQL legt automatisch einen Multirange-Typ an.
+    expect(message).toMatch(/Multirange-Typ "zusatz_multirange"/);
+
+    const type = await queryInDatabase<{ typname: string | null }>(
+      db,
+      `SELECT to_regtype('public.zusatz_range')::text AS typname`
+    );
+    expect(type[0].typname).toBe('zusatz_range');
+  });
+
+  test('37. Zusätzlicher Multirange Type in gültiger Baseline wird erkannt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'CREATE TYPE zusatz_range AS RANGE (subtype = int4)');
+
+    const multirange = await queryInDatabase<{ typtype: string }>(
+      db,
+      `SELECT typtype FROM pg_type
+        WHERE typnamespace = 'public'::regnamespace AND typname = 'zusatz_multirange'`
+    );
+    expect(multirange).toHaveLength(1);
+    expect(multirange[0].typtype).toBe('m');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Multirange-Typ "zusatz_multirange"/);
+  });
+
+  test('38. Daten und Objekte bleiben nach abgelehnter Baseline unverändert', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `INSERT INTO tenants (name, subdomain, tax_number, bwr_register_id)
+       VALUES ('Bestand', 'bestand-typ', 'DE-TYP-1', 'BWR-TYP-1')`
+    );
+    const before = await historyRows(db);
+    await queryInDatabase(db, 'CREATE TYPE bestands_typ AS (id INT)');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/Zusammengesetzter Typ "bestands_typ"/);
+
+    const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
+    expect(tenants.some((row) => row.name === 'Bestand')).toBe(true);
+
+    const type = await queryInDatabase<{ typname: string | null }>(
+      db,
+      `SELECT to_regtype('public.bestands_typ')::text AS typname`
+    );
+    expect(type[0].typname).toBe('bestands_typ');
+
+    const after = await historyRows(db);
+    expect(after).toEqual(before);
+  });
+
+  test('39. Keine doppelten Meldungen für automatisch erzeugte Tabellen-Zeilentypen', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'CREATE TYPE einzel_typ AS (a INT)');
+
+    const message = await captureMigrationError(db, dir);
+    expect(message.split('Zusammengesetzter Typ "einzel_typ"').length - 1).toBe(1);
+    expect(message).not.toMatch(/Zusammengesetzter Typ "tasks"/);
+    expect(message).not.toMatch(/"schema_migrations"/);
+  });
+
+  test('40. Erweiterungstypen erzeugen keinen Fehlalarm', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    // citext legt einen Basistyp + Array-Typ in public an; beides ist erlaubt.
+    await queryInDatabase(db, 'CREATE EXTENSION IF NOT EXISTS citext');
+
+    const result = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+
+    expect(result.applied).toEqual([]);
+    expect(result.skipped).toEqual(['001', '002', '003', '004']);
+  });
 });

@@ -402,9 +402,9 @@ interface UnexpectedPublicObject {
 }
 
 /**
- * Ermittelt sämtliche Objekte im Schema `public`, die nicht zur erwarteten
- * SecurityOps-Struktur gehören. Wird nur für die Leer-Datenbank-Erkennung
- * verwendet und verändert keine Objekte.
+ * Ermittelt fremde Relationen und Routinen im Schema `public`, die nicht zur
+ * erwarteten SecurityOps-Struktur gehören. Wird für die Leer-Datenbank- und
+ * Baseline-Erkennung verwendet und verändert keine Objekte.
  */
 async function findUnexpectedPublicObjects(client: Client): Promise<UnexpectedPublicObject[]> {
   const result = await client.query<UnexpectedPublicObject>(`
@@ -428,8 +428,31 @@ async function findUnexpectedPublicObjects(client: Client): Promise<UnexpectedPu
       FROM pg_proc p
       JOIN pg_namespace n ON n.oid = p.pronamespace
      WHERE n.nspname = 'public'
-    UNION ALL
-    SELECT 'type'::text, t.typname,
+    ORDER BY 1, 2
+  `);
+  return result.rows;
+}
+
+interface UnexpectedCustomType {
+  typname: string;
+  kind: string;
+}
+
+/**
+ * Ermittelt unerwartete benutzerdefinierte Typen im Schema `public`.
+ *
+ * Bewusst NICHT gemeldet werden:
+ * - automatisch erzeugte Zeilentypen von Tabellen, partitionierten Tabellen,
+ *   Views, Materialized Views und Fremdtabellen (relkind r/p/v/m/f),
+ * - Array-Typen (typtype 'b'),
+ * - Typen, die zu einer PostgreSQL-Erweiterung gehören (pg_depend.deptype = 'e').
+ *
+ * Gemeldet werden eigenständige Composite Types ('c'), Enums ('e'),
+ * Domains ('d'), Range-Typen ('r') und Multirange-Typen ('m').
+ */
+async function findUnexpectedCustomTypes(client: Client): Promise<UnexpectedCustomType[]> {
+  const result = await client.query<UnexpectedCustomType>(`
+    SELECT t.typname,
            CASE t.typtype
              WHEN 'e' THEN 'Enum'
              WHEN 'd' THEN 'Domain'
@@ -446,10 +469,17 @@ async function findUnexpectedPublicObjects(client: Client): Promise<UnexpectedPu
          t.typtype IN ('e', 'd', 'r', 'm')
          -- Eigenständige Composite Types haben einen pg_class-Eintrag mit relkind 'c'.
          -- Zeilentypen von Tabellen/Views/Fremdtabellen (relkind r/p/v/m/f) werden
-         -- bereits über die Relationsprüfung gemeldet und hier ausgeschlossen.
+         -- über die Relationsprüfung abgedeckt und hier ausgeschlossen.
          OR (t.typtype = 'c' AND (rel.oid IS NULL OR rel.relkind = 'c'))
        )
-    ORDER BY 1, 2
+       AND NOT EXISTS (
+         SELECT 1
+           FROM pg_depend d
+          WHERE d.classid = 'pg_type'::regclass
+            AND d.objid = t.oid
+            AND d.deptype = 'e'
+       )
+     ORDER BY t.typname
   `);
   return result.rows;
 }
@@ -470,11 +500,17 @@ async function inspectSchema(client: Client): Promise<SchemaInspection> {
   // Fremdtabellen, Funktionen, Prozeduren, Enums oder Domains existieren.
   if (existingTables.length === 0) {
     const unexpected = await findUnexpectedPublicObjects(client);
+    const unexpectedTypes = await findUnexpectedCustomTypes(client);
     return {
       existingTables,
-      problems: unexpected.map(
-        (object) => `Unerwartetes Objekt im Schema public: ${object.kind} "${object.name}"`
-      )
+      problems: [
+        ...unexpected.map(
+          (object) => `Unerwartetes Objekt im Schema public: ${object.kind} "${object.name}"`
+        ),
+        ...unexpectedTypes.map(
+          (type) => `Unerwartetes Objekt im Schema public: ${type.kind} "${type.typname}"`
+        )
+      ]
     };
   }
 
@@ -753,6 +789,14 @@ async function inspectSchema(client: Client): Promise<SchemaInspection> {
     }
   }
 
+  // Unerwartete benutzerdefinierte Typen auch bei einer bestehenden Baseline
+  // erkennen. Automatische Zeilentypen, Arrays und Erweiterungstypen sind
+  // in findUnexpectedCustomTypes() ausgeschlossen.
+  const unexpectedTypes = await findUnexpectedCustomTypes(client);
+  for (const type of unexpectedTypes) {
+    problems.push(`Unerwartetes Objekt im Schema public: ${type.kind} "${type.typname}"`);
+  }
+
   // Erweiterung, die von Migration 001 benötigt wird
   const extensionResult = await client.query(`SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp'`);
   if (extensionResult.rowCount === 0) {
@@ -812,6 +856,18 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
 
     const appliedRows = await readAppliedMigrations(client);
     verifyAppliedMigrations(appliedRows, migrations);
+
+    // Unerwartete benutzerdefinierte Typen werden unabhängig davon geprüft,
+    // ob bereits eine Historie existiert. Automatische Zeilentypen, Arrays und
+    // Erweiterungstypen sind in findUnexpectedCustomTypes() ausgeschlossen.
+    const unexpectedTypes = await findUnexpectedCustomTypes(client);
+    if (unexpectedTypes.length > 0) {
+      throw new Error(
+        'Unerwartete benutzerdefinierte Typen im Schema public: ' +
+          unexpectedTypes.map((type) => `${type.kind} "${type.typname}"`).join(', ') +
+          '. Abbruch, um keine Migrationen auf einem unbekannten Schema auszuführen.'
+      );
+    }
 
     const appliedVersions = new Set(appliedRows.map((row) => parseInt(row.version, 10)));
 
