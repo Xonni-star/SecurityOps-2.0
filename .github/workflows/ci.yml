@@ -192,6 +192,9 @@ jobs:
       - name: Testdaten anlegen
         run: npm run seed
 
+      - name: Migrationshistorie & Baseline (Integrationstests)
+        run: npm test -- --runInBand --testPathPattern=migrations
+
       - name: Backend- und RLS-Integrationstests (Jest)
         run: npm test -- --runInBand
 
