@@ -243,7 +243,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     await expect(
       runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
-    ).rejects.toThrow(/nicht eindeutig|unvollständig/);
+    ).rejects.toThrow(/nicht exakt|nicht eindeutig|unvollständig/);
 
     const history = await historyRows(db);
     expect(history).toHaveLength(0);
@@ -264,5 +264,158 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     await expect(
       runMigrations({ connectionString: withDatabaseName(await createTestDatabase()), migrationsDir: invalidDir, logger: noopLogger })
     ).rejects.toThrow(/Ungültiger Migrationsdateiname/);
+  });
+
+  async function createFullBaselineDatabase(): Promise<{ db: string; dir: string }> {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    return { db, dir };
+  }
+
+  /** Entfernt die Historie, damit der Runner den Ist-Zustand erneut als Baseline prüfen muss. */
+  async function expectBaselineRejected(db: string, dir: string, pattern: RegExp): Promise<void> {
+    await queryInDatabase(db, 'DROP TABLE schema_migrations');
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(pattern);
+  }
+
+  test('10. Fehlende RLS-Policy verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'DROP POLICY tenant_isolation_permissive ON clients');
+
+    await expectBaselineRejected(db, dir, /RLS-Policy fehlt: clients/);
+  });
+
+  test('11. Veränderte RLS-Policy verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `DROP POLICY tenant_isolation_permissive ON clients;
+       CREATE POLICY tenant_isolation_permissive ON clients
+         AS PERMISSIVE FOR ALL TO PUBLIC USING (true) WITH CHECK (true);`
+    );
+
+    await expectBaselineRejected(db, dir, /RLS-Policy clients: USING-Ausdruck weicht ab/);
+  });
+
+  test('12. Trigger an falscher Tabelle verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `DROP TRIGGER trg_guardbook_entries_immutable ON guardbook_entries;
+       CREATE TRIGGER trg_guardbook_entries_immutable
+         BEFORE DELETE OR UPDATE ON tasks
+         FOR EACH ROW EXECUTE FUNCTION prevent_guardbook_tampering();`
+    );
+
+    await expectBaselineRejected(db, dir, /Trigger trg_guardbook_entries_immutable: Tabelle "tasks"/);
+  });
+
+  test('13. Falsche Trigger-Funktion verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `DROP TRIGGER trg_guardbook_entries_immutable ON guardbook_entries;
+       CREATE TRIGGER trg_guardbook_entries_immutable
+         BEFORE DELETE OR UPDATE ON guardbook_entries
+         FOR EACH ROW EXECUTE FUNCTION prevent_revision_tampering();`
+    );
+
+    await expectBaselineRejected(db, dir, /Trigger trg_guardbook_entries_immutable: Funktion "prevent_revision_tampering"/);
+  });
+
+  test('14. Veränderte Constraint-Definition verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `ALTER TABLE tasks DROP CONSTRAINT uq_tasks_client_mutation;
+       ALTER TABLE tasks ADD CONSTRAINT uq_tasks_client_mutation UNIQUE (client_mutation_id, tenant_id);`
+    );
+
+    await expectBaselineRejected(db, dir, /Constraint uq_tasks_client_mutation: Definition weicht ab/);
+  });
+
+  test('15. Fehlende Berechtigung verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'REVOKE DELETE ON shifts FROM secops_app_user');
+
+    await expectBaselineRejected(db, dir, /Recht DELETE auf shifts: false statt true/);
+  });
+
+  test('16. Abweichende Berechtigung verhindert die Baseline', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, 'GRANT DELETE ON guardbook_entries TO secops_app_user');
+
+    await expectBaselineRejected(db, dir, /Recht DELETE auf guardbook_entries: true statt false/);
+  });
+
+  test('17. Fehlende Baseline-Migrationsdatei wird nicht akzeptiert', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    fs.rmSync(path.join(dir, '004_operational_delete_privileges.sql'));
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Baseline-Migration 004 .* fehlt/);
+
+    const rows = await queryInDatabase<{ tbl: string | null }>(
+      db,
+      `SELECT to_regclass('public.schema_migrations')::text AS tbl`
+    );
+    expect(rows[0].tbl).toBeNull();
+  });
+
+  test('18. Abweichender Dateiname der Baseline-Migration wird nicht akzeptiert', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    fs.renameSync(
+      path.join(dir, '004_operational_delete_privileges.sql'),
+      path.join(dir, '004_andere_datei.sql')
+    );
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Baseline-Migration 004 hat den erwarteten Dateinamen/);
+  });
+
+  test('19. Bestehende Daten bleiben bei abgelehnter Baseline unverändert', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(
+      db,
+      `INSERT INTO tenants (name, subdomain, tax_number, bwr_register_id)
+       VALUES ('Bestandsdaten', 'bestand', 'DE-BEST-1', 'BWR-BEST-1')`
+    );
+    await queryInDatabase(db, 'DROP POLICY tenant_isolation_permissive ON clients');
+
+    await expectBaselineRejected(db, dir, /RLS-Policy fehlt: clients/);
+
+    const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
+    expect(tenants.some((row) => row.name === 'Bestandsdaten')).toBe(true);
+
+    const count = await queryInDatabase<{ count: string }>(
+      db,
+      `SELECT COUNT(*)::text AS count FROM schema_migrations`
+    );
+    expect(count[0].count).toBe('0');
+  });
+
+  test('20. Abweichender Dateiname in der Historie wird abgelehnt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, `UPDATE schema_migrations SET filename = '003_umbenannt.sql' WHERE version = '003'`);
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Inkonsistenter Dateiname für Version 003/);
+  });
+
+  test('21. Abweichende Versionskennung in der Historie wird abgelehnt', async () => {
+    const { db, dir } = await createFullBaselineDatabase();
+    await queryInDatabase(db, `UPDATE schema_migrations SET version = '3' WHERE version = '003'`);
+
+    await expect(
+      runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
+    ).rejects.toThrow(/Inkonsistente Versionskennung: Datenbank meldet "3"/);
   });
 });

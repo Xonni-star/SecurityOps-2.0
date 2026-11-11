@@ -8,15 +8,16 @@ import { env } from '../config/env';
  * Versionssicherer PostgreSQL-Migrationsrunner.
  *
  * - Führt Migrationen genau einmal aus und protokolliert sie in `schema_migrations`.
- * - Prüft SHA-256-Prüfsummen bereits ausgeführter Migrationen.
+ * - Prüft Versionskennung, Dateiname und SHA-256-Prüfsumme bereits ausgeführter Migrationen.
  * - Führt jede Migration in einer eigenen Transaktion aus.
  * - Serialisiert konkurrierende Runner über einen PostgreSQL Advisory Lock.
- * - Erkennt bestehende Datenbanken (001–004) und übernimmt sie als Baseline,
- *   ohne die Migrationen erneut auszuführen.
+ * - Erkennt bestehende Datenbanken (001–004) und übernimmt sie nur dann als Baseline,
+ *   wenn Tabellen, Spalten, Constraints, Trigger, Funktionen, RLS-Policies,
+ *   Rollen und Berechtigungen exakt dem erwarteten Stand entsprechen.
  */
 
 const HISTORY_TABLE = 'schema_migrations';
-const ADVISORY_LOCK_KEY = 2026111101;
+const ADVISORY_LOCK_KEY = Number('2026111101');
 const BASELINE_MAX_VERSION = 4;
 
 const MIGRATION_FILE_PATTERN = /^(\d+)_([A-Za-z0-9][A-Za-z0-9._-]*)\.sql$/;
@@ -42,7 +43,15 @@ export interface MigrationRunResult {
   skipped: string[];
 }
 
-const DEFAULT_EXPECTED_TABLES = [
+/** Exakt erwartete Baseline-Migrationsdateien. */
+const BASELINE_FILES: Array<{ version: string; numericVersion: number; filename: string }> = [
+  { version: '001', numericVersion: 1, filename: '001_initial_schema.sql' },
+  { version: '002', numericVersion: 2, filename: '002_idempotency_and_versioning.sql' },
+  { version: '003', numericVersion: 3, filename: '003_conflict_receipts_separation.sql' },
+  { version: '004', numericVersion: 4, filename: '004_operational_delete_privileges.sql' }
+];
+
+const EXPECTED_TABLES = [
   'tenants',
   'users',
   'roles',
@@ -84,19 +93,89 @@ const EXPECTED_COLUMNS: Array<[string, string]> = [
   ['sync_conflict_resolution_receipts', 'client_mutation_id']
 ];
 
-const EXPECTED_CONSTRAINTS = [
-  'uq_shifts_client_mutation',
-  'uq_tasks_client_mutation',
-  'uq_keys_client_mutation',
-  'uq_guardbook_client_mutation',
-  'uq_revisions_client_mutation',
-  'uq_patrol_client_mutation',
-  'uq_handover_client_mutation'
+/** Constraints inklusive Typ, Tabelle und tatsächlicher Definition. */
+const EXPECTED_CONSTRAINTS: Array<{
+  name: string;
+  table: string;
+  type: 'u' | 'f';
+  definition: string;
+}> = [
+  { name: 'uq_shifts_client_mutation', table: 'shifts', type: 'u', definition: 'UNIQUE (tenant_id, client_mutation_id)' },
+  { name: 'uq_tasks_client_mutation', table: 'tasks', type: 'u', definition: 'UNIQUE (tenant_id, client_mutation_id)' },
+  { name: 'uq_keys_client_mutation', table: 'keys', type: 'u', definition: 'UNIQUE (tenant_id, client_mutation_id)' },
+  {
+    name: 'uq_guardbook_client_mutation',
+    table: 'guardbook_entries',
+    type: 'u',
+    definition: 'UNIQUE (tenant_id, client_mutation_id)'
+  },
+  {
+    name: 'uq_revisions_client_mutation',
+    table: 'guardbook_revisions',
+    type: 'u',
+    definition: 'UNIQUE (tenant_id, client_mutation_id)'
+  },
+  { name: 'uq_patrol_client_mutation', table: 'patrol_scans', type: 'u', definition: 'UNIQUE (tenant_id, client_mutation_id)' },
+  {
+    name: 'uq_handover_client_mutation',
+    table: 'shift_handovers',
+    type: 'u',
+    definition: 'UNIQUE (tenant_id, client_mutation_id)'
+  },
+  {
+    name: 'fk_revisions_guardbook_tenant',
+    table: 'guardbook_revisions',
+    type: 'f',
+    definition:
+      'FOREIGN KEY (entry_id, tenant_id) REFERENCES guardbook_entries(id, tenant_id) ON DELETE CASCADE'
+  }
 ];
 
-const EXPECTED_FUNCTIONS = ['prevent_guardbook_tampering', 'prevent_revision_tampering'];
+/** Trigger inklusive Tabelle, Funktion, Aktivierungsstatus und Definition. */
+const EXPECTED_TRIGGERS: Array<{
+  name: string;
+  table: string;
+  function: string;
+  definition: string;
+}> = [
+  {
+    name: 'trg_guardbook_entries_immutable',
+    table: 'guardbook_entries',
+    function: 'prevent_guardbook_tampering',
+    definition:
+      'CREATE TRIGGER trg_guardbook_entries_immutable BEFORE DELETE OR UPDATE ON public.guardbook_entries FOR EACH ROW EXECUTE FUNCTION prevent_guardbook_tampering()'
+  },
+  {
+    name: 'trg_guardbook_revisions_immutable',
+    table: 'guardbook_revisions',
+    function: 'prevent_revision_tampering',
+    definition:
+      'CREATE TRIGGER trg_guardbook_revisions_immutable BEFORE DELETE OR UPDATE ON public.guardbook_revisions FOR EACH ROW EXECUTE FUNCTION prevent_revision_tampering()'
+  }
+];
 
-const EXPECTED_TRIGGERS = ['trg_guardbook_entries_immutable', 'trg_guardbook_revisions_immutable'];
+/** Funktionen inklusive Sprache, Rückgabetyp und sicherheitsrelevanter Body-Marker. */
+const EXPECTED_FUNCTIONS: Array<{ name: string; markers: string[] }> = [
+  {
+    name: 'prevent_guardbook_tampering',
+    markers: [
+      "TG_OP = 'DELETE'",
+      'Löschen von Einträgen in guardbook_entries',
+      'Nachträgliche Manipulation von Kernfeldern',
+      'guardbook_revisions'
+    ]
+  },
+  {
+    name: 'prevent_revision_tampering',
+    markers: ['Revisionen in guardbook_revisions sind unveränderlich und unlöschbar']
+  }
+];
+
+const EXPECTED_RLS_POLICY_NAME = 'tenant_isolation_permissive';
+const EXPECTED_RLS_EXPRESSION =
+  "((current_setting('app.current_tenant'::text, true) IS NOT NULL) AND " +
+  "(current_setting('app.current_tenant'::text, true) <> ''::text) AND " +
+  '(tenant_id = (current_setting(\'app.current_tenant\'::text, true))::uuid))';
 
 const EXPECTED_RLS_TABLES = [
   'clients',
@@ -115,8 +194,30 @@ const EXPECTED_RLS_TABLES = [
   'audit_logs'
 ];
 
+/** Erwartete Tabellenrechte des unprivilegierten Anwendungsbenutzers. */
+const EXPECTED_TABLE_PRIVILEGES: Record<string, { select: boolean; insert: boolean; update: boolean; delete: boolean }> =
+  {};
+for (const table of EXPECTED_TABLES) {
+  EXPECTED_TABLE_PRIVILEGES[table] = {
+    select: true,
+    insert: true,
+    update: table !== 'guardbook_revisions',
+    delete: table === 'shifts' || table === 'tasks'
+  };
+}
+
 function sha256(content: Buffer): string {
   return crypto.createHash('sha256').update(content).digest('hex');
+}
+
+/** Entfernt sämtliche Whitespaces – für den exakten Vergleich von DDL-Definitionen. */
+function compact(value: string): string {
+  return value.replace(/\s+/g, '');
+}
+
+/** Normalisiert Whitespace zu einem einzelnen Leerzeichen – für Body-Marker. */
+function spaced(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
 }
 
 export function loadMigrations(migrationsDir: string): MigrationFile[] {
@@ -173,6 +274,50 @@ export function loadMigrations(migrationsDir: string): MigrationFile[] {
   return migrations.sort((a, b) => a.numericVersion - b.numericVersion);
 }
 
+/**
+ * Stellt sicher, dass die Baseline-Migrationen exakt in Version und Dateiname
+ * vorhanden sind. Fehlende oder abweichend nummerierte Baseline-Dateien
+ * werden nicht stillschweigend akzeptiert.
+ */
+export function assertBaselineMigrationSet(migrations: MigrationFile[]): void {
+  for (const expected of BASELINE_FILES) {
+    const migration = migrations.find((item) => item.numericVersion === expected.numericVersion);
+
+    if (!migration) {
+      throw new Error(
+        `Baseline-Migration ${expected.version} (${expected.filename}) fehlt im Migrationsverzeichnis. ` +
+          'Eine Baseline darf nur mit vollständigem 001–004-Satz gebildet werden.'
+      );
+    }
+
+    if (migration.version !== expected.version) {
+      throw new Error(
+        `Baseline-Migration ${expected.version} besitzt die abweichende Versionskennung "${migration.version}" (${migration.filename}).`
+      );
+    }
+
+    if (migration.filename !== expected.filename) {
+      throw new Error(
+        `Baseline-Migration ${expected.version} hat den erwarteten Dateinamen "${expected.filename}" nicht ` +
+          `(gefunden: "${migration.filename}").`
+      );
+    }
+  }
+
+  const unexpected = migrations.filter(
+    (migration) =>
+      migration.numericVersion <= BASELINE_MAX_VERSION &&
+      !BASELINE_FILES.some((expected) => expected.numericVersion === migration.numericVersion)
+  );
+
+  if (unexpected.length > 0) {
+    throw new Error(
+      `Unerwartete Baseline-Migrationsversion(en): ${unexpected.map((item) => item.filename).join(', ')}. ` +
+        'Für Baseline 001–004 sind ausschließlich die bekannten vier Dateien zulässig.'
+    );
+  }
+}
+
 async function ensureHistoryTable(client: Client): Promise<void> {
   await client.query(`
     CREATE TABLE IF NOT EXISTS ${HISTORY_TABLE} (
@@ -211,6 +356,20 @@ function verifyAppliedMigrations(applied: AppliedMigrationRow[], migrations: Mig
       );
     }
 
+    if (row.version !== migration.version) {
+      throw new Error(
+        `Inkonsistente Versionskennung: Datenbank meldet "${row.version}", die Datei heißt "${migration.filename}" ` +
+          `mit Version "${migration.version}".`
+      );
+    }
+
+    if (row.filename !== migration.filename) {
+      throw new Error(
+        `Inkonsistenter Dateiname für Version ${migration.version}: Datenbank speichert "${row.filename}", ` +
+          `im Repository liegt "${migration.filename}".`
+      );
+    }
+
     if (migration.checksum !== row.checksum) {
       throw new Error(
         `Migration ${migration.filename} wurde nachträglich verändert. ` +
@@ -223,105 +382,301 @@ function verifyAppliedMigrations(applied: AppliedMigrationRow[], migrations: Mig
 
 interface SchemaInspection {
   existingTables: string[];
-  missingTables: string[];
-  missingColumns: string[];
-  missingConstraints: string[];
-  missingFunctions: string[];
-  missingTriggers: string[];
-  missingRls: string[];
-  privilegeProblems: string[];
+  problems: string[];
 }
 
 async function inspectSchema(client: Client): Promise<SchemaInspection> {
+  const problems: string[] = [];
+
   const tableResult = await client.query<{ name: string; present: boolean }>(
     `SELECT t AS name, to_regclass('public.' || quote_ident(t)) IS NOT NULL AS present
        FROM unnest($1::text[]) AS t`,
-    [DEFAULT_EXPECTED_TABLES]
+    [EXPECTED_TABLES]
   );
   const existingTables = tableResult.rows.filter((row) => row.present).map((row) => row.name);
   const missingTables = tableResult.rows.filter((row) => !row.present).map((row) => row.name);
 
+  for (const table of missingTables) {
+    problems.push(`Tabelle fehlt: ${table}`);
+  }
+
+  // Eine leere Datenbank ist der einzige Zustand ohne weitere Prüfungen.
+  if (existingTables.length === 0) {
+    return { existingTables, problems: [] };
+  }
+
+  // Spalten
   const columnResult = await client.query<{ table_name: string; column_name: string }>(
-    `SELECT table_name, column_name
-       FROM information_schema.columns
-      WHERE table_schema = 'public'`
+    `SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = 'public'`
   );
   const existingColumns = new Set(columnResult.rows.map((row) => `${row.table_name}.${row.column_name}`));
-  const missingColumns = EXPECTED_COLUMNS.filter(([table, column]) => !existingColumns.has(`${table}.${column}`)).map(
-    ([table, column]) => `${table}.${column}`
-  );
+  for (const [table, column] of EXPECTED_COLUMNS) {
+    if (!existingColumns.has(`${table}.${column}`)) {
+      problems.push(`Spalte fehlt: ${table}.${column}`);
+    }
+  }
 
-  const constraintResult = await client.query<{ conname: string }>(
-    `SELECT conname FROM pg_constraint WHERE conname = ANY($1::text[])`,
-    [EXPECTED_CONSTRAINTS]
+  // Constraints: Typ, Tabelle und tatsächliche Definition
+  const constraintResult = await client.query<{
+    conname: string;
+    contype: string;
+    table_name: string;
+    definition: string;
+  }>(
+    `SELECT conname, contype, conrelid::regclass::text AS table_name, pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+      WHERE conname = ANY($1::text[])`,
+    [EXPECTED_CONSTRAINTS.map((constraint) => constraint.name)]
   );
-  const existingConstraints = new Set(constraintResult.rows.map((row) => row.conname));
-  const missingConstraints = EXPECTED_CONSTRAINTS.filter((name) => !existingConstraints.has(name));
+  const constraintsByName = new Map(constraintResult.rows.map((row) => [row.conname, row]));
 
-  const functionResult = await client.query<{ proname: string }>(
-    `SELECT p.proname
+  for (const expected of EXPECTED_CONSTRAINTS) {
+    const row = constraintsByName.get(expected.name);
+    if (!row) {
+      problems.push(`Constraint fehlt: ${expected.name}`);
+      continue;
+    }
+
+    const table = row.table_name.replace(/^public\./, '');
+    if (row.contype !== expected.type) {
+      problems.push(`Constraint ${expected.name}: Typ "${row.contype}" statt "${expected.type}"`);
+    }
+    if (table !== expected.table) {
+      problems.push(`Constraint ${expected.name}: Tabelle "${table}" statt "${expected.table}"`);
+    }
+    if (compact(row.definition) !== compact(expected.definition)) {
+      problems.push(`Constraint ${expected.name}: Definition weicht ab (${row.definition})`);
+    }
+  }
+
+  // Funktionen: Sprache, Rückgabetyp, SECURITY DEFINER und sicherheitsrelevante Body-Marker
+  const functionResult = await client.query<{
+    proname: string;
+    lanname: string;
+    return_type: string;
+    prosecdef: boolean;
+    prosrc: string;
+  }>(
+    `SELECT p.proname, l.lanname, p.prorettype::regtype::text AS return_type, p.prosecdef, p.prosrc
        FROM pg_proc p
        JOIN pg_namespace n ON n.oid = p.pronamespace
+       JOIN pg_language l ON l.oid = p.prolang
       WHERE n.nspname = 'public' AND p.proname = ANY($1::text[])`,
-    [EXPECTED_FUNCTIONS]
+    [EXPECTED_FUNCTIONS.map((fn) => fn.name)]
   );
-  const existingFunctions = new Set(functionResult.rows.map((row) => row.proname));
-  const missingFunctions = EXPECTED_FUNCTIONS.filter((name) => !existingFunctions.has(name));
+  const functionsByName = new Map(functionResult.rows.map((row) => [row.proname, row]));
 
-  const triggerResult = await client.query<{ tgname: string }>(
-    `SELECT tgname FROM pg_trigger WHERE NOT tgisinternal AND tgname = ANY($1::text[])`,
-    [EXPECTED_TRIGGERS]
+  for (const expected of EXPECTED_FUNCTIONS) {
+    const row = functionsByName.get(expected.name);
+    if (!row) {
+      problems.push(`Funktion fehlt: ${expected.name}`);
+      continue;
+    }
+    if (row.lanname !== 'plpgsql') {
+      problems.push(`Funktion ${expected.name}: Sprache "${row.lanname}" statt "plpgsql"`);
+    }
+    if (row.return_type !== 'trigger') {
+      problems.push(`Funktion ${expected.name}: Rückgabetyp "${row.return_type}" statt "trigger"`);
+    }
+    if (row.prosecdef) {
+      problems.push(`Funktion ${expected.name}: unerwartetes SECURITY DEFINER`);
+    }
+
+    const body = spaced(row.prosrc);
+    for (const marker of expected.markers) {
+      if (!body.includes(marker)) {
+        problems.push(`Funktion ${expected.name}: erwarteter Body-Marker fehlt (${marker})`);
+      }
+    }
+  }
+
+  // Trigger: Tabelle, Funktion, Aktivierungsstatus, Definition
+  const triggerResult = await client.query<{
+    tgname: string;
+    table_name: string;
+    function_name: string;
+    tgenabled: string;
+    definition: string;
+  }>(
+    `SELECT t.tgname, c.relname AS table_name, p.proname AS function_name, t.tgenabled,
+            pg_get_triggerdef(t.oid) AS definition
+       FROM pg_trigger t
+       JOIN pg_class c ON c.oid = t.tgrelid
+       JOIN pg_proc p ON p.oid = t.tgfoid
+      WHERE NOT t.tgisinternal AND t.tgname = ANY($1::text[])`,
+    [EXPECTED_TRIGGERS.map((trigger) => trigger.name)]
   );
-  const existingTriggers = new Set(triggerResult.rows.map((row) => row.tgname));
-  const missingTriggers = EXPECTED_TRIGGERS.filter((name) => !existingTriggers.has(name));
+  const triggersByName = new Map(triggerResult.rows.map((row) => [row.tgname, row]));
 
-  const rlsResult = await client.query<{ relname: string; relrowsecurity: boolean }>(
-    `SELECT c.relname, c.relrowsecurity
+  for (const expected of EXPECTED_TRIGGERS) {
+    const row = triggersByName.get(expected.name);
+    if (!row) {
+      problems.push(`Trigger fehlt: ${expected.name}`);
+      continue;
+    }
+    if (row.table_name !== expected.table) {
+      problems.push(`Trigger ${expected.name}: Tabelle "${row.table_name}" statt "${expected.table}"`);
+    }
+    if (row.function_name !== expected.function) {
+      problems.push(`Trigger ${expected.name}: Funktion "${row.function_name}" statt "${expected.function}"`);
+    }
+    if (row.tgenabled !== 'O') {
+      problems.push(`Trigger ${expected.name}: Aktivierungsstatus "${row.tgenabled}" statt "O" (enabled)`);
+    }
+    if (compact(row.definition) !== compact(expected.definition)) {
+      problems.push(`Trigger ${expected.name}: Definition weicht ab (${row.definition})`);
+    }
+  }
+
+  // RLS: Aktivierung, FORCE und vollständige Policy-Definition
+  const rlsResult = await client.query<{ relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }>(
+    `SELECT c.relname, c.relrowsecurity, c.relforcerowsecurity
        FROM pg_class c
        JOIN pg_namespace n ON n.oid = c.relnamespace
       WHERE n.nspname = 'public' AND c.relname = ANY($1::text[])`,
     [EXPECTED_RLS_TABLES]
   );
-  const rlsEnabled = new Set(rlsResult.rows.filter((row) => row.relrowsecurity).map((row) => row.relname));
-  const missingRls = EXPECTED_RLS_TABLES.filter((name) => !rlsEnabled.has(name));
+  const rlsByTable = new Map(rlsResult.rows.map((row) => [row.relname, row]));
 
-  const privilegeProblems: string[] = [];
-  const roleResult = await client.query(`SELECT 1 FROM pg_roles WHERE rolname = 'secops_app_user'`);
-  if (roleResult.rowCount === 0) {
-    privilegeProblems.push('Rolle secops_app_user fehlt');
-  } else if (missingTables.length === 0) {
-    // has_table_privilege() wirft, wenn die Tabelle nicht existiert.
-    // Bei fehlenden Tabellen ist der Zustand ohnehin unvollständig.
-    const privilegeResult = await client.query<{
-      shifts_delete: boolean;
-      tasks_delete: boolean;
-      guardbook_delete: boolean;
-      guardbook_select: boolean;
-    }>(`
-      SELECT
-        has_table_privilege('secops_app_user', 'public.shifts', 'DELETE') AS shifts_delete,
-        has_table_privilege('secops_app_user', 'public.tasks', 'DELETE') AS tasks_delete,
-        has_table_privilege('secops_app_user', 'public.guardbook_entries', 'DELETE') AS guardbook_delete,
-        has_table_privilege('secops_app_user', 'public.guardbook_entries', 'SELECT') AS guardbook_select
-    `);
+  const policyResult = await client.query<{
+    tablename: string;
+    policyname: string;
+    permissive: string;
+    roles: string;
+    cmd: string;
+    qual: string | null;
+    with_check: string | null;
+  }>(
+    `SELECT tablename, policyname, permissive, roles::text AS roles, cmd, qual, with_check
+       FROM pg_policies
+      WHERE schemaname = 'public' AND tablename = ANY($1::text[])`,
+    [EXPECTED_RLS_TABLES]
+  );
+  const policiesByTable = new Map(policyResult.rows.map((row) => [row.tablename, row]));
 
-    const row = privilegeResult.rows[0];
-    if (!row.shifts_delete) privilegeProblems.push('DELETE auf shifts fehlt');
-    if (!row.tasks_delete) privilegeProblems.push('DELETE auf tasks fehlt');
-    if (row.guardbook_delete) privilegeProblems.push('DELETE auf guardbook_entries darf nicht vergeben sein');
-    if (!row.guardbook_select) privilegeProblems.push('SELECT auf guardbook_entries fehlt');
+  for (const table of EXPECTED_RLS_TABLES) {
+    const rls = rlsByTable.get(table);
+    if (!rls) {
+      problems.push(`RLS-Tabelle fehlt: ${table}`);
+      continue;
+    }
+    if (!rls.relrowsecurity) {
+      problems.push(`RLS nicht aktiviert: ${table}`);
+    }
+    if (!rls.relforcerowsecurity) {
+      problems.push(`RLS nicht erzwungen (FORCE): ${table}`);
+    }
+
+    const policy = policiesByTable.get(table);
+    if (!policy) {
+      problems.push(`RLS-Policy fehlt: ${table}.${EXPECTED_RLS_POLICY_NAME}`);
+      continue;
+    }
+
+    if (policy.policyname !== EXPECTED_RLS_POLICY_NAME) {
+      problems.push(`RLS-Policy ${table}: Name "${policy.policyname}" statt "${EXPECTED_RLS_POLICY_NAME}"`);
+    }
+    if (policy.permissive !== 'PERMISSIVE') {
+      problems.push(`RLS-Policy ${table}: Modus "${policy.permissive}" statt "PERMISSIVE"`);
+    }
+    if (policy.roles !== '{public}') {
+      problems.push(`RLS-Policy ${table}: Rollen "${policy.roles}" statt "{public}"`);
+    }
+    if (policy.cmd !== 'ALL') {
+      problems.push(`RLS-Policy ${table}: Kommando "${policy.cmd}" statt "ALL"`);
+    }
+    if (!policy.qual || compact(policy.qual) !== compact(EXPECTED_RLS_EXPRESSION)) {
+      problems.push(`RLS-Policy ${table}: USING-Ausdruck weicht ab (${policy.qual ?? 'NULL'})`);
+    }
+    if (!policy.with_check || compact(policy.with_check) !== compact(EXPECTED_RLS_EXPRESSION)) {
+      problems.push(`RLS-Policy ${table}: WITH-CHECK-Ausdruck weicht ab (${policy.with_check ?? 'NULL'})`);
+    }
   }
 
-  return {
-    existingTables,
-    missingTables,
-    missingColumns,
-    missingConstraints,
-    missingFunctions,
-    missingTriggers,
-    missingRls,
-    privilegeProblems
-  };
+  // Rollen, Schema- und Tabellenrechte
+  const roleResult = await client.query<{
+    rolname: string;
+    rolsuper: boolean;
+    rolbypassrls: boolean;
+    rolcreaterole: boolean;
+    rolcreatedb: boolean;
+    rolcanlogin: boolean;
+  }>(
+    `SELECT rolname, rolsuper, rolbypassrls, rolcreaterole, rolcreatedb, rolcanlogin
+       FROM pg_roles WHERE rolname = 'secops_app_user'`
+  );
+
+  if (roleResult.rows.length === 0) {
+    problems.push('Rolle fehlt: secops_app_user');
+  } else {
+    const role = roleResult.rows[0];
+    if (role.rolsuper) problems.push('Rolle secops_app_user: unerwartet SUPERUSER');
+    if (role.rolbypassrls) problems.push('Rolle secops_app_user: unerwartet BYPASSRLS');
+    if (role.rolcreaterole) problems.push('Rolle secops_app_user: unerwartet CREATEROLE');
+    if (role.rolcreatedb) problems.push('Rolle secops_app_user: unerwartet CREATEDB');
+    if (!role.rolcanlogin) problems.push('Rolle secops_app_user: LOGIN fehlt');
+
+    const schemaResult = await client.query<{ usage: boolean; create: boolean }>(
+      `SELECT has_schema_privilege('secops_app_user', 'public', 'USAGE') AS usage,
+              has_schema_privilege('secops_app_user', 'public', 'CREATE') AS create`
+    );
+    if (!schemaResult.rows[0].usage) problems.push('Schema-Recht fehlt: USAGE auf public');
+    if (schemaResult.rows[0].create) problems.push('Schema-Recht unerwartet: CREATE auf public');
+
+    const privilegeResult = await client.query<{
+      table_name: string;
+      can_select: boolean;
+      can_insert: boolean;
+      can_update: boolean;
+      can_delete: boolean;
+      can_truncate: boolean;
+      can_references: boolean;
+      can_trigger: boolean;
+    }>(
+      `SELECT t AS table_name,
+              has_table_privilege('secops_app_user', 'public.' || quote_ident(t), 'SELECT')     AS can_select,
+              has_table_privilege('secops_app_user', 'public.' || quote_ident(t), 'INSERT')     AS can_insert,
+              has_table_privilege('secops_app_user', 'public.' || quote_ident(t), 'UPDATE')     AS can_update,
+              has_table_privilege('secops_app_user', 'public.' || quote_ident(t), 'DELETE')     AS can_delete,
+              has_table_privilege('secops_app_user', 'public.' || quote_ident(t), 'TRUNCATE')   AS can_truncate,
+              has_table_privilege('secops_app_user', 'public.' || quote_ident(t), 'REFERENCES') AS can_references,
+              has_table_privilege('secops_app_user', 'public.' || quote_ident(t), 'TRIGGER')    AS can_trigger
+         FROM unnest($1::text[]) AS t`,
+      [existingTables]
+    );
+
+    for (const row of privilegeResult.rows) {
+      const expected = EXPECTED_TABLE_PRIVILEGES[row.table_name];
+      if (!expected) continue;
+
+      if (row.can_select !== expected.select)
+        problems.push(`Recht SELECT auf ${row.table_name}: ${row.can_select} statt ${expected.select}`);
+      if (row.can_insert !== expected.insert)
+        problems.push(`Recht INSERT auf ${row.table_name}: ${row.can_insert} statt ${expected.insert}`);
+      if (row.can_update !== expected.update)
+        problems.push(`Recht UPDATE auf ${row.table_name}: ${row.can_update} statt ${expected.update}`);
+      if (row.can_delete !== expected.delete)
+        problems.push(`Recht DELETE auf ${row.table_name}: ${row.can_delete} statt ${expected.delete}`);
+      if (row.can_truncate) problems.push(`Unerwartetes Recht TRUNCATE auf ${row.table_name}`);
+      if (row.can_references) problems.push(`Unerwartetes Recht REFERENCES auf ${row.table_name}`);
+      if (row.can_trigger) problems.push(`Unerwartetes Recht TRIGGER auf ${row.table_name}`);
+    }
+  }
+
+  // Erweiterung, die von Migration 001 benötigt wird
+  const extensionResult = await client.query(`SELECT 1 FROM pg_extension WHERE extname = 'uuid-ossp'`);
+  if (extensionResult.rowCount === 0) {
+    problems.push('Erweiterung fehlt: uuid-ossp');
+  }
+
+  return { existingTables, problems };
+}
+
+function describeProblems(problems: string[]): string {
+  if (problems.length <= 8) {
+    return problems.join('; ');
+  }
+  return `${problems.slice(0, 8).join('; ')}; … (${problems.length - 8} weitere Abweichungen)`;
 }
 
 async function executeMigrationInTransaction(client: Client, migration: MigrationFile): Promise<void> {
@@ -344,29 +699,15 @@ async function executeMigrationInTransaction(client: Client, migration: Migratio
   }
 }
 
-function describeInspection(inspection: SchemaInspection): string {
-  const parts: string[] = [];
-  if (inspection.missingTables.length > 0) parts.push(`fehlende Tabellen: ${inspection.missingTables.join(', ')}`);
-  if (inspection.missingColumns.length > 0) parts.push(`fehlende Spalten: ${inspection.missingColumns.join(', ')}`);
-  if (inspection.missingConstraints.length > 0)
-    parts.push(`fehlende Constraints: ${inspection.missingConstraints.join(', ')}`);
-  if (inspection.missingFunctions.length > 0)
-    parts.push(`fehlende Funktionen: ${inspection.missingFunctions.join(', ')}`);
-  if (inspection.missingTriggers.length > 0) parts.push(`fehlende Trigger: ${inspection.missingTriggers.join(', ')}`);
-  if (inspection.missingRls.length > 0) parts.push(`RLS nicht aktiv: ${inspection.missingRls.join(', ')}`);
-  if (inspection.privilegeProblems.length > 0)
-    parts.push(`Rechteprobleme: ${inspection.privilegeProblems.join(', ')}`);
-  return parts.join('; ');
-}
-
 export async function runMigrations(options: MigrationRunnerOptions = {}): Promise<MigrationRunResult> {
   const logger = options.logger ?? ((message: string) => console.log(message));
   const migrationsDir = options.migrationsDir ?? __dirname;
   const connectionString = options.connectionString ?? env.DATABASE_MIGRATION_URL;
 
   const migrations = loadMigrations(migrationsDir);
-  const client = new Client({ connectionString });
+  assertBaselineMigrationSet(migrations);
 
+  const client = new Client({ connectionString });
   const applied: string[] = [];
   const baselined: string[] = [];
   const skipped: string[] = [];
@@ -390,24 +731,16 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
       if (inspection.existingTables.length === 0) {
         logger('[MIGRATION] Leere Datenbank erkannt – alle Migrationen werden angewendet.');
       } else {
-        const complete = describeInspection(inspection) === '';
-
-        if (!complete) {
+        if (inspection.problems.length > 0) {
           throw new Error(
-            'Bestehende Datenbank ist nicht eindeutig als Stand nach Migration 004 erkennbar. ' +
-              `Gefundene Objekte: ${inspection.existingTables.length} von ${DEFAULT_EXPECTED_TABLES.length} Tabellen. ` +
-              `Details: ${describeInspection(inspection)}. ` +
+            'Bestehende Datenbank entspricht nicht exakt dem erwarteten Stand nach Migration 004. ' +
+              `Gefundene Objekte: ${inspection.existingTables.length} von ${EXPECTED_TABLES.length} Tabellen. ` +
+              `Details: ${describeProblems(inspection.problems)}. ` +
               'Abbruch, um Migrationen nicht blind als ausgeführt zu markieren.'
           );
         }
 
-        const baselineMigrations = migrations.filter(
-          (migration) => migration.numericVersion <= BASELINE_MAX_VERSION
-        );
-
-        if (baselineMigrations.length === 0) {
-          throw new Error('Keine Baseline-Migrationen (001–004) im Repository gefunden.');
-        }
+        const baselineMigrations = migrations.filter((migration) => migration.numericVersion <= BASELINE_MAX_VERSION);
 
         await client.query('BEGIN');
         try {
@@ -427,7 +760,7 @@ export async function runMigrations(options: MigrationRunnerOptions = {}): Promi
         }
 
         logger(
-          `[MIGRATION] Bestehende Datenbank erkannt. Migrationen 001–004 als Baseline übernommen: ${baselined.join(', ')}`
+          `[MIGRATION] Bestehende Datenbank vollständig verifiziert. Migrationen 001–004 als Baseline übernommen: ${baselined.join(', ')}`
         );
       }
     }
