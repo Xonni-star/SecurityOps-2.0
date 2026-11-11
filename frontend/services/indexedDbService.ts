@@ -11,7 +11,7 @@ export interface OutboxMutation {
   userId: string;
   deviceId: string;
   entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'attachment' | 'patrol' | 'handover' | 'client' | 'site';
-  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RESTORE';
+  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RESTORE' | 'QUALIFICATION_CREATE' | 'QUALIFICATION_UPDATE' | 'ABSENCE_CREATE' | 'ABSENCE_REVIEW';
   payload: any;
   occurredAt: string;
   baseVersion: number;

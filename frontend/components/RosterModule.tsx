@@ -14,7 +14,7 @@ import { useSecurityStore } from '../store';
 import { QualificationType, Shift } from '../types';
 
 export const RosterModule: React.FC = () => {
-  const { shifts, sites, employees, assignShiftEmployee, addShift } = useSecurityStore();
+  const { shifts, sites, employees, assignShiftEmployee, addShift, addNotification } = useSecurityStore();
 
   const [filterSiteId, setFilterSiteId] = useState('ALL');
   const [selectedShiftForAssign, setSelectedShiftForAssign] = useState<Shift | null>(null);
@@ -27,6 +27,11 @@ export const RosterModule: React.FC = () => {
     if (!selectedShiftForAssign) return;
     const emp = employees.find((e) => e.id === empId);
     if (!emp) return;
+    const coveredAbsence = emp.absences?.find(a => a.status === 'APPROVED' && a.startDate <= selectedShiftForAssign.date && a.endDate >= selectedShiftForAssign.date);
+    if (coveredAbsence || emp.archivedAt) {
+      addNotification('Mitarbeiter nicht verfügbar', coveredAbsence ? `Genehmigte Abwesenheit vom ${coveredAbsence.startDate} bis ${coveredAbsence.endDate}.` : 'Archivierte Mitarbeiter können nicht zugewiesen werden.', 'alert');
+      return;
+    }
 
     // Check qualifications
     const hasRequiredQual = emp.qualifications.some(
@@ -201,7 +206,8 @@ export const RosterModule: React.FC = () => {
               <div className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">Verfügbare Mitarbeiter:</div>
               {employees.map((emp) => {
                 const hasQual = emp.qualifications.some((q) => q.type === selectedShiftForAssign.requiredQualification && q.verified);
-                const isUnavailable = emp.status === 'Krank' || emp.status === 'Urlaub';
+                const absence = emp.absences?.find(a => a.status === 'APPROVED' && a.startDate <= selectedShiftForAssign.date && a.endDate >= selectedShiftForAssign.date);
+                const isUnavailable = Boolean(emp.archivedAt || absence) || emp.status === 'Krank' || emp.status === 'Urlaub';
 
                 return (
                   <div

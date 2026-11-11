@@ -31,6 +31,19 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
         VALUES ($1, 'K-B-1', 'B GmbH', 'Hr. B', 'b@b.de', '02', 'Adr B', '2025-01-01', '2026-01-01');
       `, [tenantB]);
     });
+
+    const employeeA = await migrationPool.query(`
+      INSERT INTO employees (tenant_id, personnel_number, first_name, last_name, email, phone, role, date_of_joining)
+      VALUES ($1, $2, 'Wache', 'A', 'wache-a@example.test', '+49 30 1', 'Wachdienstmitarbeiter', '2026-01-01') RETURNING id
+    `, [tenantA, 'RLS-A-' + Date.now()]);
+    const employeeB = await migrationPool.query(`
+      INSERT INTO employees (tenant_id, personnel_number, first_name, last_name, email, phone, role, date_of_joining)
+      VALUES ($1, $2, 'Wache', 'B', 'wache-b@example.test', '+49 30 2', 'Wachdienstmitarbeiter', '2026-01-01') RETURNING id
+    `, [tenantB, 'RLS-B-' + Date.now()]);
+    await migrationPool.query(`
+      INSERT INTO employee_absences (tenant_id, employee_id, absence_type, date_from, date_to)
+      VALUES ($1, $2, 'VACATION', '2026-12-20', '2026-12-22'), ($3, $4, 'SICKNESS', '2026-12-23', '2026-12-24')
+    `, [tenantA, employeeA.rows[0].id, tenantB, employeeB.rows[0].id]);
   });
 
   afterAll(async () => {
@@ -55,5 +68,14 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
       return (await tx.query('SELECT * FROM clients')).rows;
     });
     expect(res.length).toBe(0);
+  });
+
+  test('Neue Abwesenheitstabelle ist durch RLS mandantengebunden', async () => {
+    const visible = await withTenantTransaction(tenantA, async (tx) => (await tx.query('SELECT tenant_id FROM employee_absences')).rows);
+    expect(visible).toHaveLength(1);
+    expect(visible[0].tenant_id).toBe(tenantA);
+
+    const withoutTenant = await withSystemTransaction(async (tx) => (await tx.query('SELECT * FROM employee_absences')).rows);
+    expect(withoutTenant).toHaveLength(0);
   });
 });

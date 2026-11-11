@@ -197,6 +197,55 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     }));
   });
 
+  test('Mitarbeiteränderungen bleiben bis zur bestätigten Outbox-Synchronisierung lokal erhalten', async () => {
+    const enqueue = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
+    const readPending = vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([]);
+    const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined as any);
+    vi.spyOn(offlineVault, 'getDeviceId').mockReturnValue('employee-device');
+    useSecurityStore.setState({ isOnline: false, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-offline' });
+
+    await useSecurityStore.getState().addEmployee({
+      personnelNumber: 'MA-OFFLINE-1',
+      firstName: 'Offline',
+      lastName: 'Wache',
+      email: 'offline.wache@example.test',
+      phone: '+49 30 555',
+      role: 'Wachdienstmitarbeiter' as any,
+      status: 'Aktiv',
+      weeklyHours: 40,
+      hourlyRate: 19,
+      dateOfJoining: '2026-01-01',
+      assignedSiteIds: [],
+      qualifications: []
+    });
+
+    const queued = useSecurityStore.getState().syncQueue[0];
+    expect(queued).toMatchObject({ entityType: 'employee', action: 'CREATE', status: 'pending', tenantId: 'tenant-frankfurt' });
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({ entityType: 'employee', action: 'CREATE', tenantId: 'tenant-frankfurt' }));
+    const queuedMutation = {
+      id: queued.id,
+      tenantId: queued.tenantId,
+      entityType: queued.entityType,
+      action: queued.action,
+      payload: queued.payload,
+      occurredAt: new Date().toISOString(),
+      baseVersion: 1,
+      retryCount: 0,
+      status: 'PENDING'
+    };
+    readPending.mockResolvedValueOnce([queuedMutation] as any);
+    mockedApi.post.mockResolvedValueOnce([{ clientUuid: queued.id, status: 'SYNCED', serverVersion: 1, serverId: queued.payload.id }]);
+    useSecurityStore.setState({ isOnline: true });
+
+    const result = await useSecurityStore.getState().triggerManualSync();
+    expect(result).toMatchObject({ success: 1, failed: 0, conflicts: 0 });
+    expect(mockedApi.post).toHaveBeenCalledWith('/employees/sync', expect.objectContaining({
+      deviceId: 'employee-device',
+      mutations: [expect.objectContaining({ clientUuid: queued.id, entityType: 'employee', action: 'CREATE', baseVersion: 1 })]
+    }));
+    expect(markSynced).toHaveBeenCalledWith(queued.id);
+  });
+
   test('Regelbasierte Automatisierungsregeln bleiben tenantbezogen steuerbar', () => {
     useSecurityStore.setState({ currentTenantId: 'tenant-frankfurt', automations: [] });
     useSecurityStore.getState().addAutomationRule({

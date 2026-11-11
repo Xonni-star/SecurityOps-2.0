@@ -14,6 +14,7 @@ const siteCode = `API-SITE-${Date.now()}`;
 const personnelNumber = `API-MA-${Date.now()}`;
 let createdSiteId: string | undefined;
 let createdEmployeeId: string | undefined;
+let createdSyncedEmployeeId: string | undefined;
 let createdShiftId: string | undefined;
 let createdKeyId: string | undefined;
 let archivedCustomerSiteCode: string | undefined;
@@ -73,6 +74,7 @@ afterAll(async () => {
   await migrationPool.query('DELETE FROM keys WHERE id = $1 OR key_number = $2', [createdKeyId ?? null, keyNumber]);
   await migrationPool.query('DELETE FROM shifts WHERE id = $1', [createdShiftId ?? null]);
   await migrationPool.query('DELETE FROM employees WHERE id = $1 OR personnel_number = $2', [createdEmployeeId ?? null, personnelNumber]);
+  await migrationPool.query('DELETE FROM employees WHERE id = $1', [createdSyncedEmployeeId ?? null]);
   await migrationPool.query('DELETE FROM sites WHERE id = $1 OR site_code = $2', [createdSiteId ?? null, siteCode]);
   await migrationPool.query('DELETE FROM clients WHERE client_number = ANY($1::text[])', [[`${clientNumber}-ARCH`, `${clientNumber}-OFF`]]);
   await migrationPool.query('DELETE FROM clients WHERE client_number = $1', [clientNumber]);
@@ -242,8 +244,11 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const updateResponse = await request(app)
       .patch(`/api/v1/employees/${createdEmployeeId}`)
       .set('Authorization', `Bearer ${token}`)
-      .send({ status: 'Urlaub' });
+      .send({ status: 'Urlaub', revisionVersion: employeeResponse.body.data.revision_version });
     expect(updateResponse.status).toBe(200);
+    expect(updateResponse.body.data.revision_version).toBe(employeeResponse.body.data.revision_version + 1);
+    const staleUpdate = await request(app).patch(`/api/v1/employees/${createdEmployeeId}`).set('Authorization', `Bearer ${token}`).send({ status: 'Aktiv', revisionVersion: employeeResponse.body.data.revision_version });
+    expect(staleUpdate.status).toBe(409);
 
     const secondToken = await login(SEED_USER_EMAIL);
 
@@ -262,6 +267,66 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
         expect.objectContaining({ personnel_number: personnelNumber, status: 'Urlaub' })
       ])
     );
+  });
+
+  test('5a. Qualifikationen, Abwesenheiten und Mitarbeiterarchiv sind persistent und revisionsgeschützt', async () => {
+    if (!createdEmployeeId) throw new Error('Mitarbeiter aus Test 4 fehlt.');
+    const token = await login(SEED_USER_EMAIL);
+    const qualification = await request(app).post(`/api/v1/employees/${createdEmployeeId}/qualifications`).set('Authorization', `Bearer ${token}`).send({ type: 'Sachkundeprüfung § 34a', certificateNumber: 'CERT-API-1', issueDate: '2026-01-01', expiryDate: '2027-01-01', verified: true, documentReference: 'DOC-TEST-1' });
+    expect(qualification.status).toBe(201);
+    expect(qualification.body.data.document_reference).toBe('DOC-TEST-1');
+    const absence = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences`).set('Authorization', `Bearer ${token}`).send({ type: 'Urlaub', startDate: '2026-12-01', endDate: '2026-12-05', notes: 'Regressionstest' });
+    expect(absence.status).toBe(201);
+    const overlap = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences`).set('Authorization', `Bearer ${token}`).send({ type: 'Sonstige', startDate: '2026-12-02', endDate: '2026-12-03' });
+    expect(overlap.status).toBe(409);
+    const approved = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences/${absence.body.data.id}/review`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: absence.body.data.revision_version, decision: 'APPROVED' });
+    expect(approved.status).toBe(200);
+    const loaded = await request(app).get('/api/v1/employees').set('Authorization', `Bearer ${token}`);
+    const employee = loaded.body.data.find((item: any) => item.id === createdEmployeeId);
+    expect(employee.qualifications).toEqual(expect.arrayContaining([expect.objectContaining({ certificate_number: 'CERT-API-1' })]));
+    expect(employee.absences).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'APPROVED' })]));
+    const archive = await request(app).post(`/api/v1/employees/${createdEmployeeId}/archive`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: employee.revision_version });
+    expect(archive.status).toBe(200);
+    const restore = await request(app).post(`/api/v1/employees/${createdEmployeeId}/restore`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: archive.body.data.revision_version });
+    expect(restore.status).toBe(200);
+  });
+
+  test('5b. Mitarbeiter-Outbox nimmt das IndexedDB-Envelope an und ist idempotent', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    const employeeId = crypto.randomUUID();
+    const mutationId = crypto.randomUUID();
+    createdSyncedEmployeeId = employeeId;
+    const mutation = {
+      clientUuid: mutationId,
+      entityType: 'employee',
+      action: 'CREATE',
+      clientTimestamp: new Date().toISOString(),
+      baseVersion: 1,
+      payload: {
+        id: employeeId,
+        personnelNumber: 'API-OFF-' + Date.now(),
+        firstName: 'Offline',
+        lastName: 'Mitarbeiter',
+        email: 'offline-' + Date.now() + '@secops.local',
+        phone: '+49 69 123',
+        role: 'Wachdienstmitarbeiter',
+        status: 'Aktiv',
+        weeklyHours: 40,
+        hourlyRate: 19,
+        dateOfJoining: '2026-01-01'
+      }
+    };
+    const send = () => request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + token).send({
+      deviceId: 'employee-outbox-test',
+      mutations: [mutation]
+    });
+    const first = await send();
+    const repeated = await send();
+    expect(first.status).toBe(200);
+    expect(first.body.data[0]).toEqual(expect.objectContaining({ clientUuid: mutationId, serverId: employeeId, status: 'SYNCED', serverVersion: 1 }));
+    expect(repeated.body.data).toEqual(first.body.data);
+    const stored = await migrationPool.query('SELECT id FROM employees WHERE tenant_id=$1 AND id=$2', ['11111111-1111-1111-1111-111111111111', employeeId]);
+    expect(stored.rows).toHaveLength(1);
   });
 
   test('5. Mandant B sieht die neu angelegten Objekte und Mitarbeiter nicht', async () => {

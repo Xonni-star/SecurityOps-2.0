@@ -38,6 +38,9 @@ export interface Qualification {
   expiryDate: string;
   certificateNumber: string;
   verified: boolean;
+  status?: 'GÜLTIG' | 'ABGELAUFEN' | 'AUSSTEHEND';
+  documentReference?: string;
+  revisionVersion?: number;
 }
 
 export interface AbsenceRecord {
@@ -47,6 +50,9 @@ export interface AbsenceRecord {
   endDate: string;
   approved: boolean;
   replacementEmployeeId?: string;
+  status?: 'PENDING' | 'APPROVED' | 'REJECTED';
+  revisionVersion?: number;
+  notes?: string;
 }
 
 export interface Employee {
@@ -67,6 +73,8 @@ export interface Employee {
   dateOfJoining: string;
   notes?: string;
   synced?: boolean;
+  revisionVersion?: number;
+  archivedAt?: string | null;
 }
 
 export interface ClientAddress {
@@ -284,7 +292,7 @@ export interface OfflineQueueItem {
   id: string;
   tenantId: string;
   entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'document' | 'patrol' | 'handover' | 'site' | 'client';
-  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RESTORE';
+  action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RESTORE' | 'QUALIFICATION_CREATE' | 'QUALIFICATION_UPDATE' | 'ABSENCE_CREATE' | 'ABSENCE_REVIEW';
   payload: any;
   createdAt: string;
   retryCount: number;

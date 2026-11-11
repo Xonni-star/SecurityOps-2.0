@@ -10,6 +10,7 @@ import * as clientController from './controllers/clientController';
 import * as guardbookController from './controllers/guardbookController';
 import * as syncController from './controllers/syncController';
 import * as resourceController from './controllers/resourceController';
+import * as employeeController from './controllers/employeeController';
 
 export const app = express();
 
@@ -86,9 +87,16 @@ app.post('/api/v1/tasks', authenticateJwt, requirePermission('tasks:manage'), re
 app.patch('/api/v1/tasks/:id', authenticateJwt, requirePermission('tasks:manage'), resourceController.updateTask);
 app.delete('/api/v1/tasks/:id', authenticateJwt, requirePermission('tasks:manage'), resourceController.deleteTask);
 
-app.get('/api/v1/employees', authenticateJwt, requirePermission('employees:read'), resourceController.listEmployees);
-app.post('/api/v1/employees', authenticateJwt, requirePermission('employees:manage'), resourceController.createEmployee);
-app.patch('/api/v1/employees/:id', authenticateJwt, requirePermission('employees:manage'), resourceController.updateEmployee);
+app.get('/api/v1/employees', authenticateJwt, requirePermission('employees:read'), employeeController.listEmployees);
+app.post('/api/v1/employees', authenticateJwt, requirePermission('employees:create'), employeeController.createEmployee);
+app.patch('/api/v1/employees/:id', authenticateJwt, requirePermission('employees:update'), employeeController.updateEmployee);
+app.post('/api/v1/employees/:id/archive', authenticateJwt, requirePermission('employees:archive'), employeeController.archiveEmployee);
+app.post('/api/v1/employees/:id/restore', authenticateJwt, requirePermission('employees:restore'), employeeController.restoreEmployee);
+app.post('/api/v1/employees/:id/qualifications', authenticateJwt, requirePermission('qualifications:manage'), employeeController.createQualification);
+app.patch('/api/v1/employees/:id/qualifications/:qualificationId', authenticateJwt, requirePermission('qualifications:manage'), employeeController.updateQualification);
+app.post('/api/v1/employees/:id/absences', authenticateJwt, requirePermission('employees:absence:manage'), employeeController.createAbsence);
+app.post('/api/v1/employees/:id/absences/:absenceId/review', authenticateJwt, requirePermission('employees:absence:approve'), employeeController.reviewAbsence);
+app.post('/api/v1/employees/sync', authenticateJwt, employeeController.syncEmployeeMutations);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);

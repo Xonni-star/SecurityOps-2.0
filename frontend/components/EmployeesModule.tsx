@@ -1,294 +1,66 @@
-import React, { useState } from 'react';
-import {
-  Users,
-  Plus,
-  ShieldCheck,
-  Award,
-  AlertTriangle,
-  FileCheck,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  Search
-} from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Users, Plus, Search, Archive, RotateCcw, Pencil, Award, CalendarDays, AlertTriangle } from 'lucide-react';
 import { useSecurityStore } from '../store';
 import { Employee, QualificationType, UserRole } from '../types';
 
-export const EmployeesModule: React.FC = () => {
-  const { employees, addEmployee, updateEmployee } = useSecurityStore();
-  const [search, setSearch] = useState('');
-  const [isModalOpen, setIsModalOpen] = useState(false);
+const today = () => new Date().toISOString().slice(0, 10);
+const field = 'w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200';
 
-  // Form states
+export const EmployeesModule: React.FC = () => {
+  const { employees, sites: allSites, addEmployee, updateEmployee, archiveEmployee, restoreEmployee, addQualification, updateQualification, addAbsence, reviewAbsence, getTenantDocuments } = useSecurityStore();
+  const [search, setSearch] = useState('');
+  const [showArchived, setShowArchived] = useState(false);
+  const [editing, setEditing] = useState<Employee | null>(null);
+  const [modal, setModal] = useState(false);
+  const [personnelNumber, setPersonnelNumber] = useState('');
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [role, setRole] = useState<UserRole>(UserRole.GUARD);
-  const [hourlyRate, setHourlyRate] = useState(18.50);
   const [weeklyHours, setWeeklyHours] = useState(40);
-  const [primaryQual, setPrimaryQual] = useState<QualificationType>(QualificationType.GEWO_34A_SACHKUNDE);
+  const [hourlyRate, setHourlyRate] = useState(18.5);
+  const [dateOfJoining, setDateOfJoining] = useState(today());
+  const [qualEmployee, setQualEmployee] = useState('');
+  const [qualType, setQualType] = useState<QualificationType>(QualificationType.GEWO_34A_SACHKUNDE);
+  const [qualCert, setQualCert] = useState('');
+  const [qualIssue, setQualIssue] = useState(today());
+  const [qualExpiry, setQualExpiry] = useState('');
+  const [editingQualificationId, setEditingQualificationId] = useState<string | null>(null);
+  const [editIssueDate, setEditIssueDate] = useState('');
+  const [editExpiryDate, setEditExpiryDate] = useState('');
+  const [editCertificateNumber, setEditCertificateNumber] = useState('');
+  const [editVerified, setEditVerified] = useState(false);
 
-  const filteredEmployees = employees.filter((e) =>
-    `${e.firstName} ${e.lastName} ${e.personnelNumber}`.toLowerCase().includes(search.toLowerCase())
-  );
+  const visible = useMemo(() => employees.filter(e => Boolean(e.archivedAt) === showArchived && `${e.firstName} ${e.lastName} ${e.personnelNumber}`.toLowerCase().includes(search.toLowerCase())), [employees, showArchived, search]);
+  const employeeDocuments = getTenantDocuments();
+  const expiring = employees.flatMap(e => (e.qualifications || []).filter(q => q.expiryDate && new Date(q.expiryDate).getTime() <= Date.now() + 30 * 86400000 && new Date(q.expiryDate).getTime() >= Date.now()).map(q => `${e.firstName} ${e.lastName}: ${q.type} (${q.expiryDate})`));
 
-  const handleCreate = (e: React.FormEvent) => {
-    e.preventDefault();
-    const newEmp: Omit<Employee, 'id'> = {
-      personnelNumber: `MA-${Math.floor(1000 + Math.random() * 9000)}`,
-      firstName,
-      lastName,
-      email,
-      phone,
-      role,
-      status: 'Aktiv',
-      weeklyHours,
-      hourlyRate,
-      dateOfJoining: new Date().toISOString().split('T')[0],
-      assignedSiteIds: [],
-      qualifications: [
-        {
-          id: `q-${Date.now()}`,
-          type: primaryQual,
-          issueDate: new Date().toISOString().split('T')[0],
-          expiryDate: new Date(Date.now() + 1000 * 3600 * 24 * 365 * 5).toISOString().split('T')[0],
-          certificateNumber: `IHK-CERT-${Math.floor(1000 + Math.random() * 9000)}`,
-          verified: true
-        }
-      ]
-    };
-
-    addEmployee(newEmp);
-    setIsModalOpen(false);
-    setFirstName('');
-    setLastName('');
-    setEmail('');
-    setPhone('');
+  const openCreate = () => { setEditing(null); setPersonnelNumber(''); setFirstName(''); setLastName(''); setEmail(''); setPhone(''); setRole(UserRole.GUARD); setWeeklyHours(40); setHourlyRate(18.5); setDateOfJoining(today()); setModal(true); };
+  const openEdit = (e: Employee) => { setEditing(e); setPersonnelNumber(e.personnelNumber); setFirstName(e.firstName); setLastName(e.lastName); setEmail(e.email); setPhone(e.phone); setRole(e.role); setWeeklyHours(e.weeklyHours); setHourlyRate(e.hourlyRate); setDateOfJoining(e.dateOfJoining); setModal(true); };
+  const saveEmployee = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (editing) await updateEmployee(editing.id, { personnelNumber, firstName, lastName, email, phone, role, weeklyHours, hourlyRate, dateOfJoining });
+    else await addEmployee({ personnelNumber, firstName, lastName, email, phone, role, status: 'Aktiv', weeklyHours, hourlyRate, dateOfJoining, assignedSiteIds: [], qualifications: [] });
+    setModal(false);
   };
+  const createQualification = async (event: React.FormEvent) => { event.preventDefault(); await addQualification(qualEmployee, { type: qualType, certificateNumber: qualCert, issueDate: qualIssue, expiryDate: qualExpiry, verified: false, status: 'AUSSTEHEND' }); setQualEmployee(''); setQualCert(''); setQualIssue(today()); setQualExpiry(''); };
+  const saveQualification = async (event: React.FormEvent, employeeId: string) => { event.preventDefault(); if (!editingQualificationId) return; await updateQualification(employeeId, editingQualificationId, { certificateNumber: editCertificateNumber, issueDate: editIssueDate, expiryDate: editExpiryDate, verified: editVerified }); setEditingQualificationId(null); };
+  const createAbsence = async (event: React.FormEvent) => { event.preventDefault(); const fd = new FormData(event.currentTarget as HTMLFormElement); await addAbsence(String(fd.get('employeeId')), { type: fd.get('type') as any, startDate: String(fd.get('startDate')), endDate: String(fd.get('endDate')), notes: String(fd.get('notes') || '') }); (event.currentTarget as HTMLFormElement).reset(); };
 
-  return (
-    <div className="space-y-6">
-      {/* Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <Users className="w-6 h-6 text-blue-400" />
-            <h1 className="text-xl font-bold text-white">Mitarbeiterverwaltung & § 34a GewO Qualifikationen</h1>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Personalstammdaten, lückenlose Nachweisführung für das Bewacherregister und Fortbildungsüberwachung.
-          </p>
-        </div>
-
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-lg shadow-blue-600/20 transition flex items-center gap-2 shrink-0 self-start sm:self-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Mitarbeiter anlegen</span>
-        </button>
-      </div>
-
-      {/* Search Bar */}
-      <div className="relative max-w-md w-full">
-        <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Nach Name oder Personalnummer suchen..."
-          className="w-full bg-slate-900 text-xs text-slate-200 pl-9 pr-3 py-2 rounded-xl border border-slate-800 focus:outline-none focus:border-blue-500"
-        />
-      </div>
-
-      {/* Employee Cards Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {filteredEmployees.map((emp) => (
-          <div
-            key={emp.id}
-            className="p-5 rounded-2xl bg-slate-900 border border-slate-800 hover:border-slate-700 transition flex flex-col justify-between shadow-sm"
-          >
-            <div>
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-bold text-slate-200 text-sm">{emp.firstName} {emp.lastName}</h3>
-                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-slate-800 text-slate-400">
-                      {emp.personnelNumber}
-                    </span>
-                  </div>
-                  <p className="text-xs text-blue-400 font-medium mt-0.5">{emp.role}</p>
-                </div>
-
-                <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                  emp.status === 'Aktiv'
-                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-                    : emp.status === 'Krank'
-                    ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
-                    : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                }`}>
-                  {emp.status}
-                </span>
-              </div>
-
-              <div className="mt-3 space-y-1 text-xs text-slate-400">
-                <div>E-Mail: <span className="text-slate-300">{emp.email}</span></div>
-                <div>Telefon: <span className="text-slate-300">{emp.phone}</span></div>
-                <div>Vertrag: <span className="text-slate-300">{emp.weeklyHours}h / Woche ({emp.hourlyRate} €/h)</span></div>
-              </div>
-
-              {/* Qualifications list */}
-              <div className="mt-4 pt-3 border-t border-slate-800/80">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500 block mb-2">
-                  Qualifikationen & Nachweise:
-                </span>
-                <div className="space-y-1.5">
-                  {emp.qualifications.map((q) => {
-                    const isExpiring = new Date(q.expiryDate).getTime() < Date.now();
-                    return (
-                      <div
-                        key={q.id}
-                        className="p-2 rounded-lg bg-slate-800/40 border border-slate-800 flex items-center justify-between text-[11px]"
-                      >
-                        <div className="truncate pr-2">
-                          <span className="font-medium text-slate-300 block truncate">{q.type}</span>
-                          <span className="text-[10px] text-slate-500 font-mono">Gültig bis: {q.expiryDate}</span>
-                        </div>
-
-                        {isExpiring ? (
-                          <span className="shrink-0 px-1.5 py-0.5 rounded bg-rose-500/20 text-rose-400 text-[10px] font-bold">
-                            Abgelaufen
-                          </span>
-                        ) : (
-                          <span className="shrink-0 px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 text-[10px] font-bold">
-                            Gültig
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-4 pt-3 border-t border-slate-800 flex justify-between items-center text-xs">
-              <span className="text-slate-500 text-[11px]">Eintritt: {emp.dateOfJoining}</span>
-              <button
-                onClick={() => {
-                  const newStatus = emp.status === 'Aktiv' ? 'Krank' : 'Aktiv';
-                  updateEmployee(emp.id, { status: newStatus as any });
-                }}
-                className="text-xs text-blue-400 hover:text-blue-300"
-              >
-                Status ändern
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Modal: Add Employee */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-[#0f172a] border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-base font-bold text-white">Neue Wachkraft anlegen</h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
-            </div>
-
-            <form onSubmit={handleCreate} className="space-y-4 mt-4 text-xs">
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-400 mb-1">Vorname *</label>
-                  <input
-                    type="text"
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    required
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Nachname *</label>
-                  <input
-                    type="text"
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                    required
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-400 mb-1">E-Mail *</label>
-                  <input
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Telefon</label>
-                  <input
-                    type="text"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-slate-400 mb-1">Rolle</label>
-                  <select
-                    value={role}
-                    onChange={(e) => setRole(e.target.value as any)}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
-                  >
-                    {Object.values(UserRole).map((r) => (
-                      <option key={r} value={r}>{r}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">GewO Nachweis</label>
-                  <select
-                    value={primaryQual}
-                    onChange={(e) => setPrimaryQual(e.target.value as any)}
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg p-2 text-slate-200"
-                  >
-                    <option value={QualificationType.GEWO_34A_SACHKUNDE}>Sachkundeprüfung § 34a</option>
-                    <option value={QualificationType.GEWO_34A_UNTERRICHTUNG}>Unterrichtung § 34a</option>
-                    <option value={QualificationType.FIRST_AID}>Betrieblicher Ersthelfer</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
-                <button
-                  type="button"
-                  onClick={() => setIsModalOpen(false)}
-                  className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
-                >
-                  Abbrechen
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold"
-                >
-                  Mitarbeiter speichern
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-    </div>
-  );
+  return <div className="space-y-6">
+    <header className="flex flex-wrap items-center justify-between gap-3"><div><h1 className="flex items-center gap-2 text-xl font-bold text-white"><Users className="w-6 h-6 text-blue-400"/>Mitarbeiterverwaltung</h1><p className="mt-1 text-xs text-slate-400">Stammdaten, Qualifikationen und Abwesenheiten. Änderungen bleiben revisionsgeschützt.</p></div><div className="flex gap-2"><button onClick={() => setShowArchived(v => !v)} className="px-3 py-2 rounded-lg bg-slate-800 text-xs text-slate-200">{showArchived ? 'Aktive anzeigen' : 'Archiv anzeigen'}</button>{!showArchived && <button onClick={openCreate} className="px-4 py-2 rounded-xl bg-blue-600 text-white text-xs font-semibold flex items-center gap-2"><Plus className="w-4 h-4"/>Mitarbeiter anlegen</button>}</div></header>
+    {expiring.length > 0 && <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200"><AlertTriangle className="inline w-4 h-4 mr-2"/>Nachweise laufen innerhalb von 30 Tagen ab: {expiring.join(' · ')}</div>}
+    <div className="relative max-w-md"><Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400"/><input className={`${field} pl-9`} value={search} onChange={e => setSearch(e.target.value)} placeholder="Name oder Personalnummer suchen"/></div>
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">{visible.map(emp => <article key={emp.id} className="p-5 rounded-2xl bg-slate-900 border border-slate-800 space-y-4">
+      <div className="flex justify-between gap-3"><div><h2 className="font-bold text-slate-100">{emp.firstName} {emp.lastName} <span className="text-xs text-slate-400 font-mono">{emp.personnelNumber}</span></h2><p className="text-xs text-blue-300">{emp.role} · Revision {emp.revisionVersion || 1}</p><p className="mt-1 text-xs text-slate-400">{emp.email} · {emp.phone} · {emp.weeklyHours} Std./Woche</p></div><div className="flex gap-2">{emp.archivedAt ? <button onClick={() => restoreEmployee(emp.id)} title="Wiederherstellen" className="text-emerald-300"><RotateCcw/></button> : <><button onClick={() => openEdit(emp)} title="Bearbeiten" className="text-blue-300"><Pencil/></button><button onClick={() => archiveEmployee(emp.id)} title="Archivieren" className="text-amber-300"><Archive/></button></>}</div></div>
+      <section className="border-t border-slate-800 pt-3"><h3 className="text-xs font-semibold text-slate-300"><Award className="inline w-4 h-4 mr-1"/>Qualifikationen & Nachweise</h3><div className="mt-2 space-y-2">{(emp.qualifications || []).map(q => editingQualificationId === q.id ? <form key={q.id} onSubmit={e => saveQualification(e, emp.id)} className="flex flex-wrap gap-2 items-center"><span className="text-xs text-slate-300">{q.type}</span><input required aria-label="Nachweisnummer bearbeiten" className={`${field} w-32`} value={editCertificateNumber} onChange={e => setEditCertificateNumber(e.target.value)}/><input required aria-label="Ausstellungsdatum bearbeiten" type="date" className={`${field} w-36`} value={editIssueDate} onChange={e => setEditIssueDate(e.target.value)}/><input required aria-label="Ablaufdatum bearbeiten" type="date" className={`${field} w-36`} value={editExpiryDate} onChange={e => setEditExpiryDate(e.target.value)}/><label className="text-xs text-slate-300"><input type="checkbox" checked={editVerified} onChange={e => setEditVerified(e.target.checked)}/> Nachweis geprüft</label><button className="text-xs text-blue-300">Speichern</button></form> : <div key={q.id} className="flex justify-between gap-2 text-xs text-slate-400"><span>{q.type} · {q.certificateNumber || 'ohne Nummer'}{q.documentReference ? ` · Dokument ${q.documentReference}` : ''} · ausgestellt {q.issueDate || 'unbekannt'}</span><span>{q.status || (q.verified ? 'GÜLTIG' : 'AUSSTEHEND')} {q.expiryDate ? `· ${q.expiryDate}` : ''} {!emp.archivedAt && <button className="ml-2 text-blue-300" onClick={() => { setEditingQualificationId(q.id); setEditCertificateNumber(q.certificateNumber || ''); setEditIssueDate(q.issueDate || ''); setEditExpiryDate(q.expiryDate || ''); setEditVerified(q.verified); }}>Bearbeiten</button>}</span></div>)}{!emp.qualifications?.length && <p className="text-xs text-slate-500">Noch keine Nachweise erfasst.</p>}</div></section>
+      <section className="border-t border-slate-800 pt-3"><h3 className="text-xs font-semibold text-slate-300">Zugeordnete Standorte</h3><div className="mt-2 flex flex-wrap gap-2">{(emp.assignedSiteIds || []).map(id => { const site = allSites.find(s => s.id === id); return site ? <span key={id} className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-300">{site.name}</span> : null; })}{!emp.assignedSiteIds?.length && <p className="text-xs text-slate-500">Noch keinem Standort zugeordnet.</p>}</div></section>
+      <section className="border-t border-slate-800 pt-3"><h3 className="text-xs font-semibold text-slate-300">Dokumente</h3><div className="mt-2 space-y-1">{employeeDocuments.filter(d => d.linkedEntityType === 'employee' && d.linkedEntityId === emp.id).map(d => <div key={d.id} className="text-xs text-slate-400">{d.title} · {d.fileName}</div>)}{!employeeDocuments.some(d => d.linkedEntityType === 'employee' && d.linkedEntityId === emp.id) && <p className="text-xs text-slate-500">Keine verknüpften Dokumente. Im Dokumentenmanagement können Nachweise mit diesem Mitarbeiter verknüpft werden.</p>}</div></section>
+      <section className="border-t border-slate-800 pt-3"><h3 className="text-xs font-semibold text-slate-300"><CalendarDays className="inline w-4 h-4 mr-1"/>Abwesenheiten</h3><div className="mt-2 space-y-1">{(emp.absences || []).map(a => <div key={a.id} className="flex justify-between gap-2 text-xs text-slate-400"><span>{a.type}: {a.startDate} – {a.endDate} · {a.status || (a.approved ? 'APPROVED' : 'PENDING')}</span>{a.status === 'PENDING' && <span className="flex gap-2"><button onClick={() => reviewAbsence(emp.id,a.id,'APPROVED')} className="text-emerald-300">Freigeben</button><button onClick={() => reviewAbsence(emp.id,a.id,'REJECTED')} className="text-rose-300">Ablehnen</button></span>}</div>)}{!emp.absences?.length && <p className="text-xs text-slate-500">Keine Abwesenheiten eingetragen.</p>}</div></section>
+      {!emp.archivedAt && <div className="flex flex-wrap gap-2 border-t border-slate-800 pt-3"><form onSubmit={createQualification} className="flex flex-wrap gap-2 items-center"><input type="hidden" value={qualEmployee === emp.id ? emp.id : ''} onChange={() => {}}/><select aria-label="Qualifikation Mitarbeiter" value={qualEmployee === emp.id ? qualType : ''} onChange={e => {setQualEmployee(emp.id);setQualType(e.target.value as QualificationType)}} className={`${field} w-auto`}><option value="">Nachweis hinzufügen…</option>{Object.values(QualificationType).map(q => <option key={q} value={q}>{q}</option>)}</select>{qualEmployee === emp.id && <><input className={`${field} w-32`} placeholder="Nachweis-Nr." value={qualCert} onChange={e=>setQualCert(e.target.value)}/><input className={`${field} w-36`} type="date" aria-label="Ausstellungsdatum" value={qualIssue} onChange={e=>setQualIssue(e.target.value)}/><input className={`${field} w-36`} type="date" aria-label="Ablaufdatum" value={qualExpiry} onChange={e=>setQualExpiry(e.target.value)}/><button className="text-xs text-blue-300">Hinzufügen</button></>}</form>
+        <form onSubmit={createAbsence} className="flex flex-wrap gap-2 items-center"><input type="hidden" name="employeeId" value={emp.id}/><select name="type" className={`${field} w-auto`}><option>Urlaub</option><option>Krankheit</option><option>Sonstige</option></select><input name="startDate" type="date" required className={`${field} w-36`}/><input name="endDate" type="date" required className={`${field} w-36`}/><button type="submit" className="text-xs text-blue-300">Abwesenheit beantragen</button></form></div>}
+    </article>)}</div>
+    {modal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"><form onSubmit={saveEmployee} className="w-full max-w-lg space-y-3 rounded-2xl border border-slate-700 bg-[#0f172a] p-6"><div className="flex justify-between"><h2 className="font-bold text-white">{editing ? 'Mitarbeiter bearbeiten' : 'Mitarbeiter anlegen'}</h2><button type="button" onClick={() => setModal(false)}>✕</button></div><div className="grid grid-cols-2 gap-3">{[[personnelNumber,setPersonnelNumber,'Personalnummer'],[firstName,setFirstName,'Vorname'],[lastName,setLastName,'Nachname'],[email,setEmail,'E-Mail'],[phone,setPhone,'Telefon']].map(([value,setter,label]: any)=><label key={label} className="text-xs text-slate-400">{label}<input required className={field} value={value} onChange={e=>setter(e.target.value)}/></label>)}<label className="text-xs text-slate-400">Rolle<select className={field} value={role} onChange={e=>setRole(e.target.value as UserRole)}>{Object.values(UserRole).map(v=><option key={v}>{v}</option>)}</select></label><label className="text-xs text-slate-400">Wochenstunden<input className={field} type="number" min="0" max="80" value={weeklyHours} onChange={e=>setWeeklyHours(Number(e.target.value))}/></label><label className="text-xs text-slate-400">Stundenlohn<input className={field} type="number" min="0" step="0.01" value={hourlyRate} onChange={e=>setHourlyRate(Number(e.target.value))}/></label><label className="text-xs text-slate-400">Eintritt<input className={field} type="date" value={dateOfJoining} onChange={e=>setDateOfJoining(e.target.value)}/></label></div><div className="flex justify-end gap-2"><button type="button" onClick={()=>setModal(false)} className="px-3 py-2 bg-slate-800 rounded-lg text-slate-300">Abbrechen</button><button className="px-4 py-2 bg-blue-600 rounded-lg text-white">Speichern</button></div></form></div>}
+  </div>;
 };
