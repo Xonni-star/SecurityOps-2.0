@@ -1,53 +1,136 @@
-# Vertex AI Studio Frontend App with Node.js Backend
+# SecurityOps 2.0 — Sicherheitsdienstverwaltung
 
-This repository contains a frontend and a Node.js backend, designed to run together.
-The backend acts as a proxy, handling Google Cloud API calls.
+Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
 
-This project is intended for demonstration and prototyping purposes only.
-It is not intended for use in a production environment.
+> **Projektstatus: TEILWEISE produktionsreif.**
+> Die Kernmodule sind integriert; Dokumente, SOPs, Alarme/Notfallpläne, Übergaben und Streifenkontrollen sind noch offen.
+> Verbindliche, tagesaktuelle Übersicht: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md).
 
-## Prerequisites
+---
 
-To run this application locally, you need:
+## Architektur
 
-*   **[Google Cloud SDK / gcloud CLI](https://cloud.google.com/sdk/docs/install)**: Follow the instructions to install the SDK.
+| Verzeichnis | Inhalt |
+|---|---|
+| `frontend/` | React-19-SPA mit Vite, TypeScript, Zustand-Store, IndexedDB-Outbox und Vitest |
+| `frontend/backend/` | Node.js/Express/TypeScript-REST-API (`/api/v1`) mit PostgreSQL 16+ Row-Level-Security, JWT und Argon2id |
+| `backend/` | Separater Google-Cloud-/Vertex-AI-Proxy — **nicht** das SecurityOps-Anwendungsbackend |
 
-*   **gcloud Initialization**:
-    *   Initialize the gcloud CLI:
-        ```bash
-        gcloud init
-        ```
-    *   Authenticate for Application Default Credentials (needed to call Google Cloud APIs):
-        ```bash
-        gcloud auth application-default login
-        ```
+> **Wichtig:** Alle SecurityOps-Backend-Befehle (Migrationen, Seed, Tests) laufen unter `frontend/backend/`, nicht unter dem Root-`backend/`.
 
-*   **Node.js and npm**: Ensure you have Node.js and its package manager, `npm`, installed on your machine.
+---
 
-## Project Structure
+## Voraussetzungen
 
-The project is organized into two main directories:
+* **Node.js ≥ 24.15.0** (siehe `.nvmrc`: `24`) und npm
+* **PostgreSQL 16+**
+* Zwei Datenbankrollen:
+  * `secops_admin` — ausschließlich für DDL-Migrationen und Schema-Upgrades
+  * `secops_app_user` — operativer Betrieb, **ohne** Superuser- oder `BYPASSRLS`-Rechte
 
-*   `frontend/`: Contains the Frontend application code.
-*   `backend/`: Contains the Node.js/Express server code to proxy Google Cloud API calls.
+---
 
-## Backend Environment Variables
-
-The `backend/.env.local` file is automatically generated when you download this application.
-It contains essential Google Cloud environment variables pre-configured based on your project settings at the time of download.
-
-The variables set in `backend/.env.local` are:
-*   `API_BACKEND_PORT`: The port the backend API server listens on (e.g., `5000`).
-*   `API_PAYLOAD_MAX_SIZE`: The maximum size of the request payload accepted by the backend server (e.g., `5mb`).
-*   `GOOGLE_CLOUD_LOCATION`: The Google Cloud region associated with your project.
-*   `GOOGLE_CLOUD_PROJECT`: Your Google Cloud Project ID.
-
-**Note:** These variables are automatically populated during the download process.
-You can modify the values in `backend/.env.local` if you need to change them.
-
-## Installation and Running the App
-
-To install dependencies and run your Google Cloud Vertex AI Studio App locally, execute the following command:
+## Schnellstart
 
 ```bash
-npm install && npm run dev
+git clone https://github.com/Xonni-star/SecurityOps-2.0.git
+cd SecurityOps-2.0
+
+# Abhängigkeiten
+npm install
+npm --prefix frontend install
+npm --prefix frontend/backend ci
+
+# Konfiguration
+cp frontend/backend/.env.example frontend/backend/.env
+# → Werte in frontend/backend/.env eintragen (siehe unten)
+
+# Datenbank vorbereiten
+npm --prefix frontend/backend run migrate
+npm --prefix frontend/backend run seed
+
+# Frontend + Backend parallel starten
+npm run dev
+```
+
+`npm run dev` startet das Vite-Frontend und das SecurityOps-Backend (Standard-Port `8000`).
+
+---
+
+## Umgebungsvariablen (`frontend/backend/.env`)
+
+| Variable | Pflicht | Beschreibung |
+|---|---|---|
+| `PORT` | nein | HTTP-Port des Backends (Standard: `8000`) |
+| `NODE_ENV` | nein | `development` \| `test` \| `production` |
+| `DATABASE_URL` | **ja** | Verbindung als `secops_app_user` (RLS-Operationen) |
+| `DATABASE_MIGRATION_URL` | **ja** | Verbindung als `secops_admin` (Migrationen) |
+| `JWT_SECRET` | **ja** | Mindestens 32 Zeichen; erzeugen mit `openssl rand -hex 32` |
+| `JWT_EXPIRES_IN` | nein | Format `<Zahl><s\|m\|h\|d>`, z. B. `8h` |
+| `CORS_ORIGIN` | **ja** | Kommagetrennte Whitelist, z. B. `http://localhost:3000` |
+| `RATE_LIMIT_MAX` | nein | Anfragen pro Minute je IP (Standard: `120`) |
+
+Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich unsicheren Secrets.
+
+---
+
+## Module
+
+| Modul | Status | Anmerkung |
+|---|---|---|
+| Kunden | teilweise | Anlegen/Lesen persistiert; Ändern/Löschen offen |
+| Objekte | teilweise | Anlegen/Lesen/Ändern persistiert; Archivieren/Löschen offen |
+| Mitarbeiter | teilweise | Anlegen/Lesen/Ändern persistiert; Qualifikationen/Abwesenheiten offen |
+| Schichten | CRUD fertig | ArbZG-Prüfungen offen |
+| Schlüssel | CRUD fertig | Historie teilweise |
+| Aufgaben | CRUD fertig | — |
+| Wachbuch | teilweise | Lesen persistiert; Schreiben über Outbox/Sync |
+| Dokumente | offen | Keine Tabelle, kein Endpunkt |
+| SOPs | offen | Keine Tabelle, kein Endpunkt |
+| Alarme/Notfallpläne | offen | Keine Tabelle, kein Endpunkt |
+| Übergaben | offen | Nur lokales Mobile-Modul |
+| Streifenkontrollen | offen | Nur lokales Mobile-Modul |
+| Benutzer/Rechte | teilweise | Login/RBAC vorhanden; Verwaltungs-API offen |
+| Offline-Sync | teilweise | Outbox vorhanden; nicht alle Module angebunden |
+
+---
+
+## Tests und Build
+
+```bash
+# Backend (Jest, inkl. PostgreSQL-RLS-Integrationstests)
+npm --prefix frontend/backend test
+
+# Frontend (Vitest)
+npm --prefix frontend test
+
+# Produktions-Build
+npm --prefix frontend run build
+npm --prefix frontend/backend run build
+```
+
+---
+
+## Sicherheit
+
+* **Mandantenisolation:** PostgreSQL 16+ erzwingt `FORCE ROW LEVEL SECURITY`; ohne gesetzten Transaktionskontext (`SET LOCAL app.current_tenant`) liefert die Datenbank physisch keine Datensätze.
+* **Least Privilege:** Der operative Benutzer `secops_app_user` besitzt weder Superuser- noch `BYPASSRLS`-Rechte; die Rolle wird beim Serverstart verifiziert.
+* **Authentifizierung:** Argon2id-Passworthashes, JWT-Sessions, Rate Limiting und Brute-Force-Schutz.
+* **Offline-Sync:** Idempotente Mutationen über `POST /api/v1/sync/push` mit Advisory Locks und Quittungstabellen; Konflikte werden über `POST /api/v1/sync/conflicts/resolve` entschieden.
+
+---
+
+## Dokumentation
+
+* [frontend/README.md](./frontend/README.md) — detaillierte Architektur-, Build- und Testhinweise
+* [frontend/INSTALLATION_GUIDE.md](./frontend/INSTALLATION_GUIDE.md) — Installation und Inbetriebnahme
+* [frontend/SYSTEM_OVERVIEW.md](./frontend/SYSTEM_OVERVIEW.md) — Systemüberblick
+* [frontend/SECURITY_AUDIT.md](./frontend/SECURITY_AUDIT.md) — Sicherheitsaudit
+* [frontend/KNOWN_ISSUES.md](./frontend/KNOWN_ISSUES.md) — bekannte Einschränkungen
+* [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md) — aktueller Umsetzungsstand
+
+---
+
+## Lizenz
+
+Für dieses Repository ist derzeit keine Lizenz hinterlegt.
