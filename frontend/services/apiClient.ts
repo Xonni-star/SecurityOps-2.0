@@ -21,7 +21,7 @@ export interface RequestOptions extends RequestInit {
 
 class ApiClient {
   private token: string | null = null;
-  private currentTenantId: string = 'tenant-frankfurt';
+  private currentTenantId: string = '11111111-1111-1111-1111-111111111111';
 
   constructor() {
     this.token = localStorage.getItem('secops_access_token');
@@ -57,7 +57,6 @@ class ApiClient {
     const url = `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'X-Tenant-ID': options.tenantId || this.currentTenantId,
       ...(options.headers as Record<string, string> || {})
     };
 
@@ -72,15 +71,14 @@ class ApiClient {
       });
 
       if (response.status === 401) {
-        // Trigger auto-logout or session expiration callback
-        console.warn('API returned 401 Unauthorized - session expired.');
+        console.warn('[API 401] Sitzung ungültig oder abgelaufen.');
       }
 
       const envelope: ResponseEnvelope = await response.json();
       if (!response.ok || !envelope.success) {
         throw new ApiError(
           response.status,
-          envelope.message || 'API operation failed',
+          envelope.message || 'API-Anfrage fehlgeschlagen',
           envelope.errors
         );
       }
@@ -90,11 +88,10 @@ class ApiClient {
       if (err instanceof ApiError) {
         throw err;
       }
-      throw new ApiError(500, err?.message || 'Network error / Backend unreachable');
+      throw new ApiError(500, err?.message || 'Verbindung zum Backend-Server fehlgeschlagen.');
     }
   }
 
-  // Helper Methods
   get<T>(endpoint: string, options?: RequestOptions): Promise<T> {
     return this.request<T>(endpoint, { ...options, method: 'GET' });
   }
@@ -105,18 +102,6 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify(body)
     });
-  }
-
-  put<T>(endpoint: string, body: any, options?: RequestOptions): Promise<T> {
-    return this.request<T>(endpoint, {
-      ...options,
-      method: 'PUT',
-      body: JSON.stringify(body)
-    });
-  }
-
-  delete<T>(endpoint: string, options?: RequestOptions): Promise<T> {
-    return this.request<T>(endpoint, { ...options, method: 'DELETE' });
   }
 }
 

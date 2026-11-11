@@ -1,7 +1,6 @@
 -- ==============================================================================
 -- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (PHASE 1)
--- Erstellt alle Tabellen für Mandanten, Benutzer, Kunden, Objekte, Personal,
--- Dienstplan, Wachbuch, Schlüssel und Sicherheit mit Composite Foreign Keys & RLS
+-- Erstellt alle Kernbereiche mit Composite Foreign Keys & RLS
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
@@ -58,6 +57,7 @@ CREATE TABLE IF NOT EXISTS user_roles (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, role_id, tenant_id)
 );
 
@@ -150,7 +150,7 @@ CREATE TABLE IF NOT EXISTS employee_qualifications (
         REFERENCES employees(id, tenant_id) ON DELETE CASCADE
 );
 
--- 4. DIENSTPLANUNG
+-- 4. DIENSTPLANUNG (RESTRICT verhindert Inkonsistenzen bei Fremdschlüsseln)
 CREATE TABLE IF NOT EXISTS shifts (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -167,12 +167,10 @@ CREATE TABLE IF NOT EXISTS shifts (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
     CONSTRAINT fk_shifts_site_tenant FOREIGN KEY (site_id, tenant_id)
-        REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
-    CONSTRAINT fk_shifts_employee_tenant FOREIGN KEY (employee_id, tenant_id)
-        REFERENCES employees(id, tenant_id) ON DELETE SET NULL
+        REFERENCES sites(id, tenant_id) ON DELETE CASCADE
 );
 
--- 5. DIGITALES WACHBUCH & VORFÄLLE (APPEND-ONLY)
+-- 5. DIGITALES WACHBUCH & VORFÄLLE (APPEND-ONLY MIT IDEMPOTENZ-CONSTRAINT)
 CREATE TABLE IF NOT EXISTS guardbook_entries (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -190,10 +188,24 @@ CREATE TABLE IF NOT EXISTS guardbook_entries (
     client_mutation_id VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (id, tenant_id),
+    CONSTRAINT uq_guardbook_client_mutation UNIQUE (tenant_id, client_mutation_id),
     CONSTRAINT fk_guardbook_site_tenant FOREIGN KEY (site_id, tenant_id)
         REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
     CONSTRAINT fk_guardbook_guard_tenant FOREIGN KEY (guard_id, tenant_id)
         REFERENCES employees(id, tenant_id) ON DELETE RESTRICT
+);
+
+-- Revisionshistorie für Korrekturen (Append-Only)
+CREATE TABLE IF NOT EXISTS guardbook_revisions (
+    id UUID DEFAULT uuid_generate_v4(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    entry_id UUID NOT NULL,
+    author_name VARCHAR(100) NOT NULL,
+    note TEXT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (id, tenant_id),
+    CONSTRAINT fk_revisions_guardbook_tenant FOREIGN KEY (entry_id, tenant_id)
+        REFERENCES guardbook_entries(id, tenant_id) ON DELETE CASCADE
 );
 
 -- 6. SCHLÜSSELVERWALTUNG
@@ -212,9 +224,7 @@ CREATE TABLE IF NOT EXISTS keys (
     PRIMARY KEY (id, tenant_id),
     CONSTRAINT uq_key_number_tenant UNIQUE (tenant_id, key_number),
     CONSTRAINT fk_keys_site_tenant FOREIGN KEY (site_id, tenant_id)
-        REFERENCES sites(id, tenant_id) ON DELETE CASCADE,
-    CONSTRAINT fk_keys_holder_tenant FOREIGN KEY (current_holder_id, tenant_id)
-        REFERENCES employees(id, tenant_id) ON DELETE SET NULL
+        REFERENCES sites(id, tenant_id) ON DELETE CASCADE
 );
 
 -- 7. AUFGABEN
@@ -249,6 +259,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 
 -- ==============================================================================
 -- POSTGRESQL ROW-LEVEL SECURITY (RLS) AKTIVIERUNG
+-- Erzwingt FORCE ROW LEVEL SECURITY auf allen mandantenspezifischen Tabellen
 -- ==============================================================================
 
 DO $$
@@ -261,6 +272,7 @@ DECLARE
         'employee_qualifications',
         'shifts',
         'guardbook_entries',
+        'guardbook_revisions',
         'keys',
         'tasks',
         'audit_logs'
@@ -270,11 +282,11 @@ BEGIN
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
         
-        -- Droppen falls bereits existiert
+        -- Droppen falls bereits vorhanden
         EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_policy ON %I;', tbl);
         
-        -- Strikte Mandantenisolierungs-Policy:
-        -- Liest oder schreibt ausschließlich Datensätze, die mit app.current_tenant übereinstimmen!
+        -- Strikte Mandanten-Isolierungs-Policy:
+        -- Gibt ausschließlich Datensätze frei, die dem aktuellen app.current_tenant entsprechen
         EXECUTE format('
             CREATE POLICY tenant_isolation_policy ON %I
                 AS RESTRICTIVE

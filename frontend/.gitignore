@@ -1,0 +1,48 @@
+# SecurityOps 2.0 - Git Ignore Rules
+
+# Environment Variables & Secrets (Niemals ins Repository einchecken!)
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+deploy/.env
+deploy/.env.*
+!deploy/.env.example
+
+# Node.js & Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Build Outputs
+dist/
+build/
+coverage/
+
+# Python / Pytest / Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Databases, Dumps & Backups
+*.dump
+*.sql.bak
+*.tar.gz.enc
+/var/backups/
+secops_dev_data/
+
+# OS / Editor Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

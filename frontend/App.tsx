@@ -18,7 +18,6 @@ import { ReportsModule } from './components/ReportsModule';
 import { ArchitectureCenter } from './components/ArchitectureCenter';
 import { SecurityAuditCenter } from './components/SecurityAuditCenter';
 import { E2EAcceptanceCenter } from './components/E2EAcceptanceCenter';
-import { BackendLiveConsole } from './components/BackendLiveConsole';
 import { MobileAppShell } from './components/MobileAppShell';
 import { IllustratedUserGuide } from './components/IllustratedUserGuide';
 import { AICopilotModal } from './components/AICopilotModal';
@@ -58,8 +57,6 @@ export default function App(): React.ReactNode {
 
   const renderActiveModule = () => {
     switch (activeTab) {
-      case 'backend_console':
-        return <BackendLiveConsole />;
       case 'user_guide':
         return <IllustratedUserGuide />;
       case 'mobile_app':
@@ -97,7 +94,7 @@ export default function App(): React.ReactNode {
       case 'architecture':
         return <ArchitectureCenter />;
       default:
-        return <Dashboard />;
+        return <MobileAppShell />;
     }
   };
 

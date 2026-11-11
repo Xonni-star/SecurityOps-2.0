@@ -18,7 +18,7 @@ import {
   ShieldCheck,
   Smartphone,
   Award,
-  Server
+  HelpCircle
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
 import { UserRole } from '../types';
@@ -55,14 +55,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
 
   const menuSections = [
     {
-      title: 'OPERATIV & LEITSTELLE',
+      title: 'MOBIL & EINSATZ',
       items: [
+        { id: 'mobile_app', label: 'Mitarbeiter-App (Mobil)', icon: Smartphone, visible: true },
         { id: 'dashboard', label: 'Einsatz-Dashboard', icon: LayoutDashboard, visible: true },
         { id: 'guardbook', label: 'Digitales Wachbuch', icon: BookOpen, badge: criticalLogsCount, badgeColor: 'bg-rose-500', visible: true },
         { id: 'roster', label: 'Dienstplanung (Soll/Ist)', icon: CalendarDays, badge: openShiftsCount, badgeColor: 'bg-amber-500', visible: canAccessRoster },
         { id: 'alarms', label: 'Alarm- & Notfallmanagement', icon: Siren, visible: true },
-        { id: 'keys', label: 'Schlüssel & Zutrittsmedien', icon: KeyRound, badge: issuedKeysCount, badgeColor: 'bg-blue-500', visible: true },
-        { id: 'mobile_app', label: 'Mitarbeiter-App (PWA)', icon: Smartphone, visible: true }
+        { id: 'keys', label: 'Schlüssel & Zutrittsmedien', icon: KeyRound, badge: issuedKeysCount, badgeColor: 'bg-blue-500', visible: true }
       ]
     },
     {
@@ -84,13 +84,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
       ]
     },
     {
-      title: 'BACKEND & DATENBANK',
+      title: 'DOKUMENTATION & SCHULUNG',
       items: [
-        { id: 'backend_console', label: 'Backend & PostgreSQL Live', icon: Server, visible: true },
         { id: 'user_guide', label: 'Bebildertes Handbuch', icon: BookOpen, visible: true },
         { id: 'e2e_acceptance', label: 'E2E-Abnahme & Release 1.0', icon: Award, visible: canAccessAdmin },
         { id: 'security_audit', label: 'Sicherheits-Audit & DSGVO', icon: ShieldCheck, visible: canAccessAdmin },
-        { id: 'architecture', label: 'Architektur-Blueprint', icon: Code2, visible: canAccessAdmin }
+        { id: 'architecture', label: 'Backend & DB Blueprint', icon: Code2, visible: canAccessAdmin }
       ]
     }
   ];
@@ -147,20 +146,20 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
         ))}
       </nav>
 
-      {/* Backend Live Indicator Widget */}
+      {/* Illustrated Guide Shortcut Card */}
       <div
-        onClick={() => handleSelectTab('backend_console')}
+        onClick={() => handleSelectTab('user_guide')}
         className="p-3 mt-4 rounded-xl bg-gradient-to-br from-blue-950/40 via-slate-900 to-slate-950 border border-blue-900/50 cursor-pointer hover:border-blue-500/50 transition text-[11px] group"
       >
         <div className="flex items-center justify-between mb-1.5">
           <span className="text-blue-300 font-semibold flex items-center gap-1.5">
-            <Server className="w-3.5 h-3.5 text-blue-400" />
-            <span>PostgreSQL 16+ RLS</span>
+            <BookOpen className="w-3.5 h-3.5 text-blue-400" />
+            <span>Bebildertes Handbuch</span>
           </span>
-          <span className="text-emerald-400 font-mono font-bold text-[10px]">Aktiv</span>
+          <span className="text-emerald-400 font-mono font-bold text-[10px]">7 Kapitel</span>
         </div>
         <p className="text-[10px] text-slate-400 leading-tight">
-          Echtes Backend: REST /api/v1 & Isolationstests ausführen.
+          Schritt-für-Schritt Anleitungen mit Screenshots, Callouts und PDF-Druck.
         </p>
       </div>
     </aside>

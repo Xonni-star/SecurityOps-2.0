@@ -1,11 +1,11 @@
-import { pool, withTenantTransaction } from '../config/database';
 import argon2 from 'argon2';
+import { pool, withTenantTransaction } from '../config/database';
 
 export const TENANT_FRANKFURT_ID = '11111111-1111-1111-1111-111111111111';
 export const TENANT_BAVARIA_ID = '22222222-2222-2222-2222-222222222222';
 
 export async function seedDatabase(): Promise<void> {
-  console.log('[SEED] Befülle Datenbank mit Testmandanten und -daten...');
+  console.log('[SEED] Starte Datenbankbefüllung mit Testmandanten und isolierten Daten...');
   const client = await pool.connect();
 
   try {
@@ -19,44 +19,87 @@ export async function seedDatabase(): Promise<void> {
     `, [TENANT_FRANKFURT_ID, TENANT_BAVARIA_ID]);
 
     // 2. Rollen anlegen
-    await client.query(`
-      INSERT INTO roles (name, description) VALUES
-        ('Systemadministrator', 'Volle administrative Kontrolle'),
-        ('Geschäftsführung', 'Unternehmensleitung und Freigaben'),
-        ('Einsatzleitung', 'Operative Schichtdisposition und Wachbuch'),
-        ('Objektleitung', 'Standortbezogene Steuerung'),
-        ('Personalverwaltung', 'HR und BWR Qualifikationen'),
-        ('Qualitätsmanagement', 'DIN 77200 QM und Anweisungen'),
-        ('Wachdienstmitarbeiter', 'Wachkraft vor Ort'),
-        ('Lesender Zugriff / Auditor', 'Audit und Einsicht')
-      ON CONFLICT (name) DO NOTHING;
-    `);
+    const roles = [
+      'Systemadministrator',
+      'Geschäftsführung',
+      'Einsatzleitung',
+      'Objektleitung',
+      'Personalverwaltung',
+      'Qualitätsmanagement',
+      'Wachdienstmitarbeiter',
+      'Auditor'
+    ];
 
-    // 3. Benutzer anlegen (Passwort gehasht mit Argon2id)
-    const passwordHash = await argon2.hash('SecOpsVault2025SecurePassword!', { type: argon2.argon2id });
+    for (const r of roles) {
+      await client.query(
+        'INSERT INTO roles (name, description) VALUES ($1, $2) ON CONFLICT (name) DO NOTHING;',
+        [r, `Rolle ${r}`]
+      );
+    }
 
-    const userSchmidt = await client.query(`
+    // 3. Granulare Berechtigungen anlegen
+    const permissions = [
+      { code: 'customers:read', module: 'customers' },
+      { code: 'customers:create', module: 'customers' },
+      { code: 'sites:read', module: 'sites' },
+      { code: 'sites:create', module: 'sites' },
+      { code: 'logbook:read', module: 'logbook' },
+      { code: 'logbook:create', module: 'logbook' },
+      { code: 'shifts:read', module: 'shifts' },
+      { code: 'shifts:manage', module: 'shifts' }
+    ];
+
+    for (const p of permissions) {
+      await client.query(
+        'INSERT INTO permissions (code, module, description) VALUES ($1, $2, $3) ON CONFLICT (code) DO NOTHING;',
+        [p.code, p.module, `Erlaubt ${p.code}`]
+      );
+    }
+
+    // Berechtigungen der Rolle Einsatzleitung zuordnen
+    const einsatzRole = await client.query("SELECT id FROM roles WHERE name = 'Einsatzleitung'");
+    if (einsatzRole.rows.length > 0) {
+      const eRoleId = einsatzRole.rows[0].id;
+      for (const p of permissions) {
+        const permRes = await client.query('SELECT id FROM permissions WHERE code = $1', [p.code]);
+        if (permRes.rows.length > 0) {
+          await client.query(
+            'INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;',
+            [eRoleId, permRes.rows[0].id]
+          );
+        }
+      }
+    }
+
+    // 4. Testbenutzer mit echtem Argon2id Hash anlegen
+    const testPassword = 'SecOpsVault2025SecurePassword!';
+    const passwordHash = await argon2.hash(testPassword, { type: argon2.argon2id });
+
+    const userRes = await client.query(`
       INSERT INTO users (email, password_hash, first_name, last_name, phone)
       VALUES ('a.schmidt@ffm-sec.de', $1, 'Alexander', 'Schmidt', '+49 171 4455881')
       ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash
       RETURNING id;
     `, [passwordHash]);
 
-    const userHuber = await client.query(`
-      INSERT INTO users (email, password_hash, first_name, last_name, phone)
-      VALUES ('m.huber@bavaria-schutz.de', $1, 'Maximilian', 'Huber', '+49 89 5544332')
-      ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash
-      RETURNING id;
-    `, [passwordHash]);
+    const userId = userRes.rows[0].id;
 
-    // 4. Mandant Frankfurt Daten befüllen
+    // Benutzer Mandant Frankfurt mit Rolle Einsatzleitung zuordnen
+    if (einsatzRole.rows.length > 0) {
+      await client.query(`
+        INSERT INTO user_roles (user_id, role_id, tenant_id)
+        VALUES ($1, $2, $3)
+        ON CONFLICT DO NOTHING;
+      `, [userId, einsatzRole.rows[0].id, TENANT_FRANKFURT_ID]);
+    }
+
+    // 5. Daten für Mandant Frankfurt (Tenant A) innerhalb geschützter RLS-Transaktion anlegen
     await withTenantTransaction(TENANT_FRANKFURT_ID, async (tx) => {
       // Kunde
-      const custRes = await tx.query(`
+      await tx.query(`
         INSERT INTO clients (id, tenant_id, client_number, company_name, contact_person, email, phone, address, contract_start, contract_end)
         VALUES ('c1111111-1111-1111-1111-111111111111', $1, 'KUN-2024-001', 'MainTower Real Estate GmbH', 'Dr. Michael von Berg', 'm.vonberg@maintower-re.de', '+49 69 9820-110', 'Neue Mainzer Str. 52, 60311 Frankfurt', '2022-01-01', '2026-12-31')
-        ON CONFLICT (id, tenant_id) DO NOTHING
-        RETURNING id;
+        ON CONFLICT (id, tenant_id) DO NOTHING;
       `, [TENANT_FRANKFURT_ID]);
 
       // Objekt
@@ -74,7 +117,7 @@ export async function seedDatabase(): Promise<void> {
       `, [TENANT_FRANKFURT_ID]);
     });
 
-    // 5. Mandant Bavaria Daten befüllen
+    // 6. Daten für Mandant Bavaria (Tenant B) innerhalb geschützter RLS-Transaktion anlegen
     await withTenantTransaction(TENANT_BAVARIA_ID, async (tx) => {
       await tx.query(`
         INSERT INTO clients (id, tenant_id, client_number, company_name, contact_person, email, phone, address, contract_start, contract_end)

@@ -18,6 +18,13 @@ declare global {
   }
 }
 
+// In-Memory Token-Widerrufsliste (im Cluster: Redis oder PostgreSQL user_sessions)
+const revokedTokens = new Set<string>();
+
+export function revokeToken(token: string): void {
+  revokedTokens.add(token);
+}
+
 export function authenticateJwt(req: Request, res: Response, next: NextFunction): void {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -29,11 +36,21 @@ export function authenticateJwt(req: Request, res: Response, next: NextFunction)
   }
 
   const token = authHeader.split(' ')[1];
+
+  if (revokedTokens.has(token)) {
+    res.status(401).json({
+      success: false,
+      message: 'Sitzung wurde widerrufen (Token Blacklist).'
+    });
+    return;
+  }
+
   try {
     const payload = jwt.verify(token, env.JWT_SECRET) as any;
-    
-    // WICHTIG: Die tenantId wird niemals ungeprüft aus dem Browser übernommen!
-    // Sie entstammt direkt dem kryptografisch verifizierten JWT.
+
+    // SICHERHEITSPRINZIP:
+    // Der Mandantenkontext (tenantId) wird niemals aus einem vom Browser übermittelten
+    // X-Tenant-ID Header übernommen, sondern stammt ausnahmslos aus dem signierten JWT.
     req.user = {
       userId: payload.sub,
       email: payload.email,
@@ -59,6 +76,7 @@ export function requirePermission(permissionCode: string) {
     }
 
     const { role, permissions } = req.user;
+    // Systemadministrator besitzt vollen Zugriff
     if (role === 'Systemadministrator' || permissions.includes(permissionCode) || permissions.includes('*')) {
       next();
       return;
