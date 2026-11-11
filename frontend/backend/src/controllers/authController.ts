@@ -155,7 +155,10 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     // akzeptierten StringValue-Format. Der Cast überträgt diese Laufzeit-
     // Garantie auf den Compiler, ohne "any" zu verwenden.
     const signOptions: SignOptions = {
-      expiresIn: env.JWT_EXPIRES_IN as SignOptions['expiresIn']
+      expiresIn: env.JWT_EXPIRES_IN as SignOptions['expiresIn'],
+      // Eindeutige Token-ID: verhindert identische JWTs (und damit identische
+      // token_hash-Werte) bei mehreren Logins innerhalb derselben Sekunde.
+      jwtid: crypto.randomUUID()
     };
 
     const token = jwt.sign(

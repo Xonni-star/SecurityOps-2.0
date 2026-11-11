@@ -60,10 +60,133 @@ export type ThemeMode = 'dark' | 'light';
 // Mutex zur Verhinderung paralleler Synchronisationsläufe
 let isSyncRunningMutex = false;
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  fullName: string;
+  role: string;
+  tenantId: string;
+  tenantName: string;
+  permissions: string[];
+}
+
+function asString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function asNumber(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function errorText(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
+// PostgreSQL ist die maßgebliche Datenquelle. Die Mapper übersetzen die
+// snake_case-API-Antworten in die bestehenden Frontend-Typen.
+function mapClientRow(row: any, tenantId: string): Client {
+  return {
+    id: asString(row.id),
+    tenantId,
+    clientNumber: asString(row.client_number ?? row.clientNumber),
+    companyName: asString(row.company_name ?? row.companyName),
+    contactPerson: asString(row.contact_person ?? row.contactPerson),
+    email: asString(row.email),
+    phone: asString(row.phone),
+    address: asString(row.address),
+    contractStart: asString(row.contract_start ?? row.contractStart),
+    contractEnd: asString(row.contract_end ?? row.contractEnd),
+    contractAutoRenew: true,
+    noticePeriodMonths: 3,
+    slaLevel: (row.sla_level ?? row.slaLevel ?? 'Gold (24/7 Vor-Ort)') as unknown as Client['slaLevel'],
+    billingStatus: (row.billing_status ?? row.billingStatus ?? 'Regulär') as unknown as Client['billingStatus'],
+    assignedSiteCount: asNumber(row.assigned_site_count, 0)
+  };
+}
+
+function mapSiteRow(row: any, tenantId: string): Site {
+  return {
+    id: asString(row.id),
+    tenantId,
+    clientId: asString(row.client_id ?? row.clientId),
+    clientName: asString(row.client_name ?? row.clientName),
+    siteCode: asString(row.site_code ?? row.siteCode),
+    name: asString(row.name),
+    address: asString(row.address),
+    securityLevel: (row.security_level ?? row.securityLevel ?? 'Hoch (KRITIS / BSI)') as unknown as Site['securityLevel'],
+    siteManagerId: '',
+    siteManagerName: asString(row.site_manager_name, 'Nicht zugewiesen'),
+    requiredGuardsDay: asNumber(row.required_guards_day, 1),
+    requiredGuardsNight: asNumber(row.required_guards_night, 1),
+    checkpoints: [],
+    assessments: [],
+    alarmSystem: asString(row.alarm_system),
+    instructionsCount: 0,
+    accessRules: asString(row.access_rules),
+    activeAlarms: 0
+  };
+}
+
+function mapEmployeeRow(row: any, tenantId: string): Employee {
+  return {
+    id: asString(row.id),
+    tenantId,
+    personnelNumber: asString(row.personnel_number ?? row.personnelNumber),
+    firstName: asString(row.first_name ?? row.firstName),
+    lastName: asString(row.last_name ?? row.lastName),
+    email: asString(row.email),
+    phone: asString(row.phone),
+    role: (row.role ?? 'Wachdienstmitarbeiter') as unknown as Employee['role'],
+    status: (row.status ?? 'Aktiv') as unknown as Employee['status'],
+    weeklyHours: asNumber(row.weekly_hours, 40),
+    qualifications: [],
+    absences: [],
+    assignedSiteIds: [],
+    hourlyRate: asNumber(row.hourly_rate, 0),
+    dateOfJoining: asString(row.date_of_joining ?? row.dateOfJoining),
+    notes: '',
+    synced: true
+  };
+}
+
+function mapGuardBookRow(row: any, tenantId: string): GuardBookEntry {
+  return {
+    id: asString(row.id),
+    tenantId,
+    timestamp: asString(row.entry_timestamp ?? row.timestamp),
+    siteId: asString(row.site_id ?? row.siteId),
+    siteName: asString(row.site_name ?? row.siteName),
+    guardId: asString(row.guard_id ?? row.guardId),
+    guardName: asString(row.guard_name ?? row.guardName),
+    category: (row.category ?? 'Routinemeldung') as unknown as GuardBookEntry['category'],
+    priority: (row.priority ?? 'Normal') as unknown as GuardBookEntry['priority'],
+    stage: (row.stage ?? 'Erfasst') as unknown as GuardBookEntry['stage'],
+    title: asString(row.title),
+    description: asString(row.description),
+    policeInvolved: Boolean(row.police_involved ?? row.policeInvolved),
+    resolved: Boolean(row.resolved),
+    revisions: [],
+    offlineCreated: false
+  };
+}
+
 interface SecurityOpsStore {
   // Theme
   theme: ThemeMode;
   toggleTheme: () => void;
+
+  // Session & API hydration
+  authUser: AuthUser | null;
+  isAuthenticated: boolean;
+  isAuthenticating: boolean;
+  authError: string | null;
+  isLoadingData: boolean;
+  dataLoadError: string | null;
+  login: (email: string, password: string) => Promise<void>;
+  logout: () => Promise<void>;
+  restoreSession: () => Promise<void>;
+  loadTenantData: () => Promise<void>;
 
   // Multi-Tenancy
   tenants: Tenant[];
@@ -159,7 +282,7 @@ interface SecurityOpsStore {
   getTenantNotificationDeliveries: () => NotificationDelivery[];
 
   // Actions
-  addClient: (client: Omit<Client, 'id' | 'tenantId'>) => void;
+  addClient: (client: Omit<Client, 'id' | 'tenantId'>) => Promise<void>;
   addSite: (site: Omit<Site, 'id' | 'tenantId'>) => void;
   addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => void;
   updateEmployee: (id: string, updates: Partial<Employee>) => void;
@@ -197,6 +320,127 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       else document.documentElement.classList.remove('dark');
     }
     set({ theme: nextTheme });
+  },
+
+  authUser: null,
+  isAuthenticated: !!apiClient.getToken(),
+  isAuthenticating: false,
+  authError: null,
+  isLoadingData: false,
+  dataLoadError: null,
+
+  login: async (email, password) => {
+    set({ isAuthenticating: true, authError: null });
+    try {
+      const data = await apiClient.post<any>(
+        '/auth/login',
+        { email, password },
+        { skipAuth: true }
+      );
+      apiClient.setToken(data.accessToken);
+      set({ authUser: data.user as AuthUser, isAuthenticated: true, isAuthenticating: false });
+      await get().loadTenantData();
+    } catch (error: any) {
+      apiClient.setToken(null);
+      set({
+        authUser: null,
+        isAuthenticated: false,
+        isAuthenticating: false,
+        authError: error?.message || 'Anmeldung fehlgeschlagen.'
+      });
+      throw error;
+    }
+  },
+
+  logout: async () => {
+    try {
+      await apiClient.post('/auth/logout', {});
+    } catch {
+      // Die lokale Sitzung wird in jedem Fall beendet.
+    }
+    apiClient.setToken(null);
+    set({ authUser: null, isAuthenticated: false, authError: null });
+  },
+
+  restoreSession: async () => {
+    if (!apiClient.getToken()) {
+      set({ isAuthenticated: false, authUser: null });
+      return;
+    }
+
+    try {
+      const me = await apiClient.get<any>('/auth/me');
+      set({
+        authUser: {
+          id: me.sub ?? me.id ?? '',
+          email: me.email ?? '',
+          fullName: me.email ?? '',
+          role: me.role ?? '',
+          tenantId: me.tenantId ?? '',
+          tenantName: '',
+          permissions: Array.isArray(me.permissions) ? me.permissions : []
+        },
+        isAuthenticated: true
+      });
+      await get().loadTenantData();
+    } catch {
+      apiClient.setToken(null);
+      set({ authUser: null, isAuthenticated: false });
+    }
+  },
+
+  loadTenantData: async () => {
+    set({
+      isLoadingData: true,
+      dataLoadError: null,
+      // Keine Mock-/Bestandsdaten als scheinbare PostgreSQL-Daten anzeigen.
+      clients: [],
+      sites: [],
+      employees: [],
+      guardBook: []
+    });
+
+    const [clientsResult, sitesResult, employeesResult, logbookResult] = await Promise.allSettled([
+      apiClient.get<any[]>('/customers'),
+      apiClient.get<any[]>('/sites'),
+      apiClient.get<any[]>('/employees'),
+      apiClient.get<any[]>('/logbook')
+    ]);
+
+    const tenantId = get().currentTenantId;
+    const errors: string[] = [];
+    const nextState: Partial<SecurityOpsStore> = {};
+
+    if (clientsResult.status === 'fulfilled') {
+      nextState.clients = clientsResult.value.map((row) => mapClientRow(row, tenantId));
+    } else {
+      errors.push(`Kunden: ${errorText(clientsResult.reason)}`);
+    }
+
+    if (sitesResult.status === 'fulfilled') {
+      nextState.sites = sitesResult.value.map((row) => mapSiteRow(row, tenantId));
+    } else {
+      errors.push(`Objekte: ${errorText(sitesResult.reason)}`);
+    }
+
+    if (employeesResult.status === 'fulfilled') {
+      nextState.employees = employeesResult.value.map((row) => mapEmployeeRow(row, tenantId));
+    } else {
+      errors.push(`Mitarbeiter: ${errorText(employeesResult.reason)}`);
+    }
+
+    if (logbookResult.status === 'fulfilled') {
+      nextState.guardBook = logbookResult.value.map((row) => mapGuardBookRow(row, tenantId));
+    } else {
+      errors.push(`Wachbuch: ${errorText(logbookResult.reason)}`);
+    }
+
+    const dataLoadError = errors.length > 0 ? errors.join(' | ') : null;
+    set({ ...nextState, isLoadingData: false, dataLoadError });
+
+    if (dataLoadError) {
+      get().addNotification('Daten teilweise nicht geladen', dataLoadError, 'alert');
+    }
   },
 
   tenants: initialTenants,
@@ -795,16 +1039,52 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     return (notificationDeliveries || []).filter((nd) => nd.tenantId === currentTenantId);
   },
 
-  addClient: (c) => {
+  addClient: async (c) => {
     const { currentTenantId } = get();
-    const newClient: Client = {
-      ...c,
-      tenantId: currentTenantId,
-      id: `c-${Date.now()}`,
-      contractAutoRenew: c.contractAutoRenew ?? true,
-      noticePeriodMonths: c.noticePeriodMonths ?? 3
-    };
-    set((state) => ({ clients: [newClient, ...state.clients] }));
+
+    try {
+      const created = await apiClient.post<any>('/customers', {
+        clientNumber: c.clientNumber,
+        companyName: c.companyName,
+        contactPerson: c.contactPerson,
+        email: c.email,
+        phone: c.phone,
+        address: c.address,
+        contractStart: c.contractStart,
+        contractEnd: c.contractEnd,
+        slaLevel: c.slaLevel
+      });
+
+      const newClient = mapClientRow(
+        {
+          ...created,
+          client_number: c.clientNumber,
+          company_name: c.companyName,
+          contact_person: c.contactPerson,
+          email: c.email,
+          phone: c.phone,
+          address: c.address,
+          contract_start: c.contractStart,
+          contract_end: c.contractEnd,
+          sla_level: c.slaLevel,
+          billing_status: c.billingStatus
+        },
+        currentTenantId
+      );
+
+      set((state) => ({ clients: [newClient, ...state.clients] }));
+      get().addNotification(
+        'Kunde gespeichert',
+        `${c.companyName} wurde in PostgreSQL gespeichert.`,
+        'info'
+      );
+    } catch (error: any) {
+      get().addNotification(
+        'Kunde nicht gespeichert',
+        error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
+        'alert'
+      );
+    }
   },
 
   addSite: (s) => {

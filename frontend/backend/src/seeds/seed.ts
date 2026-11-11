@@ -43,6 +43,7 @@ export async function seedDatabase(): Promise<void> {
       { code: 'customers:create', module: 'customers' },
       { code: 'sites:read', module: 'sites' },
       { code: 'sites:create', module: 'sites' },
+      { code: 'employees:read', module: 'employees' },
       { code: 'logbook:read', module: 'logbook' },
       { code: 'logbook:create', module: 'logbook' },
       { code: 'shifts:read', module: 'shifts' },

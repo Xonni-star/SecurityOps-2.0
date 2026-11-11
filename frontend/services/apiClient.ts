@@ -117,6 +117,18 @@ class ApiClient {
       body: JSON.stringify(body)
     });
   }
+
+  patch<T>(endpoint: string, body: any, options?: RequestOptions): Promise<T> {
+    return this.request<T>(endpoint, {
+      ...options,
+      method: 'PATCH',
+      body: JSON.stringify(body)
+    });
+  }
+
+  delete<T>(endpoint: string, options?: RequestOptions): Promise<T> {
+    return this.request<T>(endpoint, { ...options, method: 'DELETE' });
+  }
 }
 
 export const apiClient = new ApiClient();

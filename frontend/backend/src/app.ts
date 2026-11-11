@@ -9,6 +9,7 @@ import * as authController from './controllers/authController';
 import * as clientController from './controllers/clientController';
 import * as guardbookController from './controllers/guardbookController';
 import * as syncController from './controllers/syncController';
+import * as resourceController from './controllers/resourceController';
 
 export const app = express();
 
@@ -57,6 +58,9 @@ app.get('/api/v1/auth/me', authenticateJwt, authController.getMe);
 // Fachrouten (Alle mit RLS und granularer Berechtigungsprüfung geschützt)
 app.get('/api/v1/customers', authenticateJwt, requirePermission('customers:read'), clientController.listClients);
 app.post('/api/v1/customers', authenticateJwt, requirePermission('customers:create'), clientController.createClient);
+
+app.get('/api/v1/sites', authenticateJwt, requirePermission('sites:read'), resourceController.listSites);
+app.get('/api/v1/employees', authenticateJwt, requirePermission('employees:read'), resourceController.listEmployees);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);

@@ -26,6 +26,7 @@ import { SyncManagerModal } from './components/SyncManagerModal';
 import { ModuleManager } from './components/ModuleManager';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { NotificationCenterModal } from './components/NotificationCenterModal';
+import { LoginScreen } from './components/LoginScreen';
 import { X, AlertTriangle, RotateCcw } from 'lucide-react';
 
 interface ErrorBoundaryProps {
@@ -84,13 +85,25 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 }
 
 export default function App(): React.ReactNode {
-  const { activeTab, theme, setActiveTab } = useSecurityStore();
+  const {
+    activeTab,
+    theme,
+    setActiveTab,
+    isAuthenticated,
+    restoreSession,
+    isLoadingData,
+    dataLoadError
+  } = useSecurityStore();
   const [isCopilotOpen, setIsCopilotOpen] = useState(false);
   const [isNotifCenterOpen, setIsNotifCenterOpen] = useState(false);
   const [isSyncManagerOpen, setIsSyncManagerOpen] = useState(false);
   const [isModuleManagerOpen, setIsModuleManagerOpen] = useState(false);
   const [isGlobalSearchOpen, setIsGlobalSearchOpen] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    void restoreSession();
+  }, [restoreSession]);
 
   useEffect(() => {
     if (theme === 'dark') {
@@ -110,6 +123,10 @@ export default function App(): React.ReactNode {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  if (!isAuthenticated) {
+    return <LoginScreen />;
+  }
 
   const renderActiveModule = () => {
     switch (activeTab) {
@@ -196,6 +213,16 @@ export default function App(): React.ReactNode {
 
           {/* Content Viewport */}
           <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 lg:p-8 max-w-7xl mx-auto w-full focus:outline-none" tabIndex={-1}>
+            {isLoadingData && (
+              <div className="mb-3 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 text-xs text-blue-300">
+                Mandantendaten werden aus PostgreSQL geladen…
+              </div>
+            )}
+            {dataLoadError && (
+              <div className="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+                Backend nicht erreichbar: {dataLoadError}
+              </div>
+            )}
             <ErrorBoundary>
               {renderActiveModule()}
             </ErrorBoundary>

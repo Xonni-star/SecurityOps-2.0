@@ -16,6 +16,11 @@ export default defineConfig(({ mode }) => {
           //Target your Node.js backend
           '/api-proxy': 'http://localhost:5000',
           '/ws-proxy': {target: 'ws://localhost:5000', ws: true},
+          // SecurityOps TypeScript backend (frontend/backend)
+          '/api/v1': {
+            target: process.env.API_BACKEND_URL || 'http://localhost:8000',
+            changeOrigin: true,
+          },
         },
       },
       plugins: react(),

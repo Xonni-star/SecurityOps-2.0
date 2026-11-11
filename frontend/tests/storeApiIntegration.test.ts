@@ -1,0 +1,238 @@
+import { describe, test, expect, beforeEach, vi } from 'vitest';
+
+vi.mock('../services/apiClient', () => {
+  const apiClient = {
+    get: vi.fn(),
+    post: vi.fn(),
+    patch: vi.fn(),
+    delete: vi.fn(),
+    setToken: vi.fn(),
+    getToken: vi.fn(() => 'test-token'),
+    getTenantId: vi.fn(() => 'tenant-frankfurt'),
+    setTenantId: vi.fn()
+  };
+
+  class ApiError extends Error {
+    status: number;
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  }
+
+  return { apiClient, ApiError };
+});
+
+import { useSecurityStore } from '../store';
+import { apiClient } from '../services/apiClient';
+
+const mockedApi = apiClient as unknown as {
+  get: ReturnType<typeof vi.fn>;
+  post: ReturnType<typeof vi.fn>;
+  setToken: ReturnType<typeof vi.fn>;
+};
+
+const customerRow = {
+  id: '11111111-1111-1111-1111-111111111111',
+  client_number: 'KUN-API-1',
+  company_name: 'API Test GmbH',
+  contact_person: 'Max Test',
+  email: 'max@test.de',
+  phone: '+49 69 123',
+  address: 'Teststraße 1',
+  contract_start: '2026-01-01',
+  contract_end: '2028-12-31',
+  sla_level: 'Gold (24/7 Vor-Ort)',
+  billing_status: 'Regulär'
+};
+
+const siteRow = {
+  id: '22222222-2222-2222-2222-222222222222',
+  client_id: customerRow.id,
+  client_name: customerRow.company_name,
+  site_code: 'OBJ-API-1',
+  name: 'API Objekt',
+  address: 'Objektweg 2',
+  security_level: 'Hoch (KRITIS / BSI)',
+  required_guards_day: 2,
+  required_guards_night: 1,
+  alarm_system: 'EMA',
+  access_rules: 'Zutrittskontrolle'
+};
+
+const employeeRow = {
+  id: '33333333-3333-3333-3333-333333333333',
+  personnel_number: 'MA-API-1',
+  first_name: 'Erika',
+  last_name: 'Muster',
+  email: 'erika@test.de',
+  phone: '+49 171 123',
+  role: 'Wachdienstmitarbeiter',
+  status: 'Aktiv',
+  weekly_hours: 40,
+  hourly_rate: 19.5,
+  date_of_joining: '2024-01-01'
+};
+
+const logbookRow = {
+  id: '44444444-4444-4444-4444-444444444444',
+  site_id: siteRow.id,
+  site_name: siteRow.name,
+  guard_id: employeeRow.id,
+  guard_name: 'Erika Muster',
+  entry_timestamp: '2026-11-11T10:00:00.000Z',
+  category: 'Routinemeldung',
+  priority: 'Normal',
+  stage: 'Erfasst',
+  title: 'API Wachbucheintrag',
+  description: 'Aus PostgreSQL geladen',
+  police_involved: false,
+  resolved: false
+};
+
+function mockReadEndpoints(): void {
+  mockedApi.get.mockImplementation((endpoint: string) => {
+    switch (endpoint) {
+      case '/customers':
+        return Promise.resolve([customerRow]);
+      case '/sites':
+        return Promise.resolve([siteRow]);
+      case '/employees':
+        return Promise.resolve([employeeRow]);
+      case '/logbook':
+        return Promise.resolve([logbookRow]);
+      default:
+        return Promise.reject(new Error(`Unerwarteter Endpunkt: ${endpoint}`));
+    }
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  useSecurityStore.setState({
+    clients: [],
+    sites: [],
+    employees: [],
+    guardBook: [],
+    notifications: [],
+    authUser: null,
+    isAuthenticated: false,
+    isAuthenticating: false,
+    authError: null,
+    isLoadingData: false,
+    dataLoadError: null
+  });
+});
+
+describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
+  test('1. loadTenantData hydratisiert Kunden, Objekte, Mitarbeiter und Wachbuch aus der API', async () => {
+    mockReadEndpoints();
+
+    await useSecurityStore.getState().loadTenantData();
+
+    const state = useSecurityStore.getState();
+    expect(state.clients).toHaveLength(1);
+    expect(state.clients[0].companyName).toBe('API Test GmbH');
+    expect(state.clients[0].id).toBe(customerRow.id);
+
+    expect(state.sites[0].name).toBe('API Objekt');
+    expect(state.sites[0].clientName).toBe(customerRow.company_name);
+
+    expect(state.employees[0].lastName).toBe('Muster');
+    expect(state.employees[0].weeklyHours).toBe(40);
+
+    expect(state.guardBook[0].title).toBe('API Wachbucheintrag');
+    expect(state.guardBook[0].siteId).toBe(siteRow.id);
+
+    expect(state.isLoadingData).toBe(false);
+    expect(state.dataLoadError).toBeNull();
+  });
+
+  test('2. addClient persistiert über POST /customers und übernimmt die Server-ID', async () => {
+    mockedApi.post.mockResolvedValueOnce({
+      id: '55555555-5555-5555-5555-555555555555',
+      client_number: 'KUN-API-2',
+      company_name: 'Persistierte GmbH'
+    });
+
+    await useSecurityStore.getState().addClient({
+      clientNumber: 'KUN-API-2',
+      companyName: 'Persistierte GmbH',
+      contactPerson: 'Max Test',
+      email: 'max@test.de',
+      phone: '+49 69 123',
+      address: 'Teststraße 1',
+      contractStart: '2026-01-01',
+      contractEnd: '2028-12-31',
+      contractAutoRenew: true,
+      noticePeriodMonths: 3,
+      slaLevel: 'Gold (24/7 Vor-Ort)',
+      billingStatus: 'Regulär',
+      assignedSiteCount: 0
+    });
+
+    expect(mockedApi.post).toHaveBeenCalledWith(
+      '/customers',
+      expect.objectContaining({
+        clientNumber: 'KUN-API-2',
+        companyName: 'Persistierte GmbH',
+        slaLevel: 'Gold (24/7 Vor-Ort)'
+      })
+    );
+
+    const state = useSecurityStore.getState();
+    expect(state.clients[0].id).toBe('55555555-5555-5555-5555-555555555555');
+    expect(state.clients[0].companyName).toBe('Persistierte GmbH');
+    expect(state.notifications[0].title).toBe('Kunde gespeichert');
+  });
+
+  test('3. Fehlgeschlagene Kundenanlage erzeugt keinen Erfolg und keine lokale Scheinpersistenz', async () => {
+    mockedApi.post.mockRejectedValueOnce(new Error('Backend nicht erreichbar'));
+
+    await useSecurityStore.getState().addClient({
+      clientNumber: 'KUN-FAIL',
+      companyName: 'Nicht gespeichert GmbH',
+      contactPerson: 'Max Test',
+      email: 'max@test.de',
+      phone: '+49 69 123',
+      address: 'Teststraße 1',
+      contractStart: '2026-01-01',
+      contractEnd: '2028-12-31',
+      contractAutoRenew: true,
+      noticePeriodMonths: 3,
+      slaLevel: 'Gold (24/7 Vor-Ort)',
+      billingStatus: 'Regulär',
+      assignedSiteCount: 0
+    });
+
+    const state = useSecurityStore.getState();
+    expect(state.clients).toHaveLength(0);
+    expect(state.notifications[0].title).toBe('Kunde nicht gespeichert');
+    expect(state.notifications[0].type).toBe('alert');
+  });
+
+  test('4. Login setzt Token und lädt Mandantendaten aus PostgreSQL', async () => {
+    mockedApi.post.mockResolvedValueOnce({
+      accessToken: 'jwt-test-token',
+      user: {
+        id: 'user-1',
+        email: 'a.schmidt@ffm-sec.de',
+        fullName: 'Alexander Schmidt',
+        role: 'Einsatzleitung',
+        tenantId: '11111111-1111-1111-1111-111111111111',
+        tenantName: 'Frankfurt',
+        permissions: ['customers:read', 'customers:create', 'sites:read', 'employees:read', 'logbook:read']
+      }
+    });
+    mockReadEndpoints();
+
+    await useSecurityStore.getState().login('a.schmidt@ffm-sec.de', 'secret');
+
+    expect(mockedApi.setToken).toHaveBeenCalledWith('jwt-test-token');
+    const state = useSecurityStore.getState();
+    expect(state.isAuthenticated).toBe(true);
+    expect(state.authUser?.email).toBe('a.schmidt@ffm-sec.de');
+    expect(state.clients).toHaveLength(1);
+    expect(state.guardBook).toHaveLength(1);
+  });
+});
