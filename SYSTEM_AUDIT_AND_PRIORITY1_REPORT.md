@@ -179,3 +179,74 @@
 - Vorheriger Stand: `15b72d5b508bf302763343a04d43d60c4631dad3`
 
 **Status dieses Schritts:** **teilweise abgeschlossen** – der getestete Integrations-Slice ist umgesetzt und gesichert; die vollständige Integration aller Fachmodule ist noch offen.
+
+---
+
+# 10. Nachtrag: Zweite Integrationstranche (2026-11-11)
+
+**Code-Commit:** `7a43fd44efbdf7ba8d60a12e4732361d59a37b5c`
+**CI-Run:** `43071045069` – Root, Frontend und Backend erfolgreich
+**CD-Run:** `43071309357` – Release-Paket erfolgreich
+**Artefakte:** `frontend-dist` 340.462 B, `backend-dist` 65.460 B, Release 406.529 B
+
+## 10.1 Neu implementiert
+
+### Backend
+- `POST /api/v1/sites` und `PATCH /api/v1/sites/:id` (Zod-Validierung, RLS, `sites:create`).
+- `POST /api/v1/employees` und `PATCH /api/v1/employees/:id` (Zod-Validierung, RLS, `employees:manage`).
+- Einheitliches Validierungsfehlerformat: Zod-Fehler liefern HTTP 400 statt 500.
+- Neue Berechtigung `employees:manage` im Seed.
+
+### Frontend
+- `addSite` persistiert über `POST /sites`.
+- `addEmployee` persistiert über `POST /employees`.
+- `updateEmployee` persistiert über `PATCH /employees/:id`.
+- Fehlerpfade erzeugen keine lokale Scheinpersistenz, sondern eine Alert-Benachrichtigung.
+
+### Tests
+- Backend: **120/120 Tests, 7/7 Suiten**; neu: Objekt-/Mitarbeiteranlage, erneuter Login, Aktualisierung, Mandantentrennung.
+- Frontend: **12/12 Tests, 2/2 Dateien**; neu: `addSite`, `addEmployee`, `updateEmployee`.
+
+## 10.2 Aktualisierter Status
+
+| Bereich | Status |
+|---|---|
+| Kunden | Anlegen/Lesen persistiert; Ändern/Löschen offen |
+| Objekte | **Anlegen/Lesen/Ändern persistiert**; Archivieren/Löschen offen |
+| Mitarbeiter | **Anlegen/Lesen/Ändern persistiert**; Deaktivieren/Qualifikationen offen |
+| Schichten | weiterhin nur lokaler Zustand |
+| Wachbuch | Lesen persistiert; Schreiben über Outbox/Sync; Revisionen/Stage lokal |
+| Schlüssel | weiterhin nur lokaler Zustand |
+| Aufgaben | weiterhin nur lokaler Zustand |
+| Dokumente/SOPs/Alarme | keine Tabellen/Endpunkte |
+| Übergaben/Streifen | lokal |
+| Benutzer/Rechte | keine Verwaltungs-API |
+
+## 10.3 Verbleibende Arbeiten
+
+1. CRUD für Schichten, Schlüssel und Aufgaben (Tabellen vorhanden).
+2. Migrationen und Endpunkte für Dokumente, SOPs, Alarme und Notfallpläne.
+3. Offline-Outbox auf alle schreibenden Module ausweiten; Reconnect-Hydration.
+4. Revisionssichere Wachbuchkorrekturen und PDF-Export.
+5. Rollen-/Benutzerverwaltung und serverseitige Berechtigungstests für alle Module.
+6. Auth-Härtung (HttpOnly-Cookies, CSRF, Rate-Limiting).
+7. Serverseitige KI-Schnittstelle statt Browser-API-Key.
+8. Produktions-Proxy (Caddy) auf das TypeScript-Backend umstellen.
+9. E2E-Tests A–H und vollständige CI-Erweiterung (Linting, Security-Scan).
+10. Dokumentation der tatsächlich implementierten Funktionen.
+
+## 10.4 Vorläufige Bewertung (nicht final)
+
+| Kriterium | Note |
+|---|---|
+| Architektur | 6/10 |
+| Funktionalität | 4/10 |
+| Datenbank | 6/10 |
+| Mandantenfähigkeit | 7/10 |
+| Sicherheit | 5/10 |
+| Offlinefähigkeit | 5/10 |
+| Benutzerfreundlichkeit | 6/10 |
+| Testabdeckung | 6/10 |
+| Produktionsreife | 3/10 |
+
+**Gesamtstatus:** Die Integration ist über Kunden, Objekte, Mitarbeiter und Wachbuch (Lesen) hinausgewachsen, aber **weiterhin nicht vollständig**. Das Projekt ist noch kein produktionsreifes System im Sinne der Abnahmekriterien.
