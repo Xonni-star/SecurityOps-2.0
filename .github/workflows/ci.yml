@@ -1,6 +1,6 @@
 name: SecurityOps 2.0 CI
 
-# Vereinheitlichte Verifikation für Frontend (React/Vitest) und
+# Vereinheitlichte Verifikation für Root-Projekt, Frontend (React/Vitest) und
 # SecurityOps-Backend (Node/TypeScript, PostgreSQL 16 RLS).
 #
 # Benötigte Repository-Secrets:
@@ -8,7 +8,7 @@ name: SecurityOps 2.0 CI
 #   DATABASE_MIGRATION_URL   (optional, überschreibt die ephemere CI-Datenbank)
 #   DATABASE_URL             (optional, überschreibt die ephemere CI-Datenbank)
 #
-# Ohne DATABASE_*-Secrets nutzt die Pipeline den PostgreSQL-Service-Container
+# Ohne DATABASE_*-Secrets nutzen die Jobs den PostgreSQL-Service-Container
 # mit ausschließlich lokaler Trust-Authentifizierung. Es sind keine
 # Zugangsdaten im Workflow hinterlegt.
 
@@ -27,6 +27,76 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  root:
+    name: Root – npm ci, Strukturprüfung, Gesamtstart
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: securityops_v2
+          POSTGRES_USER: secops_admin
+          # Nur innerhalb des ephemeren CI-Containers; keine Zugangsdaten nötig.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      NODE_ENV: test
+      PORT: 8010
+      JWT_SECRET: ${{ secrets.JWT_SECRET }}
+      JWT_EXPIRES_IN: 8h
+      CORS_ORIGIN: http://localhost:3000
+      DATABASE_MIGRATION_URL: ${{ secrets.DATABASE_MIGRATION_URL || 'postgresql://secops_admin@127.0.0.1:5432/securityops_v2' }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL || 'postgresql://secops_app_user@127.0.0.1:5432/securityops_v2' }}
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Node.js einrichten
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            frontend/package-lock.json
+            frontend/backend/package-lock.json
+
+      - name: Node-/npm-Version protokollieren
+        run: node --version && npm --version
+
+      - name: Root-Abhängigkeiten installieren
+        run: npm ci
+
+      - name: Root-Abhängigkeitsbaum ausgeben
+        run: npm ls --depth=0
+
+      - name: Frontend-Abhängigkeiten installieren
+        run: npm ci --prefix frontend
+
+      - name: Backend-Abhängigkeiten installieren
+        run: npm ci --prefix frontend/backend
+
+      - name: Datenbankmigrationen (isolierte CI-Datenbank)
+        run: npm run migrate --prefix frontend/backend
+
+      - name: Testdaten anlegen
+        run: npm run seed --prefix frontend/backend
+
+      - name: Root-Struktur, Skriptziele und Proxy-Freiheit prüfen
+        run: node scripts/ci/verify-root.mjs
+
+      - name: Kontrollierter Gesamtstart (Frontend + Backend)
+        run: node scripts/ci/smoke-start.mjs
+
   frontend:
     name: Frontend – npm ci, Vitest, Produktions-Build
     runs-on: ubuntu-latest
