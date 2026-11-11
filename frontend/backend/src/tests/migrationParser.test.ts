@@ -3,6 +3,7 @@ import path from 'path';
 import {
   extractSchemaObjects,
   deriveExpectedSchemaObjects,
+  stripTypeModifiers,
   MigrationFile
 } from '../migrations/runner';
 
@@ -233,5 +234,28 @@ describe('SQL-Migrationsparser – lexikalische Härtung', () => {
       'public."MeinTyp"',
       'integer'
     ]);
+  });
+
+  test('17. Typmodifikatoren werden tokenbasiert entfernt', () => {
+    const cases: Array<[string, string]> = [
+      ['numeric(10,2)', 'numeric'],
+      ['varchar(255)', 'character varying'],
+      ['"MeinTyp"(10)', '"MeinTyp"'],
+      ['"MeinSchema"."MeinTyp"(10)', '"MeinSchema"."MeinTyp"'],
+      ['public."MeinTyp"(10)', 'public."MeinTyp"'],
+      ['numeric(10,2)[]', 'numeric[]'],
+      ['"MeinSchema"."MeinTyp"[]', '"MeinSchema"."MeinTyp"[]']
+    ];
+
+    for (const [input, expected] of cases) {
+      expect(stripTypeModifiers(input)).toBe(expected);
+    }
+  });
+
+  test('18. Verschachtelte und mehrteilige Typmodifikatoren', () => {
+    expect(stripTypeModifiers('geometry(Point,4326)')).toBe('geometry');
+    expect(stripTypeModifiers('timestamp(3) with time zone')).toBe('timestamp with time zone');
+    expect(stripTypeModifiers('character varying(10)')).toBe('character varying');
+    expect(stripTypeModifiers('numeric(10,2)[]')).toBe('numeric[]');
   });
 });

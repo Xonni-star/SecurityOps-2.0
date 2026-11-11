@@ -1091,12 +1091,68 @@ export function deriveExpectedSchemaObjects(migrations: MigrationFile[]): Expect
   return result;
 }
 
-function stripTypeModifiers(typeText: string): string {
-  const match = typeText.match(/^([^()]+)\(([^()]*)\)(.*)$/);
-  if (match && !match[1].trim().endsWith('"')) {
-    return `${match[1]}${match[3]}`.trim();
+const TYPE_ALIASES: Record<string, string> = {
+  int: 'integer',
+  int4: 'integer',
+  int2: 'smallint',
+  int8: 'bigint',
+  bool: 'boolean',
+  varchar: 'character varying',
+  char: 'character',
+  float4: 'real',
+  float8: 'double precision',
+  decimal: 'numeric',
+  timestamptz: 'timestamp with time zone',
+  timestamp: 'timestamp without time zone',
+  timetz: 'time with time zone',
+  time: 'time without time zone'
+};
+
+/**
+ * Entfernt Typmodifikatoren tokenbasiert, ohne gequotete Bezeichner,
+ * Schemaqualifikationen oder Array-Suffixe zu beschädigen.
+ *
+ * Beispiele:
+ *   numeric(10,2)                    -> numeric
+ *   varchar(255)                     -> character varying
+ *   "MeinTyp"(10)                    -> "MeinTyp"
+ *   "MeinSchema"."MeinTyp"(10)      -> "MeinSchema"."MeinTyp"
+ *   public."MeinTyp"(10)            -> public."MeinTyp"
+ *   numeric(10,2)[]                  -> numeric[]
+ *   "MeinSchema"."MeinTyp"[]        -> "MeinSchema"."MeinTyp"[]
+ */
+export function stripTypeModifiers(typeText: string): string {
+  const tokens = lexSql(typeText, 'Typnormalisierung');
+  const result: SqlToken[] = [];
+  let removed = false;
+
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens.at(i)!;
+
+    if (!removed && isPunct(token, '(')) {
+      let depth = 1;
+      let j = i + 1;
+
+      while (j < tokens.length && depth > 0) {
+        if (isPunct(tokens[j], '(')) depth++;
+        else if (isPunct(tokens[j], ')')) depth--;
+        j++;
+      }
+
+      if (depth !== 0) {
+        throw new Error('Typnormalisierung: nicht geschlossener Typmodifikator');
+      }
+
+      i = j - 1;
+      removed = true;
+      continue;
+    }
+
+    result.push(token);
   }
-  return typeText;
+
+  const normalized = tokensToTypeText(result);
+  return TYPE_ALIASES[normalized] ?? normalized;
 }
 
 interface ActualRelationRow {

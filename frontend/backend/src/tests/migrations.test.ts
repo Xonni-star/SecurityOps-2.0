@@ -1112,4 +1112,47 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/quoted_fn\(integer\)/);
   });
+
+  test('56. Typmodifikatoren bei quoted und schemaqualifizierten Typen werden korrekt verglichen', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir({
+      '005_typmods.sql': `
+        CREATE SCHEMA "MeinSchema";
+        CREATE TYPE "MeinSchema"."MeinTyp" AS ENUM ('a');
+        CREATE TYPE public."OeffentlicherTyp" AS ENUM ('b');
+        CREATE FUNCTION mod_fn(x numeric(10,2), y varchar(255))
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION quoted_mod_fn(x "MeinSchema"."MeinTyp", y public."OeffentlicherTyp")
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION array_mod_fn(x numeric(10,2)[], y integer[])
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_mod(x numeric(10,2))
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+        CREATE FUNCTION overload_mod(x integer)
+          RETURNS integer LANGUAGE sql AS 'SELECT 1';
+      `
+    });
+
+    const first = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(first.applied).toContain('005');
+
+    const second = await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: dir,
+      logger: noopLogger
+    });
+    expect(second.applied).toEqual([]);
+
+    await queryInDatabase(
+      db,
+      `CREATE FUNCTION mod_fn(x integer) RETURNS integer LANGUAGE sql AS 'SELECT 1'`
+    );
+
+    const message = await captureMigrationError(db, dir);
+    expect(message).toMatch(/mod_fn\(integer\)/);
+  });
 });
