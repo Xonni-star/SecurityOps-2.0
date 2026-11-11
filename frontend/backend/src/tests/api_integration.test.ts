@@ -1,5 +1,6 @@
 import request from 'supertest';
 import argon2 from 'argon2';
+import crypto from 'crypto';
 import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
 
@@ -14,6 +15,7 @@ let createdSiteId: string | undefined;
 let createdEmployeeId: string | undefined;
 let createdShiftId: string | undefined;
 let createdKeyId: string | undefined;
+let archivedCustomerSiteCode: string | undefined;
 let createdTaskId: string | undefined;
 const keyNumber = `API-KEY-${Date.now()}`;
 
@@ -56,11 +58,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (archivedCustomerSiteCode) await migrationPool.query('DELETE FROM sites WHERE site_code = $1', [archivedCustomerSiteCode]);
   await migrationPool.query('DELETE FROM tasks WHERE id = $1', [createdTaskId ?? null]);
   await migrationPool.query('DELETE FROM keys WHERE id = $1 OR key_number = $2', [createdKeyId ?? null, keyNumber]);
   await migrationPool.query('DELETE FROM shifts WHERE id = $1', [createdShiftId ?? null]);
   await migrationPool.query('DELETE FROM employees WHERE id = $1 OR personnel_number = $2', [createdEmployeeId ?? null, personnelNumber]);
   await migrationPool.query('DELETE FROM sites WHERE id = $1 OR site_code = $2', [createdSiteId ?? null, siteCode]);
+  await migrationPool.query('DELETE FROM clients WHERE client_number = ANY($1::text[])', [[`${clientNumber}-ARCH`, `${clientNumber}-OFF`]]);
   await migrationPool.query('DELETE FROM clients WHERE client_number = $1', [clientNumber]);
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = $1)', [
     BAVARIA_USER_EMAIL
@@ -120,6 +124,47 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
       (row) => row.client_number
     );
     expect(clientNumbers).not.toContain(clientNumber);
+  });
+
+  test('Kundenänderung ist revisionsgeschützt und Archivierung erhält verknüpfte Daten', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    const create = await request(app).post('/api/v1/customers').set('Authorization', `Bearer ${token}`).send({
+      clientNumber: `${clientNumber}-ARCH`, companyName: 'Archiv Test GmbH', contactPerson: 'Test Person', email: 'archiv@test.de',
+      phone: '+49 30 123', address: 'Testweg 2', contractStart: '2026-01-01', contractEnd: '2028-12-31'
+    });
+    expect(create.status).toBe(201);
+    const id = create.body.data.id as string;
+    archivedCustomerSiteCode = `ARCH-SITE-${Date.now()}`;
+    await migrationPool.query(`INSERT INTO sites (tenant_id, client_id, site_code, name, address) VALUES ($1, $2, $3, 'Verknüpfter Standort', 'Teststraße 9')`, ['11111111-1111-1111-1111-111111111111', id, archivedCustomerSiteCode]);
+    const update = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${token}`).send({ companyName: 'Aktualisiert GmbH', revisionVersion: 1 });
+    expect(update.status).toBe(200);
+    expect(update.body.data.revision_version).toBe(2);
+    const stale = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${token}`).send({ companyName: 'Veraltet', revisionVersion: 1 });
+    expect(stale.status).toBe(409);
+    const foreign = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${await login(BAVARIA_USER_EMAIL)}`).send({ companyName: 'Fremd', revisionVersion: 2 });
+    expect(foreign.status).toBe(404);
+    const archived = await request(app).post(`/api/v1/customers/${id}/archive`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 2 });
+    expect(archived.status).toBe(200);
+    expect(archived.body.data.archived_at).toBeTruthy();
+    const siteStillExists = await migrationPool.query('SELECT id FROM sites WHERE tenant_id=$1 AND client_id=$2 AND site_code=$3', ['11111111-1111-1111-1111-111111111111', id, archivedCustomerSiteCode]);
+    expect(siteStillExists.rows).toHaveLength(1);
+    const visible = await request(app).get('/api/v1/customers').set('Authorization', `Bearer ${token}`);
+    expect(visible.body.data.some((row: any) => row.id === id)).toBe(false);
+  });
+
+  test('Offline-Kundenerstellung ist mandantengebunden und bei Wiederholung idempotent', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    const mutationId = `client-offline-${Date.now()}`;
+    const payload = { id: crypto.randomUUID(), clientNumber: `${clientNumber}-OFF`, companyName: 'Offline Kunde GmbH', contactPerson: 'Offline Test', email: 'offline@test.de', phone: '+49 40 123', address: 'Offlineweg 1', contractStart: '2026-01-01', contractEnd: '2028-12-31', slaLevel: 'Gold (24/7 Vor-Ort)' };
+    const send = () => request(app).post('/api/v1/customers/sync').set('Authorization', `Bearer ${token}`).send({ mutations: [{ clientUuid: mutationId, action: 'CREATE', baseVersion: 1, payload }] });
+    const first = await send();
+    const second = await send();
+    expect(first.status).toBe(200);
+    expect(first.body.data[0].status).toBe('SYNCED');
+    expect(second.body.data).toEqual(first.body.data);
+    const stored = await migrationPool.query('SELECT id FROM clients WHERE tenant_id = $1 AND client_mutation_id = $2', ['11111111-1111-1111-1111-111111111111', mutationId]);
+    expect(stored.rows).toHaveLength(1);
+    await migrationPool.query('DELETE FROM clients WHERE id = $1', [payload.id]);
   });
 
   test('3. Objekte und Mitarbeiter werden mandantengetrennt aus PostgreSQL gelesen', async () => {

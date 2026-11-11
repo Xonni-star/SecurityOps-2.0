@@ -398,4 +398,14 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
       .send({});
     expect(logbookRes.status).toBe(403);
   });
+
+  test('14. Kundenänderung und Archivierung verlangen weiterhin Schreibberechtigung und Authentifizierung', async () => {
+    const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const update = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${testValidTokenA}`).send({ companyName: 'Nicht erlaubt', revisionVersion: 1 });
+    const archive = await request(app).post(`/api/v1/customers/${id}/archive`).set('Authorization', `Bearer ${testValidTokenA}`).send({ revisionVersion: 1 });
+    expect(update.status).toBe(403);
+    expect(archive.status).toBe(403);
+    const unauthenticated = await request(app).patch(`/api/v1/customers/${id}`).send({ companyName: 'Nicht erlaubt', revisionVersion: 1 });
+    expect(unauthenticated.status).toBe(401);
+  });
 });

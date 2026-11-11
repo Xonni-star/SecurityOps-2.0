@@ -95,6 +95,7 @@ export interface Client {
   slaLevel: 'Gold (24/7 Vor-Ort)' | 'Silber (Revierdienst)' | 'Bronze (Alarmverfolgung)';
   billingStatus: 'Regulär' | 'In Zahlungsverzug' | 'Neu';
   assignedSiteCount: number;
+  revisionVersion?: number;
 }
 
 export interface Checkpoint {

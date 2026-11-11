@@ -101,7 +101,8 @@ function mapClientRow(row: any, tenantId: string): Client {
     noticePeriodMonths: 3,
     slaLevel: (row.sla_level ?? row.slaLevel ?? 'Gold (24/7 Vor-Ort)') as unknown as Client['slaLevel'],
     billingStatus: (row.billing_status ?? row.billingStatus ?? 'Regulär') as unknown as Client['billingStatus'],
-    assignedSiteCount: asNumber(row.assigned_site_count, 0)
+    assignedSiteCount: asNumber(row.assigned_site_count, 0),
+    revisionVersion: asNumber(row.revision_version, 1)
   };
 }
 
@@ -343,6 +344,8 @@ interface SecurityOpsStore {
 
   // Actions
   addClient: (client: Omit<Client, 'id' | 'tenantId'>) => Promise<void>;
+  updateClient: (id: string, updates: Partial<Client>) => Promise<void>;
+  archiveClient: (id: string) => Promise<void>;
   addSite: (site: Omit<Site, 'id' | 'tenantId'>) => Promise<void>;
   addEmployee: (emp: Omit<Employee, 'id' | 'tenantId'>) => Promise<void>;
   updateEmployee: (id: string, updates: Partial<Employee>) => Promise<void>;
@@ -715,9 +718,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         return { success: 0, failed: 0, conflicts: 0 };
       }
 
-      const syncPayload = {
+      const makeSyncPayload = (items: typeof pendingItems) => ({
         deviceId: offlineVault.getDeviceId(),
-        mutations: pendingItems.map((p) => ({
+        mutations: items.map((p) => ({
           clientUuid: p.id,
           entityType: p.entityType,
           action: p.action,
@@ -725,11 +728,21 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           baseVersion: p.baseVersion,
           payload: p.payload
         }))
-      };
+      });
 
-      let serverResponse: any = null;
       try {
-        serverResponse = await apiClient.post('/sync/push', syncPayload);
+        for (const items of [pendingItems.filter((p) => p.entityType !== 'client'), pendingItems.filter((p) => p.entityType === 'client')]) {
+          if (!items.length) continue;
+          const path = items[0].entityType === 'client' ? '/customers/sync' : '/sync/push';
+          const serverResponse: any = await apiClient.post(path, makeSyncPayload(items));
+          const receipts = Array.isArray(serverResponse) ? serverResponse : serverResponse?.data;
+          if (!Array.isArray(receipts)) continue;
+          for (const receipt of receipts) {
+            if (receipt.status === 'SYNCED') { successCount++; await offlineVault.markSynced(receipt.clientUuid); }
+            else if (receipt.status === 'CONFLICT') { conflictCount++; await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', { conflictDetails: receipt.conflictData }); }
+            else { failedCount++; await offlineVault.updateMutationStatus(receipt.clientUuid, 'FAILED', { errorMessage: receipt.message || 'Server hat Mutation abgewiesen' }); }
+          }
+        }
       } catch (networkErr) {
         console.warn('[SYNC PUSH NETWORK FAILED] Outbox bleibt unversehrt:', networkErr);
         for (const item of pendingItems) {
@@ -740,25 +753,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         set({ isSyncing: false });
         isSyncRunningMutex = false;
         return { success: 0, failed: pendingItems.length, conflicts: 0 };
-      }
-
-      if (serverResponse && Array.isArray(serverResponse)) {
-        for (const receipt of serverResponse) {
-          if (receipt.status === 'SYNCED') {
-            successCount++;
-            await offlineVault.markSynced(receipt.clientUuid);
-          } else if (receipt.status === 'CONFLICT') {
-            conflictCount++;
-            await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', {
-              conflictDetails: receipt.conflictData
-            });
-          } else {
-            failedCount++;
-            await offlineVault.updateMutationStatus(receipt.clientUuid, 'FAILED', {
-              errorMessage: receipt.message || 'Server hat Mutation abgewiesen'
-            });
-          }
-        }
       }
 
       const remainingPending = await offlineVault.getPendingOutbox(currentTenantId);
@@ -1134,6 +1128,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   addClient: async (c) => {
     const { currentTenantId } = get();
 
+    if (!get().isOnline) {
+      const id = crypto.randomUUID();
+      await get().enqueueOfflineAction({ tenantId: currentTenantId, entityType: 'client' as any, action: 'CREATE', payload: { id, ...c }, baseVersion: 1 });
+      set((state) => ({ clients: [mapClientRow({ id, ...c, revision_version: 1 }, currentTenantId), ...state.clients] }));
+      return;
+    }
+
     try {
       const created = await apiClient.post<any>('/customers', {
         clientNumber: c.clientNumber,
@@ -1176,6 +1177,36 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         error?.message || 'Die API-Anfrage ist fehlgeschlagen. Es wurde nichts gespeichert.',
         'alert'
       );
+    }
+  },
+
+  updateClient: async (id, updates) => {
+    const client = get().clients.find((c) => c.id === id);
+    if (!client) return;
+    const revisionVersion = client.revisionVersion || 1;
+    try {
+      if (!get().isOnline) throw new Error('offline');
+      const saved = await apiClient.patch<any>(`/customers/${id}`, { ...updates, revisionVersion });
+      set((s) => ({ clients: s.clients.map((c) => c.id === id ? mapClientRow(saved, c.tenantId) : c) }));
+    } catch (error: any) {
+      if (get().isOnline) { get().addNotification('Kunde nicht gespeichert', error?.message || 'Änderung fehlgeschlagen.', 'alert'); return; }
+      await get().enqueueOfflineAction({ tenantId: client.tenantId, entityType: 'client' as any, action: 'UPDATE', payload: { id, ...updates }, baseVersion: revisionVersion });
+      set((s) => ({ clients: s.clients.map((c) => c.id === id ? { ...c, ...updates } : c) }));
+    }
+  },
+
+  archiveClient: async (id) => {
+    const client = get().clients.find((c) => c.id === id);
+    if (!client) return;
+    const revisionVersion = client.revisionVersion || 1;
+    try {
+      if (!get().isOnline) throw new Error('offline');
+      await apiClient.post(`/customers/${id}/archive`, { revisionVersion });
+      set((s) => ({ clients: s.clients.filter((c) => c.id !== id) }));
+    } catch (error: any) {
+      if (get().isOnline) { get().addNotification('Kunde nicht archiviert', error?.message || 'Archivierung fehlgeschlagen.', 'alert'); return; }
+      await get().enqueueOfflineAction({ tenantId: client.tenantId, entityType: 'client' as any, action: 'DELETE', payload: { id }, baseVersion: revisionVersion });
+      set((s) => ({ clients: s.clients.filter((c) => c.id !== id) }));
     }
   },
 

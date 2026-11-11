@@ -60,6 +60,9 @@ app.get('/api/v1/auth/me', authenticateJwt, authController.getMe);
 // Fachrouten (Alle mit RLS und granularer Berechtigungsprüfung geschützt)
 app.get('/api/v1/customers', authenticateJwt, requirePermission('customers:read'), clientController.listClients);
 app.post('/api/v1/customers', authenticateJwt, requirePermission('customers:create'), clientController.createClient);
+app.patch('/api/v1/customers/:id', authenticateJwt, requirePermission('customers:create'), clientController.updateClient);
+app.post('/api/v1/customers/:id/archive', authenticateJwt, requirePermission('customers:create'), clientController.archiveClient);
+app.post('/api/v1/customers/sync', authenticateJwt, clientController.syncClientMutations);
 
 app.get('/api/v1/sites', authenticateJwt, requirePermission('sites:read'), resourceController.listSites);
 app.post('/api/v1/sites', authenticateJwt, requirePermission('sites:create'), resourceController.createSite);

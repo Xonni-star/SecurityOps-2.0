@@ -110,11 +110,11 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005']);
     expect(result.baselined).toEqual([]);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005']);
     expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
     expect(await tableExists(db, 'sync_conflict_resolution_receipts')).toBe(true);
   });
@@ -134,7 +134,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(second.applied).toEqual([]);
     expect(second.baselined).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005']);
 
     const after = await historyRows(db);
     expect(after).toEqual(before);
@@ -146,7 +146,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
 
-    fs.writeFileSync(path.join(dir, '005_neue_marker_tabelle.sql'), 'CREATE TABLE migration_marker_005 (id INT);\n');
+    fs.writeFileSync(path.join(dir, '006_neue_marker_tabelle.sql'), 'CREATE TABLE migration_marker_006 (id INT);\n');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -154,17 +154,17 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(second.applied).toEqual(['005']);
-    expect(await tableExists(db, 'migration_marker_005')).toBe(true);
+    expect(second.applied).toEqual(['006']);
+    expect(await tableExists(db, 'migration_marker_006')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006']);
   });
 
   test('4. Fehlerhafte Migration wird nicht registriert und zurückgerollt', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_fehlerhaft.sql': 'CREATE TABLE migration_failure_marker (id INT);\nSELECT * FROM tabelle_die_nicht_existiert;\n'
+      '006_fehlerhaft.sql': 'CREATE TABLE migration_failure_marker (id INT);\nSELECT * FROM tabelle_die_nicht_existiert;\n'
     });
 
     await expect(
@@ -172,7 +172,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     ).rejects.toThrow(/fehlgeschlagen und wurde zurückgerollt/);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005']);
     expect(await tableExists(db, 'migration_failure_marker')).toBe(false);
   });
 
@@ -193,7 +193,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('6. Gleichzeitige Runner werden serialisiert und wenden jede Migration einmal an', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_langsam.sql': 'SELECT pg_sleep(1);\nCREATE TABLE concurrency_marker (id INT);\n'
+      '006_langsam.sql': 'SELECT pg_sleep(1);\nCREATE TABLE concurrency_marker (id INT);\n'
     });
 
     const [first, second] = await Promise.all([
@@ -201,18 +201,18 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger })
     ]);
 
-    const appliedFive = [first, second].filter((result) => result.applied.includes('005'));
-    expect(appliedFive).toHaveLength(1);
+    const appliedSix = [first, second].filter((result) => result.applied.includes('006'));
+    expect(appliedSix).toHaveLength(1);
 
     const rows = await queryInDatabase<{ count: string }>(
       db,
-      `SELECT COUNT(*)::text AS count FROM schema_migrations WHERE version = '005'`
+      `SELECT COUNT(*)::text AS count FROM schema_migrations WHERE version = '006'`
     );
     expect(rows[0].count).toBe('1');
     expect(await tableExists(db, 'concurrency_marker')).toBe(true);
   });
 
-  test('7. Bestehende Datenbank mit 001–004 wird als Baseline übernommen', async () => {
+  test('7. Bestehende Datenbank mit 001–005 wird als Baseline übernommen', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
 
@@ -231,14 +231,14 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual([]);
+    expect(result.applied).toEqual(['005']);
     expect(result.baselined).toEqual(['001', '002', '003', '004']);
 
     const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
     expect(tenants.some((row) => row.name === 'Baseline-Test')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005']);
   });
 
   test('8. Unvollständige Baseline führt zu sicherem Abbruch', async () => {
@@ -258,8 +258,8 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
   test('9. Doppelte und ungültige Versionskennungen werden erkannt', async () => {
     const duplicateDir = makeMigrationsDir({
-      '005_erste.sql': 'CREATE TABLE dup_a (id INT);',
-      '005_zweite.sql': 'CREATE TABLE dup_b (id INT);'
+      '006_erste.sql': 'CREATE TABLE dup_a (id INT);',
+      '006_zweite.sql': 'CREATE TABLE dup_b (id INT);'
     });
 
     await expect(
@@ -473,9 +473,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005']);
     expect(result.baselined).toEqual([]);
-    expect((await historyRows(db))).toHaveLength(4);
+    expect((await historyRows(db))).toHaveLength(5);
   });
 
   test('26. Fremde Tabelle verhindert die Einstufung als leere Datenbank', async () => {
@@ -695,7 +695,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(result.applied).toEqual([]);
     expect(result.baselined).toEqual([]);
-    expect(result.skipped).toEqual(['001', '002', '003', '004']);
+    expect(result.skipped).toEqual(['001', '002', '003', '004', '005']);
   });
 
   test('35. Zusätzlicher Composite Type in gültiger Baseline wird erkannt', async () => {
@@ -715,7 +715,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       db,
       `SELECT COUNT(*)::text AS count FROM schema_migrations`
     );
-    expect(history[0].count).toBe('4');
+    expect(history[0].count).toBe('5');
   });
 
   test('36. Zusätzlicher Range Type in gültiger Baseline wird erkannt', async () => {
@@ -798,7 +798,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     });
 
     expect(result.applied).toEqual([]);
-    expect(result.skipped).toEqual(['001', '002', '003', '004']);
+    expect(result.skipped).toEqual(['001', '002', '003', '004', '005']);
   });
 
   test('41. Zusätzliche Tabelle in gültiger Baseline wird erkannt', async () => {
@@ -807,7 +807,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremde_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(4);
+    expect(await historyRows(db)).toHaveLength(5);
   });
 
   test('42. Zusätzliche View in gültiger Baseline wird erkannt', async () => {
@@ -816,7 +816,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: View "fremde_view"/);
-    expect(await historyRows(db)).toHaveLength(4);
+    expect(await historyRows(db)).toHaveLength(5);
   });
 
   test('43. Zusätzliche Sequenz in gültiger Baseline wird erkannt', async () => {
@@ -825,7 +825,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Sequenz "fremde_sequenz"/);
-    expect(await historyRows(db)).toHaveLength(4);
+    expect(await historyRows(db)).toHaveLength(5);
   });
 
   test('44. Zusätzliche Funktion in gültiger Baseline wird erkannt', async () => {
@@ -834,7 +834,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Funktion\/Prozedur "fremde_funktion"/);
-    expect(await historyRows(db)).toHaveLength(4);
+    expect(await historyRows(db)).toHaveLength(5);
   });
 
   test('45. Daten und Migrationseinträge bleiben nach abgelehnter Baseline unverändert', async () => {
@@ -865,16 +865,16 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(after).toEqual(before);
   });
 
-  test('46. Gültige Datenbank mit zusätzlicher Migration 005 wird akzeptiert', async () => {
+  test('46. Gültige Datenbank mit zusätzlicher Migration 006 wird akzeptiert', async () => {
     const db = await createTestDatabase();
-    const dir = makeMigrationsDir({ '005_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
+    const dir = makeMigrationsDir({ '006_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
 
     const first = await runMigrations({
       connectionString: withDatabaseName(db),
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toEqual(['001', '002', '003', '004', '005']);
+    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006']);
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -882,12 +882,12 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006']);
   });
 
   test('47. Fremdes Objekt bei Migration oberhalb 004 wird erkannt', async () => {
     const db = await createTestDatabase();
-    const dir = makeMigrationsDir({ '005_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
+    const dir = makeMigrationsDir({ '006_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
 
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
     await queryInDatabase(db, 'CREATE TABLE fremd_tabelle (id INT)');
@@ -895,7 +895,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(5);
+    expect(await historyRows(db)).toHaveLength(6);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {
@@ -921,7 +921,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
   test('50. Daten und Migrationseinträge bleiben bei Objektabweichung unverändert', async () => {
     const db = await createTestDatabase();
-    const dir = makeMigrationsDir({ '005_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
+    const dir = makeMigrationsDir({ '006_neue_tabelle.sql': 'CREATE TABLE neue_tabelle (id INT);' });
 
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
     await queryInDatabase(
@@ -949,7 +949,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('51. Migration mit Kommentarzeichen in Zeichenketten wird korrekt erkannt', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_kommentar.sql': `CREATE TABLE kommentar_tabelle (id INT, note TEXT DEFAULT '-- kein Kommentar /* auch nicht */');`
+      '006_kommentar.sql': `CREATE TABLE kommentar_tabelle (id INT, note TEXT DEFAULT '-- kein Kommentar /* auch nicht */');`
     });
 
     const first = await runMigrations({
@@ -957,7 +957,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -971,7 +971,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('52. Dollar-quoted Funktionskörper mit Fake-DDL wird nicht als Objekt erkannt', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_funktion.sql': `
+      '006_funktion.sql': `
         CREATE FUNCTION body_fn() RETURNS void LANGUAGE plpgsql AS $body$
         BEGIN
           -- CREATE TABLE fake_table (id int);
@@ -987,7 +987,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1009,7 +1009,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('53. Gequotete und schemaqualifizierte Objekte werden korrekt zugeordnet', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_quoted.sql': `
+      '006_quoted.sql': `
         CREATE SCHEMA IF NOT EXISTS anderesschema;
         CREATE TABLE public."NeueTabelle" (id INT);
         CREATE TABLE "Tasks" (id INT);
@@ -1022,7 +1022,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1039,7 +1039,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('54. DEFAULT-, VARIADIC- und benutzerdefinierte Parametertypen werden korrekt verglichen', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_parameter.sql': `
+      '006_parameter.sql': `
         CREATE TYPE param_typ AS ENUM ('a');
         CREATE FUNCTION def_fn(x integer DEFAULT 5, y integer DEFAULT 6)
           RETURNS integer LANGUAGE sql AS 'SELECT 1';
@@ -1055,7 +1055,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1076,7 +1076,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('55. Gequotete und schemaqualifizierte Parametertypen werden korrekt verglichen', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_quoted_params.sql': `
+      '006_quoted_params.sql': `
         CREATE SCHEMA "MeinSchema";
         CREATE TYPE "MeinSchema"."MeinTyp" AS ENUM ('a');
         CREATE TYPE public."OeffentlicherTyp" AS ENUM ('b');
@@ -1102,7 +1102,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1123,7 +1123,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('56. Typmodifikatoren bei quoted und schemaqualifizierten Typen werden korrekt verglichen', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_typmods.sql': `
+      '006_typmods.sql': `
         CREATE SCHEMA "MeinSchema";
         CREATE TYPE "MeinSchema"."MeinTyp" AS ENUM ('a');
         CREATE TYPE public."OeffentlicherTyp" AS ENUM ('b');
@@ -1145,7 +1145,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1166,7 +1166,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('57. Array-Typ-Aliase und mehrdimensionale Arrays werden korrekt verglichen', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_array_aliases.sql': `
+      '006_array_aliases.sql': `
         CREATE SCHEMA "MeinSchema";
         CREATE TYPE "MeinSchema"."MeinTyp" AS ENUM ('a');
         CREATE FUNCTION alias_array_fn(x int[], y varchar(255)[])
@@ -1187,7 +1187,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1208,7 +1208,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('58. Vollständige Alias-Normalisierung wird von PostgreSQL 16 bestätigt', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir({
-      '005_aliases.sql': `
+      '006_aliases.sql': `
         CREATE FUNCTION alias_canonical_fn(
           a int, b integer, c int2, d smallint, e int8, f bigint,
           g float(24), h real, i float, j double precision,
@@ -1227,7 +1227,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toContain('005');
+    expect(first.applied).toContain('006');
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),

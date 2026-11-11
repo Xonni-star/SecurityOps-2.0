@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
-import { Building2, Plus, FileCheck, Shield, Phone, Mail, MapPin } from 'lucide-react';
+import { Building2, Plus, FileCheck, Shield, Phone, Mail, MapPin, Pencil, Archive } from 'lucide-react';
 import { useSecurityStore } from '../store';
 
 export const ClientsModule: React.FC = () => {
-  const { clients, addClient } = useSecurityStore();
+  const { clients, addClient, updateClient, archiveClient } = useSecurityStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingClient, setEditingClient] = useState<(typeof clients)[number] | null>(null);
 
   // Form states
   const [companyName, setCompanyName] = useState('');
@@ -14,8 +15,14 @@ export const ClientsModule: React.FC = () => {
   const [address, setAddress] = useState('');
   const [slaLevel, setSlaLevel] = useState<'Gold (24/7 Vor-Ort)' | 'Silber (Revierdienst)' | 'Bronze (Alarmverfolgung)'>('Gold (24/7 Vor-Ort)');
 
-  const handleCreate = (e: React.FormEvent) => {
+  const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (editingClient) {
+      await updateClient(editingClient.id, { companyName, contactPerson, email, phone, address, slaLevel });
+      setEditingClient(null);
+      setIsModalOpen(false);
+      return;
+    }
     addClient({
       clientNumber: `KUN-2025-${Math.floor(100 + Math.random() * 900)}`,
       companyName,
@@ -90,6 +97,16 @@ export const ClientsModule: React.FC = () => {
               <span className="text-[11px] font-medium text-blue-400">{c.slaLevel}</span>
               <span className="text-slate-500 text-[10px]">Vertrag bis: {c.contractEnd}</span>
             </div>
+            <div className="mt-3 flex gap-2">
+              <button type="button" className="text-xs text-blue-300 hover:text-white flex items-center gap-1" onClick={() => {
+                setEditingClient(c);
+                setCompanyName(c.companyName); setContactPerson(c.contactPerson); setEmail(c.email); setPhone(c.phone); setAddress(c.address); setSlaLevel(c.slaLevel);
+                setIsModalOpen(true);
+              }}><Pencil className="w-3.5 h-3.5" /> Bearbeiten</button>
+              <button type="button" className="text-xs text-amber-300 hover:text-white flex items-center gap-1 ml-auto" onClick={() => {
+                if (window.confirm(`„${c.companyName}“ archivieren? Zugeordnete Objekte bleiben erhalten.`)) void archiveClient(c.id);
+              }}><Archive className="w-3.5 h-3.5" /> Archivieren</button>
+            </div>
           </div>
         ))}
       </div>
@@ -98,8 +115,8 @@ export const ClientsModule: React.FC = () => {
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-[#0f172a] border border-slate-700 rounded-2xl max-w-lg w-full p-6 shadow-2xl">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-              <h3 className="text-base font-bold text-white">Neuen Kunden erfassen</h3>
-              <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-white">✕</button>
+              <h3 className="text-base font-bold text-white">{editingClient ? 'Kundendaten bearbeiten' : 'Neuen Kunden erfassen'}</h3>
+              <button onClick={() => { setIsModalOpen(false); setEditingClient(null); }} className="text-slate-400 hover:text-white">✕</button>
             </div>
 
             <form onSubmit={handleCreate} className="space-y-3 mt-4 text-xs">
@@ -174,7 +191,7 @@ export const ClientsModule: React.FC = () => {
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => { setIsModalOpen(false); setEditingClient(null); }}
                   className="px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
                 >
                   Abbrechen
@@ -183,7 +200,7 @@ export const ClientsModule: React.FC = () => {
                   type="submit"
                   className="px-5 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold"
                 >
-                  Kunde anlegen
+                  {editingClient ? 'Änderungen speichern' : 'Kunde anlegen'}
                 </button>
               </div>
             </form>

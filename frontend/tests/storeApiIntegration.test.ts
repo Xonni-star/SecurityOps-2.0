@@ -131,6 +131,7 @@ beforeEach(() => {
     isAuthenticating: false,
     authError: null,
     isLoadingData: false,
+    isOnline: true,
     dataLoadError: null
   });
 });
@@ -277,6 +278,28 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(state.clients).toHaveLength(0);
     expect(state.notifications[0].title).toBe('Kunde nicht gespeichert');
     expect(state.notifications[0].type).toBe('alert');
+  });
+
+  test('Kundenbearbeitung und Archivierung verwenden die persistente API mit Revisionsstand', async () => {
+    mockReadEndpoints();
+    await useSecurityStore.getState().loadTenantData();
+    mockedApi.patch.mockResolvedValueOnce({ ...customerRow, company_name: 'Geändert GmbH', revision_version: 2 });
+    await useSecurityStore.getState().updateClient(customerRow.id, { companyName: 'Geändert GmbH' });
+    expect(mockedApi.patch).toHaveBeenCalledWith(`/customers/${customerRow.id}`, expect.objectContaining({ companyName: 'Geändert GmbH', revisionVersion: 1 }));
+    expect(useSecurityStore.getState().clients[0].companyName).toBe('Geändert GmbH');
+
+    mockedApi.post.mockResolvedValueOnce({ id: customerRow.id, archived_at: new Date().toISOString(), revision_version: 3 });
+    await useSecurityStore.getState().archiveClient(customerRow.id);
+    expect(mockedApi.post).toHaveBeenCalledWith(`/customers/${customerRow.id}/archive`, { revisionVersion: 2 });
+    expect(useSecurityStore.getState().clients).toHaveLength(0);
+  });
+
+  test('Offline-Kundenänderung wird mandantengebunden in die Outbox übernommen', async () => {
+    const mutationWrite = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
+    useSecurityStore.setState({ clients: [{ ...customerRow, tenantId: 'tenant-frankfurt', clientNumber: customerRow.client_number, companyName: customerRow.company_name, contactPerson: customerRow.contact_person, contractStart: customerRow.contract_start, contractEnd: customerRow.contract_end, contractAutoRenew: true, noticePeriodMonths: 3, slaLevel: customerRow.sla_level as any, billingStatus: customerRow.billing_status as any, assignedSiteCount: 0 } as any], isOnline: false, currentTenantId: 'tenant-frankfurt' });
+    await useSecurityStore.getState().updateClient(customerRow.id, { companyName: 'Offline GmbH' });
+    expect(mutationWrite).toHaveBeenCalledWith(expect.objectContaining({ entityType: 'client', action: 'UPDATE', tenantId: 'tenant-frankfurt', baseVersion: 1 }));
+    expect(useSecurityStore.getState().clients[0].companyName).toBe('Offline GmbH');
   });
 
   test('4. Login setzt Token und lädt Mandantendaten aus PostgreSQL', async () => {
