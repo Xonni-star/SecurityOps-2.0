@@ -3,6 +3,14 @@ import crypto from 'crypto';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 
+export class ConflictError extends Error {
+  statusCode = 409;
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
 const syncMutationItemSchema = z.object({
   clientUuid: z.string().min(8).max(64).regex(/^[a-zA-Z0-9_\-]+$/, 'clientUuid muss ein valider Bezeichner sein.'),
   entityType: z.enum(['guardbook', 'shift', 'task', 'key', 'patrol', 'handover']),
@@ -677,10 +685,10 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 /**
  * POST /api/v1/sync/conflicts/resolve
  * Reale Server-Auflösung von Synchronisationskonflikten:
- * - Liefert ResponseEnvelope mit data: { applied: boolean, serverState: any, clientUuid: string, entityType: string, strategy: string }
+ * - Liefert standardisiertes ResponseEnvelope mit data: { applied: boolean, serverState: any, clientUuid: string, entityType: string, strategy: string }
  * - USE_LOCAL: Übernimmt den lokalen Stand atomar nur nach Überprüfung von expectedVersion
  * - USE_SERVER: Liefert den tatsächlichen, vollständigen Serverstand zurück
- * - Revisionssichere Protokollierung in audit_logs.
+ * - Bei Versionsabweichung wird HTTP 409 Conflict geworfen (statt HTTP 500)
  */
 export async function resolveSyncConflict(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -701,7 +709,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         );
 
         if (taskCheck.rows.length === 0) {
-          throw new Error('Aufgabe für Konfliktauflösung nicht gefunden oder fremder Mandant.');
+          throw new ConflictError('Aufgabe für Konfliktauflösung nicht gefunden oder fremder Mandant.');
         }
 
         const currentTask = taskCheck.rows[0];
@@ -728,7 +736,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           );
 
           if (updRes.rows.length === 0) {
-            throw new Error(`Versionskonflikt: Server-Version (${currentTask.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+            throw new ConflictError(`Versionskonflikt: Server-Version (${currentTask.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
           }
 
           actualServerData = updRes.rows[0];
@@ -748,7 +756,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         );
 
         if (shiftCheck.rows.length === 0) {
-          throw new Error('Schicht für Konfliktauflösung nicht gefunden oder fremder Mandant.');
+          throw new ConflictError('Schicht für Konfliktauflösung nicht gefunden oder fremder Mandant.');
         }
 
         const currentShift = shiftCheck.rows[0];
@@ -773,7 +781,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           );
 
           if (updRes.rows.length === 0) {
-            throw new Error(`Versionskonflikt: Server-Version (${currentShift.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+            throw new ConflictError(`Versionskonflikt: Server-Version (${currentShift.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
           }
 
           actualServerData = updRes.rows[0];
@@ -793,7 +801,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         );
 
         if (keyCheck.rows.length === 0) {
-          throw new Error('Schlüssel für Konfliktauflösung nicht gefunden oder fremder Mandant.');
+          throw new ConflictError('Schlüssel für Konfliktauflösung nicht gefunden oder fremder Mandant.');
         }
 
         const currentKey = keyCheck.rows[0];
@@ -820,7 +828,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           );
 
           if (updRes.rows.length === 0) {
-            throw new Error(`Versionskonflikt: Server-Version (${currentKey.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+            throw new ConflictError(`Versionskonflikt: Server-Version (${currentKey.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
           }
 
           actualServerData = updRes.rows[0];
@@ -840,7 +848,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         );
 
         if (gbCheck.rows.length === 0) {
-          throw new Error('Wachbucheintrag nicht gefunden.');
+          throw new ConflictError('Wachbucheintrag nicht gefunden.');
         }
 
         const currentGb = gbCheck.rows[0];
@@ -871,7 +879,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           updated = true;
         }
       } else {
-        throw new Error(`Konfliktstrategie für Typ '${body.entityType}' nicht unterstützt.`);
+        throw new ConflictError(`Konfliktstrategie für Typ '${body.entityType}' nicht unterstützt.`);
       }
 
       // Revisionssichere Protokollierung der Konfliktentscheidung
