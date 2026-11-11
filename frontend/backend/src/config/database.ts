@@ -25,9 +25,41 @@ export async function withTenantTransaction<T>(
   try {
     await client.query('BEGIN');
     // Setzen der Session-Variable für PostgreSQL Row-Level-Security (RLS).
-    // Der dritte Parameter 'true' bewirkt, dass die Einstellung auf die aktuelle Transaktion beschränkt ist.
+    // Der dritte Parameter 'true' bewirkt, dass die Einstellung strikt auf die aktuelle Transaktion beschränkt ist.
     await client.query("SELECT set_config('app.current_tenant', $1, true)", [tenantId]);
 
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rbErr) {
+      console.error('[POSTGRES ROLLBACK FEHLER]', rbErr);
+    }
+    throw error;
+  } finally {
+    // Session-Variable vorsorglich vor Rückgabe an den Pool zurücksetzen
+    try {
+      await client.query("SELECT set_config('app.current_tenant', '', false)");
+    } catch {
+      // Ignorieren falls Verbindung bereits beendet
+    }
+    client.release();
+  }
+}
+
+/**
+ * Führt eine isolierte Transaktion OHNE Mandantenkontext aus (z. B. für Login, System-Bootstrap).
+ * Hierbei greifen die RLS-Policies und blockieren mandantenspezifische Lese-/Schreibzugriffe!
+ */
+export async function withSystemTransaction<T>(
+  callback: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.current_tenant', '', true)");
     const result = await callback(client);
     await client.query('COMMIT');
     return result;
@@ -44,7 +76,7 @@ export async function withTenantTransaction<T>(
 }
 
 /**
- * Parametrisierte Standardabfrage für systemweite oder unbeschränkte Leseoperationen (z. B. Authentifizierung)
+ * Parametrisierte Standardabfrage
  */
 export async function query<R extends QueryResultRow = any>(
   text: string,

@@ -1,9 +1,16 @@
 -- ==============================================================================
--- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (PHASE 1)
--- Erstellt alle Kernbereiche mit Composite Foreign Keys & RLS
+-- SECURITYOPS 2.0: POSTGRESQL 16+ ENTERPRISE SCHEMA (PHASE 1 KORRIGIERT)
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+-- Erstelle separaten, unprivilegierten Anwendungsbenutzer falls nicht existent
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'secops_app_user') THEN
+        CREATE ROLE secops_app_user WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEROLE NOCREATEDB;
+    END IF;
+END $$;
 
 -- 1. MANDANTEN & SYSTEM
 CREATE TABLE IF NOT EXISTS tenants (
@@ -28,6 +35,8 @@ CREATE TABLE IF NOT EXISTS users (
     phone VARCHAR(50),
     is_active BOOLEAN NOT NULL DEFAULT true,
     is_superadmin BOOLEAN NOT NULL DEFAULT false,
+    failed_login_attempts INT NOT NULL DEFAULT 0,
+    locked_until TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -65,7 +74,7 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    token_hash VARCHAR(64) NOT NULL,
+    token_hash VARCHAR(64) UNIQUE NOT NULL,
     device_name VARCHAR(150),
     ip_address VARCHAR(45),
     expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
@@ -73,7 +82,7 @@ CREATE TABLE IF NOT EXISTS user_sessions (
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- 2. KUNDEN UND OBJEKTE (MIT COMPOSITE FOREIGN KEYS)
+-- 2. KUNDEN UND OBJEKTE (MIT COMPOSITE FOREIGN KEYS ZUR MANDANTENTRENNUNG)
 CREATE TABLE IF NOT EXISTS clients (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -150,7 +159,7 @@ CREATE TABLE IF NOT EXISTS employee_qualifications (
         REFERENCES employees(id, tenant_id) ON DELETE CASCADE
 );
 
--- 4. DIENSTPLANUNG (RESTRICT verhindert Inkonsistenzen bei Fremdschlüsseln)
+-- 4. DIENSTPLANUNG
 CREATE TABLE IF NOT EXISTS shifts (
     id UUID DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
@@ -258,8 +267,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 
 -- ==============================================================================
--- POSTGRESQL ROW-LEVEL SECURITY (RLS) AKTIVIERUNG
--- Erzwingt FORCE ROW LEVEL SECURITY auf allen mandantenspezifischen Tabellen
+-- POSTGRESQL ROW-LEVEL SECURITY (RLS) AKTIVIERUNG & POLICY DEFINITIONEN
 -- ==============================================================================
 
 DO $$
@@ -279,20 +287,37 @@ DECLARE
     ];
 BEGIN
     FOREACH tbl IN ARRAY rls_tables LOOP
+        -- RLS aktivieren und zwingend auch für Tabellenbesitzer erzwingen
         EXECUTE format('ALTER TABLE %I ENABLE ROW LEVEL SECURITY;', tbl);
         EXECUTE format('ALTER TABLE %I FORCE ROW LEVEL SECURITY;', tbl);
         
-        -- Droppen falls bereits vorhanden
+        -- Alte Policies entfernen
+        EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_permissive ON %I;', tbl);
         EXECUTE format('DROP POLICY IF EXISTS tenant_isolation_policy ON %I;', tbl);
         
-        -- Strikte Mandanten-Isolierungs-Policy:
-        -- Gibt ausschließlich Datensätze frei, die dem aktuellen app.current_tenant entsprechen
+        -- Strikte Mandanten-Isolierung:
+        -- Gibt ausschließlich Datensätze frei, wenn app.current_tenant exakt gesetzt ist
+        -- und mit der tenant_id des Datensatzes übereinstimmt.
+        -- Ohne gesetzten Mandantenkontext (NULL/leer) liefert USING false und WITH CHECK false!
         EXECUTE format('
-            CREATE POLICY tenant_isolation_policy ON %I
-                AS RESTRICTIVE
+            CREATE POLICY tenant_isolation_permissive ON %I
+                AS PERMISSIVE
                 FOR ALL
-                USING (tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')::uuid)
-                WITH CHECK (tenant_id = NULLIF(current_setting(''app.current_tenant'', true), '''')::uuid);
+                TO PUBLIC
+                USING (
+                    current_setting(''app.current_tenant'', true) IS NOT NULL 
+                    AND current_setting(''app.current_tenant'', true) != ''''
+                    AND tenant_id = current_setting(''app.current_tenant'', true)::uuid
+                )
+                WITH CHECK (
+                    current_setting(''app.current_tenant'', true) IS NOT NULL 
+                    AND current_setting(''app.current_tenant'', true) != ''''
+                    AND tenant_id = current_setting(''app.current_tenant'', true)::uuid
+                );
         ', tbl);
     END LOOP;
 END $$;
+
+-- Rechte an unprivilegierten Benutzer vergeben
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO secops_app_user;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO secops_app_user;

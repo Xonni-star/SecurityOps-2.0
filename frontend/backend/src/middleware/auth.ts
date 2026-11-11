@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { env } from '../config/env';
+import { query } from '../config/database';
 
 export interface AuthenticatedUser {
   userId: string;
@@ -18,14 +20,7 @@ declare global {
   }
 }
 
-// In-Memory Token-Widerrufsliste (im Cluster: Redis oder PostgreSQL user_sessions)
-const revokedTokens = new Set<string>();
-
-export function revokeToken(token: string): void {
-  revokedTokens.add(token);
-}
-
-export function authenticateJwt(req: Request, res: Response, next: NextFunction): void {
+export async function authenticateJwt(req: Request, res: Response, next: NextFunction): Promise<void> {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     res.status(401).json({
@@ -37,16 +32,34 @@ export function authenticateJwt(req: Request, res: Response, next: NextFunction)
 
   const token = authHeader.split(' ')[1];
 
-  if (revokedTokens.has(token)) {
-    res.status(401).json({
-      success: false,
-      message: 'Sitzung wurde widerrufen (Token Blacklist).'
-    });
-    return;
-  }
-
   try {
     const payload = jwt.verify(token, env.JWT_SECRET) as any;
+
+    // Token-Hash zur Überprüfung in user_sessions (datenbankgestützter Widerruf)
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+
+    const sessionRes = await query(
+      `SELECT id, revoked, expires_at 
+       FROM user_sessions 
+       WHERE token_hash = $1 AND user_id = $2 AND tenant_id = $3`,
+      [tokenHash, payload.sub, payload.tenantId]
+    );
+
+    if (sessionRes.rows.length === 0 || sessionRes.rows[0].revoked) {
+      res.status(401).json({
+        success: false,
+        message: 'Sitzung ist ungültig oder wurde widerrufen.'
+      });
+      return;
+    }
+
+    if (new Date(sessionRes.rows[0].expires_at) < new Date()) {
+      res.status(401).json({
+        success: false,
+        message: 'Sitzung ist abgelaufen.'
+      });
+      return;
+    }
 
     // SICHERHEITSPRINZIP:
     // Der Mandantenkontext (tenantId) wird niemals aus einem vom Browser übermittelten
@@ -76,8 +89,9 @@ export function requirePermission(permissionCode: string) {
     }
 
     const { role, permissions } = req.user;
-    // Systemadministrator besitzt vollen Zugriff
-    if (role === 'Systemadministrator' || permissions.includes(permissionCode) || permissions.includes('*')) {
+
+    // Nur der Systemadministrator oder Träger der expliziten Berechtigung haben Zugriff
+    if (role === 'Systemadministrator' || permissions.includes(permissionCode)) {
       next();
       return;
     }

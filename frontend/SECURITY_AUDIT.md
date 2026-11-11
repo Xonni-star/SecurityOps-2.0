@@ -1,20 +1,20 @@
-# SecurityOps 2.0 - Phase 7: Sicherheits-Audit & Härtungsbericht
+# SecurityOps 2.0 - Phase 1: Korrigierter Sicherheits-Audit & Härtungsbericht
 
-## 1. Priorisierte Schwachstellenanalyse & Behebungen
+## 1. Behobene Sicherheitsprobleme
 
-| ID | Schweregrad | Bereich | Befund & Risiko | Umgesetzte Härtungsmaßnahme | Status |
-|---|---|---|---|---|---|
-| **SEC-01** | **KRITISCH** | Multi-Tenancy / IDOR | Gefahr der Manipulation von `tenant_id` im Request-Body | Serverseitige Ermittlung der `tenant_id` ausschließlich aus signiertem JWT Token; PostgreSQL RLS Policies (`app.current_tenant`) blockieren Cross-Tenant Zugriff physisch auf DB-Ebene. | **BEHOBEN** |
-| **SEC-02** | **KRITISCH** | Authentifizierung | Anfälligkeit für Wörterbuch- und Credential-Stuffing-Angriffe | Argon2id KDF mit 310.000 SHA512 Iterationen, Zufallssalt und automatischer Account-Sperre nach 5 Fehlversuchen (15 Min. Lockout). | **BEHOBEN** |
-| **SEC-03** | **HOCH** | Dateispeicher / DMS | Path-Traversal & gefährliche Upload-Endungen (`../../../etc`) | `sanitize_filename` filtert relative Pfadsequenzen; Whitelist beschränkt auf `.pdf`, `.png`, `.jpg`, `.jpeg`, `.docx` mit 15 MB / 5 MB Limits. | **BEHOBEN** |
-| **SEC-04** | **HOCH** | Session Lifecycle | Verlorene oder kompromittierte Geräte behalten Zugriff | Server- und clientseitiges Token-Revocation-System mit zentraler Session-Widerrufs-UI (`revokeSession`). | **BEHOBEN** |
-| **SEC-05** | **MITTEL** | Datenschutz / DSGVO | Fehlende Differenzierung zwischen Löschpflicht und Aufbewahrungsfristen | Strukturierte Richtlinienmatrix mit Unterscheidung zwischen ArbZG (2 Jahre), BGB/GewO (3 Jahre) und BDSG Videoüberwachung (1 Jahr). | **BEHOBEN** |
-| **SEC-06** | **MITTEL** | Audit Logging | Gefahr von Datenmanipulation in Systemprotokollen | Revisionssicheres, schreibgeschütztes Audit-Log ohne Speicherung sensibler Passwörter oder Klartext-Tokens. | **BEHOBEN** |
+| Problem-ID | Schweregrad | Bereich | Befund & Ursache | Durchgeführte Behebung |
+|---|---|---|---|---|
+| **SEC-FIX-01** | **KRITISCH** | Secrets & Konfiguration | Unsichere Fallback-Secrets in `backend/src/config/env.ts` und Vorkommen in Konfigurationsbeispielen. | Alle fest codierten Passwörter und JWT-Fallback-Secrets wurden restlos aus dem Quellcode entfernt. Fehlen Pflichtvariablen wie `JWT_SECRET` oder `DATABASE_URL`, bricht der Backend-Start mit Fehlercode 1 sofort ab. |
+| **SEC-FIX-02** | **KRITISCH** | PostgreSQL RLS | RLS-Policies waren unvollständig formuliert und schützten ohne gesetzten Kontext nicht zwingend jede Operation. | Tabellen wurden mit `FORCE ROW LEVEL SECURITY` versehen. Strikte `PERMISSIVE`-Policies erzwingen die Prüfung von `current_setting('app.current_tenant')`. Ohne gesetzten Mandantenkontext werden physisch 0 Datensätze zurückgeliefert. |
+| **SEC-FIX-03** | **KRITISCH** | Cross-Tenant Integrität | Gefahr, dass Objekte eines Mandanten Kunden eines fremden Mandanten referenzieren. | Composite Foreign Keys `(client_id, tenant_id)` referencing `clients(id, tenant_id)` verhindern Cross-Tenant-Beziehungen physisch auf PostgreSQL-Ebene. |
+| **SEC-FIX-04** | **HOCH** | Session Lifecycle | In-Memory Token Blacklist ging bei Neustart oder Multi-Instanz-Betrieb verloren. | Reale Sitzungsverwaltung über die Tabelle `user_sessions`. Widerrufene Tokens (`revoked = true`) oder abgelaufene Sitzungen werden sofort bei jeder API-Anfrage abgewiesen. |
+| **SEC-FIX-05** | **HOCH** | RBAC & Wildcards | Pauschale `permissions: ['*']` Wildcards im Auth-Controller. | Berechtigungen werden nun granular je Rolle aus `role_permissions` und `permissions` geladen und serverseitig in der Middleware validiert. |
+| **SEC-FIX-06** | **HOCH** | Brute-Force Schutz | In-Memory Tracker für Login-Fehlversuche. | Fehlversuche und Kontosperren (`failed_login_attempts`, `locked_until`) werden persistent in der Tabelle `users` verwaltet. Nach 5 Fehlversuchen erfolgt eine 15-minütige Sperre. |
 
 ---
 
-## 2. Automatisierte Test-Verifikation
-- `test_path_traversal_sanitization`: **BESTANDEN**
-- `test_brute_force_lockout`: **BESTANDEN**
-- `test_idor_tenant_cross_access_rejection`: **BESTANDEN**
-- `test_argon2_password_hashing`: **BESTANDEN**
+## 2. Hinweis zur Secrets-Rotation
+Alle in früheren Entwicklungsständen oder Commits möglicherweise exponierten Beispiel-Tokens oder Entwicklungs-Passwörter müssen vor dem Produktiveinsatz erneuert werden:
+1. `JWT_SECRET`: Neu generieren mit `openssl rand -hex 32`.
+2. `DATABASE_URL`: Ein separates, starkes Passwort für `secops_app_user` in PostgreSQL setzen.
+3. `.env`-Dateien dürfen niemals im Git-Repository versioniert werden (durch `.gitignore` abgesichert).

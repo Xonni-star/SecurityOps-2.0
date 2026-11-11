@@ -1,10 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import argon2 from 'argon2';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { z } from 'zod';
 import { query } from '../config/database';
 import { env } from '../config/env';
-import { revokeToken } from '../middleware/auth';
 
 const loginSchema = z.object({
   email: z.string().email(),
@@ -12,41 +12,32 @@ const loginSchema = z.object({
   requestedTenantId: z.string().uuid().optional()
 });
 
-// Brute-Force Schutz: Fehlversuchs-Tracker
-const loginAttempts: Record<string, { count: number; lockedUntil: number | null }> = {};
-
 export async function login(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { email, password, requestedTenantId } = loginSchema.parse(req.body);
 
-    const now = Date.now();
-    const attempt = loginAttempts[email] || { count: 0, lockedUntil: null };
-
-    if (attempt.lockedUntil && attempt.lockedUntil > now) {
-      res.status(429).json({
-        success: false,
-        message: 'Zu viele Fehlversuche. Das Konto ist vorübergehend gesperrt (15 Minuten Brute-Force-Schutz).'
-      });
-      return;
-    }
-
     // 1. Benutzer aus PostgreSQL abfragen
     const userResult = await query(
-      'SELECT id, email, password_hash, first_name, last_name, is_active FROM users WHERE email = $1',
+      `SELECT id, email, password_hash, first_name, last_name, is_active, failed_login_attempts, locked_until 
+       FROM users WHERE email = $1`,
       [email]
     );
 
     if (userResult.rows.length === 0) {
-      attempt.count += 1;
-      if (attempt.count >= 5) {
-        attempt.lockedUntil = now + 15 * 60 * 1000;
-      }
-      loginAttempts[email] = attempt;
       res.status(401).json({ success: false, message: 'Ungültige Anmeldedaten.' });
       return;
     }
 
     const user = userResult.rows[0];
+
+    // Brute-Force Sperrprüfung in der Datenbank
+    if (user.locked_until && new Date(user.locked_until) > new Date()) {
+      res.status(429).json({
+        success: false,
+        message: 'Konto ist vorübergehend gesperrt. Bitte versuchen Sie es in wenigen Minuten erneut.'
+      });
+      return;
+    }
 
     if (!user.is_active) {
       res.status(403).json({ success: false, message: 'Benutzerkonto ist deaktiviert.' });
@@ -56,17 +47,24 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     // 2. Passwortprüfung mit Argon2id
     const validPassword = await argon2.verify(user.password_hash, password);
     if (!validPassword) {
-      attempt.count += 1;
-      if (attempt.count >= 5) {
-        attempt.lockedUntil = now + 15 * 60 * 1000;
-      }
-      loginAttempts[email] = attempt;
+      const newAttempts = (user.failed_login_attempts || 0) + 1;
+      const shouldLock = newAttempts >= 5;
+      const lockedUntil = shouldLock ? new Date(Date.now() + 15 * 60 * 1000) : null;
+
+      await query(
+        'UPDATE users SET failed_login_attempts = $1, locked_until = $2 WHERE id = $3',
+        [newAttempts, lockedUntil, user.id]
+      );
+
       res.status(401).json({ success: false, message: 'Ungültige Anmeldedaten.' });
       return;
     }
 
-    // Reset bei erfolgreicher Anmeldung
-    delete loginAttempts[email];
+    // Reset der Fehlversuche bei Erfolg
+    await query(
+      'UPDATE users SET failed_login_attempts = 0, locked_until = NULL WHERE id = $1',
+      [user.id]
+    );
 
     // 3. Mandantenzugehörigkeit und Rollen serverseitig aus der Datenbank laden
     let tenantQuery = `
@@ -97,7 +95,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
     const { tenant_id, tenant_name, role_id, role_name } = tenantResult.rows[0];
 
-    // 4. Granulare Berechtigungen für die zugewiesene Rolle laden (KEIN pauschales '*')
+    // 4. Granulare Berechtigungen aus der Datenbank laden
     const permResult = await query(
       `SELECT p.code 
        FROM role_permissions rp
@@ -108,7 +106,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
     const permissions: string[] = permResult.rows.map((row) => row.code);
 
-    // 5. JWT signieren mit Mindestangaben: User-ID, Tenant-ID, Rolle, Berechtigungen und Expiration
+    // 5. JWT signieren
     const token = jwt.sign(
       {
         sub: user.id,
@@ -119,6 +117,16 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       },
       env.JWT_SECRET,
       { expiresIn: env.JWT_EXPIRES_IN }
+    );
+
+    // 6. Sitzung in user_sessions persistieren
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 Stunden
+
+    await query(
+      `INSERT INTO user_sessions (user_id, tenant_id, token_hash, device_name, ip_address, expires_at, revoked)
+       VALUES ($1, $2, $3, $4, $5, $6, false)`,
+      [user.id, tenant_id, tokenHash, req.headers['user-agent'] || 'Unbekannt', req.ip, expiresAt]
     );
 
     res.json({
@@ -143,17 +151,24 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
   }
 }
 
-export async function logout(req: Request, res: Response): Promise<void> {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    const token = authHeader.split(' ')[1];
-    revokeToken(token);
-  }
+export async function logout(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const token = authHeader.split(' ')[1];
+      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
 
-  res.json({
-    success: true,
-    message: 'Erfolgreich abgemeldet. Token wurde widerrufen.'
-  });
+      // Sitzung in der Datenbank auf widerrufen setzen
+      await query('UPDATE user_sessions SET revoked = true WHERE token_hash = $1', [tokenHash]);
+    }
+
+    res.json({
+      success: true,
+      message: 'Erfolgreich abgemeldet. Sitzung wurde in der Datenbank widerrufen.'
+    });
+  } catch (error) {
+    next(error);
+  }
 }
 
 export async function getMe(req: Request, res: Response): Promise<void> {

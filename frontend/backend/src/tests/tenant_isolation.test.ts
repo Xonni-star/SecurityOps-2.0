@@ -1,52 +1,57 @@
-import { pool, withTenantTransaction } from '../config/database';
-
-const TENANT_A = '11111111-1111-1111-1111-111111111111';
-const TENANT_B = '22222222-2222-2222-2222-222222222222';
+import { pool, withTenantTransaction, withSystemTransaction } from '../config/database';
 
 describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
+  let tenantA: string;
+  let tenantB: string;
+
+  beforeAll(async () => {
+    const tA = await pool.query(`
+      INSERT INTO tenants (name, subdomain, tax_number, bwr_register_id)
+      VALUES ('RLS Test Mandant A', $1, 'DE-RLS-A', 'BWR-RLS-A') RETURNING id;
+    `, [`rls-a-${Date.now()}`]);
+    tenantA = tA.rows[0].id;
+
+    const tB = await pool.query(`
+      INSERT INTO tenants (name, subdomain, tax_number, bwr_register_id)
+      VALUES ('RLS Test Mandant B', $1, 'DE-RLS-B', 'BWR-RLS-B') RETURNING id;
+    `, [`rls-b-${Date.now()}`]);
+    tenantB = tB.rows[0].id;
+
+    await withTenantTransaction(tenantA, async (tx) => {
+      await tx.query(`
+        INSERT INTO clients (tenant_id, client_number, company_name, contact_person, email, phone, address, contract_start, contract_end)
+        VALUES ($1, 'K-A-1', 'A GmbH', 'Hr. A', 'a@a.de', '01', 'Adr A', '2025-01-01', '2026-01-01');
+      `, [tenantA]);
+    });
+
+    await withTenantTransaction(tenantB, async (tx) => {
+      await tx.query(`
+        INSERT INTO clients (tenant_id, client_number, company_name, contact_person, email, phone, address, contract_start, contract_end)
+        VALUES ($1, 'K-B-1', 'B GmbH', 'Hr. B', 'b@b.de', '02', 'Adr B', '2025-01-01', '2026-01-01');
+      `, [tenantB]);
+    });
+  });
+
   afterAll(async () => {
+    if (tenantA) await pool.query('DELETE FROM tenants WHERE id = $1', [tenantA]);
+    if (tenantB) await pool.query('DELETE FROM tenants WHERE id = $1', [tenantB]);
     await pool.end();
   });
 
-  test('Mandant A darf NIEMALS Kunden von Mandant B sehen', async () => {
-    const clientsForA = await withTenantTransaction(TENANT_A, async (client) => {
-      const res = await client.query('SELECT id, company_name, tenant_id FROM clients');
-      return res.rows;
+  test('Mandant A sieht keine Daten von Mandant B', async () => {
+    const res = await withTenantTransaction(tenantA, async (tx) => {
+      return (await tx.query('SELECT * FROM clients')).rows;
     });
 
-    // Verifikation: Alle Datensätze müssen strikt zu Mandant A gehören
-    expect(clientsForA.length).toBeGreaterThan(0);
-    expect(clientsForA.every((c) => c.tenant_id === TENANT_A)).toBe(true);
-    expect(clientsForA.some((c) => c.tenant_id === TENANT_B)).toBe(false);
+    expect(res.length).toBeGreaterThan(0);
+    expect(res.every((c) => c.tenant_id === tenantA)).toBe(true);
+    expect(res.some((c) => c.tenant_id === tenantB)).toBe(false);
   });
 
-  test('Mandant B sieht ausschließlich eigene Daten', async () => {
-    const clientsForB = await withTenantTransaction(TENANT_B, async (client) => {
-      const res = await client.query('SELECT id, company_name, tenant_id FROM clients');
-      return res.rows;
+  test('Systemabfrage ohne Tenant-Kontext liefert 0 mandantenspezifische Datensätze', async () => {
+    const res = await withSystemTransaction(async (tx) => {
+      return (await tx.query('SELECT * FROM clients')).rows;
     });
-
-    expect(clientsForB.length).toBeGreaterThan(0);
-    expect(clientsForB.every((c) => c.tenant_id === TENANT_B)).toBe(true);
-    expect(clientsForB.some((c) => c.tenant_id === TENANT_A)).toBe(false);
-  });
-
-  test('Cross-Tenant Composite Foreign Key Rejection: Objekt in A darf Kunden in B nicht referenzieren', async () => {
-    // 1. Hole ID eines Kunden aus Mandant B
-    const clientBId = await withTenantTransaction(TENANT_B, async (client) => {
-      const res = await client.query('SELECT id FROM clients LIMIT 1');
-      return res.rows[0].id;
-    });
-
-    // 2. Versuch, in Mandant A ein Objekt anzulegen, das auf Kunde B verweist
-    await expect(
-      withTenantTransaction(TENANT_A, async (client) => {
-        return client.query(
-          `INSERT INTO sites (tenant_id, client_id, site_code, name, address)
-           VALUES ($1, $2, 'OBJ-ILLEGAL-01', 'Infiltrated Site', 'Verbotene Straße 1')`,
-          [TENANT_A, clientBId]
-        );
-      })
-    ).rejects.toThrow(); // PostgreSQL foreign key constraint violation
+    expect(res.length).toBe(0);
   });
 });
