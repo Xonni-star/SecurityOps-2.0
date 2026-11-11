@@ -4,35 +4,37 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ---
 
-## 1. Verzeichnisstruktur
+## 1. Verzeichnisstruktur & Architekturtrennung
 
-- **Frontend**: Root-Verzeichnis (`./`), React 18+/19 SPA mit Tailwind CSS, Zustand Store und IndexedDB Vault.
-- **SecurityOps TypeScript-Backend**: `backend/` (bzw. `frontend/backend/` bei relativer Monorepo-Verschachtelung). Enthält die vollwertige Express/TypeScript REST-API (`/api/v1`), PostgreSQL RLS-Transaktionen und die Idempotenz-Engine.
-- **Hinweis**: Das Root-Verzeichnis `backend/` bzw. `frontend/backend/` enthält das eigentliche Anwendungsbackend mit `package.json`, `src/app.ts`, `src/migrations/`, etc.
+- **Frontend**: `frontend/` (bzw. Root-Verzeichnis bei flachem Checkout). React 18+/19 SPA mit Tailwind CSS, Zustand Store und IndexedDB Vault.
+- **SecurityOps TypeScript-Backend**: `frontend/backend/` (bzw. `backend/` bei flacher Monorepo-Struktur). Enthält die vollwertige Node.js/Express/TypeScript REST-API (`/api/v1`), PostgreSQL RLS-Transaktionen und die Idempotenz-Engine.
+- **WICHTIGER HINWEIS**: Das separate Root-Verzeichnis `backend/` (sofern im Repository vorhanden) ist ein eigenständiges Google-Cloud-Proxy-Backend und **nicht** das SecurityOps-Datenbank- und Anwendungsbackend! Alle SecurityOps-Backend-Befehle werden unter `frontend/backend/` ausgeführt.
 
 ---
 
 ## 2. Installations-, Build- und Testbefehle
 
-### 2.1 Backend (Node.js & TypeScript REST-API)
+### 2.1 Backend (SecurityOps TypeScript-Backend)
+Aus dem Repository-Root auszuführen:
 ```bash
 # Abhängigkeiten installieren
-npm --prefix backend ci
+npm --prefix frontend/backend ci
 
-# TypeScript Build
-npm --prefix backend run build
+# TypeScript-Build
+npm --prefix frontend/backend run build
 
-# Datenbankmigrationen ausführen (erfordert PostgreSQL 16+ Verbindung)
-npm --prefix backend run migrate
+# Datenbankmigrationen ausführen (erfordert PostgreSQL 16+ Verbindung via secops_admin)
+npm --prefix frontend/backend run migrate
 
 # Testdaten anlegen
-npm --prefix backend run seed
+npm --prefix frontend/backend run seed
 
 # Backend- und PostgreSQL RLS-Integrationstests ausführen
-npm --prefix backend test -- --runInBand
+npm --prefix frontend/backend test -- --runInBand
 ```
 
-### 2.2 Frontend (React & Zustand Store)
+### 2.2 Frontend (React, Zustand Store & Vitest)
+Aus dem Frontend-Verzeichnis (`cd frontend` oder aus dem Root):
 ```bash
 # Abhängigkeiten installieren
 npm install
@@ -40,16 +42,16 @@ npm install
 # Frontend Store- und Outbox-Vertragstests ausführen (Vitest)
 npm test
 
-# Frontend TypeScript Build
+# Frontend TypeScript- und Vite-Build
 npm run build
 ```
 
 ---
 
 ## 3. Architektur & Sicherheitsgarantien
-1. **RLS & Mandantenisolation**: PostgreSQL 16+ erzwingt `FORCE ROW LEVEL SECURITY`. Ohne gesetzten Transaktionskontext (`SET LOCAL app.current_tenant`) sind 0 Datensätze sichtbar.
+1. **RLS & Mandantenisolation**: PostgreSQL 16+ erzwingt `FORCE ROW LEVEL SECURITY`. Ohne gesetzten Transaktionskontext (`SET LOCAL app.current_tenant`) liefert die Datenbank physisch 0 Datensätze.
 2. **Offline-Sync & Idempotenz**:
-   - `POST /api/v1/sync/push` verarbeitet Mutationen atomar via Advisory Locks und Quittungsspeicherung in `sync_idempotency_receipts`.
+   - `POST /api/v1/sync/push` verarbeitet Mutationen atomar via PostgreSQL Transaction Advisory Locks und persistiert Quittungen in `sync_idempotency_receipts`.
    - `POST /api/v1/sync/conflicts/resolve` trennt Konfliktentscheidungen in `sync_conflict_resolution_receipts`.
-   - Das Frontend entfernt Mutationen erst nach bestätigtem Servererfolg; bei Fehlern bleibt die Outbox unversehrt.
-3. **Least-Privilege**: Die Anwendung verbindet sich ausschließlich als unprivilegierter Benutzer `secops_app_user` (ohne Superuser- oder BYPASSRLS-Rechte).
+   - Das Frontend entfernt Mutationen erst nach bestätigtem Servererfolg (`applied: true`, `serverState`); bei Fehlern bleibt die Outbox unversehrt.
+3. **Least-Privilege**: Die Anwendung verbindet sich im operativen Betrieb ausschließlich als unprivilegierter Benutzer `secops_app_user` (ohne Superuser- oder BYPASSRLS-Rechte).

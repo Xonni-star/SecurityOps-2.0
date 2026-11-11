@@ -3,7 +3,7 @@ import { useSecurityStore } from '../store';
 import { apiClient, ApiError } from '../services/apiClient';
 import { offlineVault } from '../services/indexedDbService';
 
-describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.8 - Vitest)', () => {
+describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstests (Schritt 5R.2.9 - Vitest)', () => {
   const queueId = `test-q-${Date.now()}`;
 
   beforeEach(() => {
@@ -61,7 +61,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     await useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL');
 
     const state = useSecurityStore.getState();
-    // Outbox wurde erst nach Bestätigung entfernt
+    // Outbox wurde erst nach erfolgreicher Serverquittung entfernt
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeUndefined();
     // Store wurde mit vollständigem serverState aktualisiert
     const task = state.tasks.find((t) => t.id === 'task-123');
@@ -79,7 +79,7 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
     ).rejects.toThrow('Ungültige Serverantwort');
 
     const state = useSecurityStore.getState();
-    // Outbox MUSS erhalten bleiben
+    // Outbox MUSS unversehrt erhalten bleiben
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
     expect(markSyncedSpy).not.toHaveBeenCalled();
   });
