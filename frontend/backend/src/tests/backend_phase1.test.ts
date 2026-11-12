@@ -41,16 +41,16 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     testRoleAdminId = roleAdminRes.rows[0].id;
 
     const roleEinsatzRes = await pool.query(`
-      INSERT INTO roles (name, description) VALUES ($1, 'Einsatzleitung mit customers:read') RETURNING id;
+      INSERT INTO roles (name, description) VALUES ($1, 'Einsatzleitung mit customers:read/create') RETURNING id;
     `, [`Einsatz_${Date.now()}`]);
     testRoleEinsatzId = roleEinsatzRes.rows[0].id;
 
-    // Nur der Einsatzleiter erhält 'customers:read'
-    const permRes = await pool.query("SELECT id FROM permissions WHERE code = 'customers:read' LIMIT 1");
-    if (permRes.rows.length > 0) {
+    // Dieser Benutzer erhält Lesen und Anlage, aber bewusst weder Änderung noch Archivierung.
+    const permRes = await pool.query("SELECT id FROM permissions WHERE code IN ('customers:read','customers:create')");
+    for (const permission of permRes.rows) {
       await pool.query(
         'INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;',
-        [testRoleEinsatzId, permRes.rows[0].id]
+        [testRoleEinsatzId, permission.id]
       );
     }
 
@@ -396,7 +396,28 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     const archive = await request(app).post(`/api/v1/customers/${id}/archive`).set(authHeaders(testValidTokenA)).send({ revisionVersion: 1 });
     expect(update.status).toBe(403);
     expect(archive.status).toBe(403);
+    const sync = await request(app).post('/api/v1/customers/sync').set(authHeaders(testValidTokenA)).send({
+      mutations: [
+        { clientUuid: 'update-only-authz-test', action: 'UPDATE', baseVersion: 1, payload: { id, companyName: 'Nicht erlaubt' } },
+        { clientUuid: 'archive-only-authz-test', action: 'DELETE', baseVersion: 1, payload: { id } }
+      ]
+    });
+    expect(sync.status).toBe(200);
+    expect(sync.body.data.map((result: any) => result.status)).toEqual(['REJECTED', 'REJECTED']);
+    expect(sync.body.data.map((result: any) => result.message)).toEqual([
+      expect.stringContaining('customers:update'), expect.stringContaining('customers:archive')
+    ]);
     const unauthenticated = await request(app).patch(`/api/v1/customers/${id}`).send({ companyName: 'Nicht erlaubt', revisionVersion: 1 });
     expect(unauthenticated.status).toBe(401);
+  });
+
+  test('15. Sitzung wird sofort abgewiesen, wenn ihr Mandant deaktiviert ist', async () => {
+    await migrationPool.query('UPDATE tenants SET is_active = false WHERE id = $1', [testTenantA]);
+    try {
+      const res = await request(app).get('/api/v1/customers').set(authHeaders(testValidTokenA));
+      expect(res.status).toBe(401);
+    } finally {
+      await migrationPool.query('UPDATE tenants SET is_active = true WHERE id = $1', [testTenantA]);
+    }
   });
 });

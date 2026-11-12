@@ -1,8 +1,8 @@
 import { migrationPool } from '../config/database';
 
 export function authHeaders(credential: string): Record<string, string> {
-  // Legacy fixture tokens are only used as opaque cookie fixtures; the server
-  // validates the database hash and never accepts them from Authorization.
+  // Opaque random session fixtures are accepted only after the server resolves
+  // their database hash; Authorization headers are deliberately not used.
   const [sessionId, csrfToken = 'test-csrf-token'] = credential.split('|', 2);
   return { Cookie: `secops_session=${sessionId}; secops_csrf=${csrfToken}`, 'X-CSRF-Token': csrfToken, Origin: 'http://localhost:3000' };
 }

@@ -123,7 +123,11 @@ export async function syncClientMutations(req: Request, res: Response, next: Nex
     const results = await withTenantTransaction(tenantId, async (db) => {
       const output: any[] = [];
       for (const mutation of body.mutations) {
-        const required = 'customers:create';
+        const required = mutation.action === 'CREATE'
+          ? 'customers:create'
+          : mutation.action === 'UPDATE'
+            ? 'customers:update'
+            : 'customers:archive';
         if (!user.permissions.includes(required)) {
           output.push({ clientUuid: mutation.clientUuid, status: 'REJECTED', message: `Fehlende Berechtigung '${required}'` });
           continue;

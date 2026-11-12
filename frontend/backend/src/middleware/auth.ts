@@ -30,6 +30,7 @@ export async function authenticateJwt(req: Request, res: Response, next: NextFun
     const sessionRes = await query(
       `SELECT s.user_id, s.tenant_id, s.expires_at, u.email, u.is_active, r.name AS role_name, p.code
        FROM user_sessions s JOIN users u ON u.id=s.user_id
+       JOIN tenants t ON t.id=s.tenant_id AND t.is_active=true
        JOIN user_roles ur ON ur.user_id=s.user_id AND ur.tenant_id=s.tenant_id
        JOIN roles r ON r.id=ur.role_id LEFT JOIN role_permissions rp ON rp.role_id=r.id
        LEFT JOIN permissions p ON p.id=rp.permission_id

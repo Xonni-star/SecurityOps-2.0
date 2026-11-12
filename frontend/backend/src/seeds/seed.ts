@@ -41,6 +41,8 @@ export async function seedDatabase(): Promise<void> {
     const permissions = [
       { code: 'customers:read', module: 'customers' },
       { code: 'customers:create', module: 'customers' },
+      { code: 'customers:update', module: 'customers' },
+      { code: 'customers:archive', module: 'customers' },
       { code: 'sites:read', module: 'sites' },
       { code: 'sites:create', module: 'sites' },
       { code: 'sites:update', module: 'sites' },
