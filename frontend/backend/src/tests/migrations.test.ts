@@ -140,6 +140,71 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(after).toEqual(before);
   });
 
+  test('Permission-Migration übernimmt Legacy-Rollen sicher und ist wiederholbar', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir();
+    const migrationFile = path.join(dir, '009_customer_write_permissions.sql');
+    const migrationSql = fs.readFileSync(migrationFile, 'utf8');
+    fs.unlinkSync(migrationFile);
+
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+
+    const roleWithCreate = await queryInDatabase<{ id: string }>(
+      db,
+      `INSERT INTO roles (name) VALUES ('legacy_customer_writer') RETURNING id`
+    );
+    const readOnlyRole = await queryInDatabase<{ id: string }>(
+      db,
+      `INSERT INTO roles (name) VALUES ('legacy_customer_reader') RETURNING id`
+    );
+    await queryInDatabase(db, `INSERT INTO permissions (code, module) VALUES ('customers:create', 'customers'), ('customers:read', 'customers')`);
+    await queryInDatabase(
+      db,
+      `INSERT INTO role_permissions (role_id, permission_id)
+       SELECT $1, id FROM permissions WHERE code = 'customers:create'`,
+      [roleWithCreate[0].id]
+    );
+    await queryInDatabase(
+      db,
+      `INSERT INTO role_permissions (role_id, permission_id)
+       SELECT $1, id FROM permissions WHERE code = 'customers:read'`,
+      [readOnlyRole[0].id]
+    );
+
+    const client = new Client({ connectionString: withDatabaseName(db) });
+    await client.connect();
+    try {
+      await client.query(migrationSql);
+      await client.query(migrationSql);
+    } finally {
+      await client.end();
+    }
+
+    const effective = await queryInDatabase<{ role: string; permission: string }>(
+      db,
+      `SELECT r.name AS role, p.code AS permission
+       FROM role_permissions rp JOIN roles r ON r.id=rp.role_id
+       JOIN permissions p ON p.id=rp.permission_id
+       WHERE r.name IN ('legacy_customer_writer', 'legacy_customer_reader')
+       ORDER BY r.name, p.code`
+    );
+    expect(effective.filter((entry) => entry.role === 'legacy_customer_writer').map((entry) => entry.permission))
+      .toEqual(['customers:archive', 'customers:create', 'customers:update']);
+    expect(effective.filter((entry) => entry.role === 'legacy_customer_reader').map((entry) => entry.permission))
+      .toEqual(['customers:read']);
+    const newPermissionCounts = await queryInDatabase<{ code: string; count: string }>(
+      db,
+      `SELECT p.code, COUNT(rp.role_id)::text AS count FROM permissions p
+       LEFT JOIN role_permissions rp ON rp.permission_id=p.id
+       WHERE p.code IN ('customers:update', 'customers:archive')
+       GROUP BY p.code ORDER BY p.code`
+    );
+    expect(newPermissionCounts).toEqual([
+      { code: 'customers:archive', count: '1' },
+      { code: 'customers:update', count: '1' }
+    ]);
+  });
+
   test('3. Neue Migration wird erkannt und angewendet', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
