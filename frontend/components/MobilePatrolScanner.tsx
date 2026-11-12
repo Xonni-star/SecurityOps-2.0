@@ -13,7 +13,21 @@ import {
   VideoOff
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
-import { Checkpoint, Site } from '../types';
+import { Checkpoint, PatrolScanEvent } from '../types';
+
+const PATROL_SCAN_DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
+
+export function isPatrolCheckpointRecentlyScanned(
+  scans: Pick<PatrolScanEvent, 'checkpointId' | 'scannedAt'>[],
+  checkpointId: string,
+  now = Date.now()
+): boolean {
+  return scans.some((scan) => {
+    if (scan.checkpointId !== checkpointId) return false;
+    const elapsedMs = now - new Date(scan.scannedAt).getTime();
+    return elapsedMs >= 0 && elapsedMs < PATROL_SCAN_DUPLICATE_WINDOW_MS;
+  });
+}
 
 export const MobilePatrolScanner: React.FC = () => {
   const {
@@ -59,13 +73,9 @@ export const MobilePatrolScanner: React.FC = () => {
   };
 
   const handleExecuteScan = async (checkpoint: Checkpoint) => {
-    // Anti-duplicate protection: check if same checkpoint was scanned in last 2 minutes
-    const lastScan = scans.find((s) => s.checkpointId === checkpoint.id);
-    if (lastScan) {
-      const diffMs = Date.now() - new Date(lastScan.scannedAt).getTime();
-      if (diffMs < 2 * 60 * 1000) {
-        alert(`Achtung: Kontrollpunkt ${checkpoint.code} wurde bereits vor weniger als 2 Minuten abgetastet!`);
-      }
+    if (isPatrolCheckpointRecentlyScanned(scans, checkpoint.id)) {
+      alert(`Achtung: Kontrollpunkt ${checkpoint.code} wurde bereits vor weniger als 2 Minuten abgetastet!`);
+      return;
     }
 
     try {
@@ -181,7 +191,7 @@ export const MobilePatrolScanner: React.FC = () => {
 
         <div className="space-y-2">
           {activeSite?.checkpoints?.map((cp) => {
-            const hasRecentScan = scans.some((s) => s.checkpointId === cp.id);
+            const hasRecentScan = isPatrolCheckpointRecentlyScanned(scans, cp.id);
             return (
               <div
                 key={cp.id}

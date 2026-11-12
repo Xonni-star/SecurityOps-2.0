@@ -1,5 +1,13 @@
 # Changelog – SecurityOps 2.0
 
+## [Unreleased]
+
+### Fehlerkorrekturen
+
+- Sync-Quittungen weisen die Wiederverwendung einer Mutations-ID mit geändertem Entitätstyp oder Vorgang zurück.
+- Kontrollpunkte sind nach Ablauf des zweiminütigen Duplikatfensters erneut scannbar; Scans innerhalb des Fensters werden abgewiesen.
+- Backend- und Frontend-Regressionstests sichern beide Verhaltensweisen gegen spätere Rückfälle ab.
+
 ## [2.0.0] – 2026-11-11
 
 Erste lauffähige, servergestützte TypeScript-Version mit geprüftem Produktionsbuild.
