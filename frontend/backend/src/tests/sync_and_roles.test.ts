@@ -205,6 +205,48 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     expect(parseInt(countCheck.rows[0].count, 10)).toBe(1);
   });
 
+  test('Sync-Push weist Wiederverwendung einer Mutation-ID mit geändertem Entity-Typ oder Vorgang ab', async () => {
+    const clientUuid = `shift-reuse-${Date.now()}`;
+    const mutation = {
+      clientUuid,
+      entityType: 'shift',
+      action: 'CREATE',
+      clientTimestamp: new Date().toISOString(),
+      baseVersion: 1,
+      payload: { siteId: siteAId, shiftDate: '2026-11-12', startTime: '06:00', endTime: '18:00' }
+    };
+    const first = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send({
+      deviceId: 'dev-01',
+      mutations: [mutation]
+    });
+    expect(first.body.data[0].status).toBe('SYNCED');
+
+    const changedEntityType = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send({
+      deviceId: 'dev-01',
+      mutations: [{ ...mutation, entityType: 'task' }]
+    });
+    expect(changedEntityType.body.data[0]).toMatchObject({
+      clientUuid,
+      status: 'REJECTED',
+      message: expect.stringContaining('abweichendem Inhalt oder Vorgang')
+    });
+
+    const changedAction = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send({
+      deviceId: 'dev-01',
+      mutations: [{ ...mutation, action: 'UPDATE' }]
+    });
+    expect(changedAction.body.data[0]).toMatchObject({
+      clientUuid,
+      status: 'REJECTED',
+      message: expect.stringContaining('abweichendem Inhalt oder Vorgang')
+    });
+
+    const shiftCount = await withTenantTransaction(testTenantA, (tx) =>
+      tx.query('SELECT count(*)::int AS count FROM shifts WHERE tenant_id = $1 AND client_mutation_id = $2', [testTenantA, clientUuid])
+    );
+    expect(shiftCount.rows[0].count).toBe(1);
+  });
+
   // 2. Wachbuch: UPDATE mit ursprünglicher entryId
   test('2. Wachbuch: UPDATE identifiziert Eintrag über entryId und hängt Revision an', async () => {
     const entryId = await withTenantTransaction(testTenantA, async (tx) => {

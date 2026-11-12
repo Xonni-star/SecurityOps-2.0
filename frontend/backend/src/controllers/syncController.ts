@@ -116,13 +116,17 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         if (receiptRes.rows.length > 0) {
           const receipt = receiptRes.rows[0];
 
-          if (receipt.payload_hash !== payloadHash) {
+          if (
+            receipt.entity_type !== mut.entityType ||
+            receipt.action !== mut.action ||
+            receipt.payload_hash !== payloadHash
+          ) {
             results.push({
               clientUuid: mut.clientUuid,
               serverId: receipt.server_id,
               status: 'REJECTED',
               serverVersion: receipt.server_version,
-              message: 'Integritätsverletzung: Mutation-ID wurde mit abweichendem Inhalt wiederverwendet.'
+              message: 'Integritätsverletzung: Mutation-ID wurde mit abweichendem Inhalt oder Vorgang wiederverwendet.'
             });
             continue;
           }
