@@ -29,7 +29,7 @@ Implementation and local validation are complete. No deployment or production-re
 - Frontend: `npm run build` — passed; Vite reported existing `__dirname` configuration and large-chunk warnings.
 - Frontend TypeScript: no standalone type-check script or `tsconfig.json` is configured. `npx tsc --noEmit` printed compiler usage and exited without performing a project check.
 - Docker: production Compose configuration validation passed; backend and frontend production images built successfully. No deployment or production containers were started.
-- GitHub Actions: the last observed run, [43314795681](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43314795681), passed all four jobs on the earlier PR revision `5372d37`; it does not validate the current worktree. Updated CI is required before merge.
+- GitHub Actions: [run 43321687663](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43321687663) passed all four jobs on implementation commit `388f409`. This report update is a subsequent commit; its own required checks must also pass before merge.
 
 ## Security review
 
@@ -45,4 +45,4 @@ The review found one medium-severity separation-of-duties issue: the current-ver
 ## Pull request and merge
 
 - PR: [#11 — Implement SOP service instructions workflow](https://github.com/Xonni-star/SecurityOps-2.0/pull/11), targeting `main`.
-- State at report preparation: open; the latest observed green checks predated the current revision. The PR must remain unmerged until updated GitHub Actions checks pass and no blockers remain.
+- State at report preparation: open, targeting `main`, and clean/mergeable; all checks passed on implementation commit `388f409`. This report update is a subsequent commit, so PR #11 must remain unmerged until its checks pass and no blockers remain.
