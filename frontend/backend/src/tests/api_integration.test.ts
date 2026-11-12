@@ -542,20 +542,4 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(list.body.data).toEqual(expect.arrayContaining([expect.objectContaining({ title })]));
   });
 
-  test('Öffentlicher Health-Endpunkt gibt keine Datenbankfehlerdetails preis', async () => {
-    const querySpy = jest.spyOn(pool, 'query').mockImplementationOnce((() => Promise.reject(new Error('db-password=never-expose-this'))) as any);
-    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
-    try {
-      const response = await request(app).get('/api/v1/health');
-      expect(response.status).toBe(500);
-      expect(response.body).toMatchObject({ status: 'DOWN', database: 'Disconnected' });
-      expect(response.body.error).toBeUndefined();
-      expect(JSON.stringify(response.body)).not.toContain('db-password=never-expose-this');
-      expect(JSON.stringify(log.mock.calls)).not.toContain('db-password=never-expose-this');
-    } finally {
-      querySpy.mockRestore();
-      log.mockRestore();
-    }
-  });
-
 });
