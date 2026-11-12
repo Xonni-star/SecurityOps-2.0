@@ -153,9 +153,9 @@ export async function seedDatabase(): Promise<void> {
 if (require.main === module) {
   seedDatabase()
     .then(() => process.exit(0))
-    .catch((err) => {
-      // Fehler nicht verschlucken: sonst bleibt ein fehlgeschlagener Seed stumm.
-      console.error('[SEED FAILED]', err);
+    .catch(() => {
+      // Do not emit database errors that can contain data or connection details.
+      console.error('[SEED FAILED] Seed process aborted; exception details were suppressed.');
       process.exit(1);
     });
 }

@@ -4,6 +4,7 @@ describe('API error disclosure', () => {
   test('hides internal exception details and does not log secret-bearing messages or stacks', () => {
     const secret = 'db-password=never-expose-this';
     const err = new Error(secret);
+    err.name = secret;
     const req: any = { path: '/api/v1/private', method: 'GET' };
     const body: any = {};
     const res: any = {

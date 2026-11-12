@@ -63,7 +63,7 @@ if (uniqueOrigins.includes('*')) {
 const originRegex = /^https?:\/\/[a-zA-Z0-9\.\-:]+$/;
 for (const origin of uniqueOrigins) {
   if (!originRegex.test(origin)) {
-    console.error(`[SICHERHEITSABBRUCH] CORS_ORIGIN enthält ungültigen Origin: "${origin}". Nur http:// oder https:// zulässig.`);
+    console.error('[SICHERHEITSABBRUCH] CORS_ORIGIN enthält einen ungültigen Origin; nur HTTP-/HTTPS-Origin-Formate sind zulässig.');
     process.exit(1);
   }
 }

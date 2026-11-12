@@ -20,8 +20,7 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
   console.error('[API ERROR]', {
     path: req.path,
     method: req.method,
-    statusCode,
-    errorName: typeof err?.name === 'string' ? err.name : 'Error'
+    statusCode
   });
 
   res.status(statusCode).json({

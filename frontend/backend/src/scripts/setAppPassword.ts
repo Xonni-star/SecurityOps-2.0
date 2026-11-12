@@ -35,7 +35,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
-  console.error('[DB INIT FAILED]', error instanceof Error ? error.message : error);
+main().catch(() => {
+  console.error('[DB INIT FAILED] Application database credential setup failed; details were suppressed.');
   process.exit(1);
 });
