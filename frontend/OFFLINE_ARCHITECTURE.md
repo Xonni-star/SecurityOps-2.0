@@ -20,3 +20,7 @@ Die lokale Speicherung erfolgt über die native Browser-IndexedDB `SecurityOps2_
 ## 3. Datenintegrität & Append-Only Modell
 - **Digitales Wachbuch**: Einträge sind grundsätzlich **append-only**. Geschlossene Einträge werden niemals überschrieben; Änderungen werden als versionierte Korrekturrevisionen (`LogbookRevisionEntry`) revisionssicher angehängt.
 - **Aufgaben & Termine**: Erkennung von Parallelbearbeitungen über `base_version` und `server_version`. Bei Kollisionen wird ein `CONFLICT` erzeugt, der im Conflict Resolution Center manuell oder per Regel aufgelöst werden kann.
+
+## 4. Dokumentenmanagement
+
+DMS-Metadaten werden nach erfolgreichem Serverabruf nur im Arbeitsspeicher der aktiven Sitzung gehalten und nicht in LocalStorage oder IndexedDB repliziert. Im Offline-Fall sind bereits geladene Metadaten durchsuchbar; Upload, Download, Vorschau, Bearbeitung, Archivierung und Wiederherstellung sind deaktiviert bzw. zeigen einen Fehler. Dokumentdateien und neue Änderungen werden nicht offline gepuffert oder als Servererfolg angezeigt. Eine Offline-Outbox für DMS-Metadaten ist nicht implementiert.

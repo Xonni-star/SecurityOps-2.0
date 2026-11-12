@@ -22,6 +22,8 @@ networks:
 volumes:
   secops_pgdata:
     driver: local
+  secops_documents:
+    driver: local
   secops_backups:
     driver: local
   caddy_data:
@@ -93,6 +95,16 @@ services:
     networks:
       - secops_internal
 
+  # Initialize the private persistent file volume for the unprivileged node user.
+  dms-storage-init:
+    image: securityops-backend:latest
+    container_name: secops_prod_dms_storage_init
+    restart: "no"
+    user: "0:0"
+    command: ["sh", "-c", "mkdir -p /var/lib/securityops/documents && chown 1000:1000 /var/lib/securityops/documents && chmod 0700 /var/lib/securityops/documents"]
+    volumes:
+      - secops_documents:/var/lib/securityops/documents
+
   # Application backend: uses exclusively secops_app_user.
   backend:
     build:
@@ -106,6 +118,8 @@ services:
         condition: service_healthy
       db-init:
         condition: service_completed_successfully
+      dms-storage-init:
+        condition: service_completed_successfully
     environment:
       NODE_ENV: production
       PORT: 8000
@@ -113,6 +127,10 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET muss gesetzt sein}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
       CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN muss gesetzt sein}
+      DMS_STORAGE_PATH: /var/lib/securityops/documents
+      DMS_MAX_FILE_SIZE_BYTES: ${DMS_MAX_FILE_SIZE_BYTES:-10485760}
+    volumes:
+      - secops_documents:/var/lib/securityops/documents
     networks:
       - secops_internal
     healthcheck:
@@ -170,7 +188,8 @@ services:
       BACKUP_ENCRYPTION_KEY: ${BACKUP_ENCRYPTION_KEY:?BACKUP_ENCRYPTION_KEY muss gesetzt sein}
     volumes:
       - secops_backups:/var/backups
+      - secops_documents:/var/lib/securityops/documents:ro
       - ./backup_cron.sh:/usr/local/bin/backup_cron.sh:ro
-    entrypoint: ["/bin/sh", "/usr/local/bin/backup_cron.sh"]
+    entrypoint: ["/bin/bash", "/usr/local/bin/backup_cron.sh"]
     networks:
       - secops_internal

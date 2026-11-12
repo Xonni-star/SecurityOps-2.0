@@ -9,7 +9,6 @@ import {
   EmergencyPlan,
   KeyItem,
   TaskItem,
-  ManagedDocument,
   AutomationRule,
   AutomationExecutionLog,
   NotificationDelivery,
@@ -596,24 +595,6 @@ export const initialTasks: TaskItem[] = [
     priority: 'Hoch',
     status: 'In Bearbeitung',
     category: 'Audit'
-  }
-];
-
-export const initialDocuments: ManagedDocument[] = [
-  {
-    id: 'doc-1',
-    tenantId: 'tenant-frankfurt',
-    title: 'Bewachungsvertrag MainTower 2024-2026.pdf',
-    fileName: 'vertrag_maintower_2024_2026.pdf',
-    category: 'Vertrag',
-    sizeBytes: 2450000,
-    uploadedAt: '2024-01-02 10:15',
-    version: '1.0',
-    linkedEntityType: 'customer',
-    linkedEntityId: 'c-1',
-    linkedEntityName: 'MainTower Real Estate GmbH',
-    sha256Hash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-    scannedClean: true
   }
 ];
 

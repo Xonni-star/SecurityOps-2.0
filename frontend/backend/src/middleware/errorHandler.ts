@@ -11,8 +11,9 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
     return;
   }
 
-  const statusCode = Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode <= 599
-    ? err.statusCode
+  const reportedStatus = err?.statusCode ?? err?.status;
+  const statusCode = Number.isInteger(reportedStatus) && reportedStatus >= 400 && reportedStatus <= 599
+    ? reportedStatus
     : 500;
 
   // Keep diagnostics out of client responses and avoid logging exception text

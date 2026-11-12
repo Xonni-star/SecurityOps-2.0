@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import path from 'path';
 import { z } from 'zod';
 
 dotenv.config();
@@ -10,6 +11,8 @@ const envSchema = z.object({
   // Nur der Migrationsrunner benötigt die administrative Verbindung.
   // Der normale API-Server läuft ausschließlich mit secops_app_user.
   DATABASE_MIGRATION_URL: z.string().min(10, 'DATABASE_MIGRATION_URL muss für Migrationen konfiguriert sein.').optional(),
+  DMS_STORAGE_PATH: z.string().min(1).default(path.resolve(process.cwd(), 'var', 'documents')),
+  DMS_MAX_FILE_SIZE_BYTES: z.coerce.number().int().positive().max(100 * 1024 * 1024).default(10 * 1024 * 1024),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET muss mindestens 32 Zeichen lang sein.'),
   // Nur Einheiten, die auch parseDurationToMs() versteht (siehe authController.ts),
   // damit JWT-Ablauf und Sitzungs-Ablaufzeit garantiert identisch sind.

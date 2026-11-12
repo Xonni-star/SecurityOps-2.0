@@ -117,6 +117,65 @@ class ApiClient {
   delete<T>(endpoint: string, options?: RequestOptions): Promise<T> {
     return this.request<T>(endpoint, { ...options, method: 'DELETE' });
   }
+
+  uploadFile<T>(endpoint: string, file: File, onProgress?: (percent: number) => void): Promise<T> {
+    const url = `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+    return new Promise((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      request.open('POST', url);
+      request.withCredentials = true;
+      request.setRequestHeader('Content-Type', 'application/octet-stream');
+      request.setRequestHeader('X-File-Name', encodeURIComponent(file.name));
+      if (this.csrfToken) request.setRequestHeader('X-CSRF-Token', this.csrfToken);
+      request.upload.onprogress = (event) => {
+        if (event.lengthComputable) onProgress?.(Math.round((event.loaded / event.total) * 100));
+      };
+      request.onerror = () => reject(new ApiError(500, 'Verbindung zum Backend-Server fehlgeschlagen.'));
+      request.onload = () => {
+        const csrf = request.getResponseHeader('x-csrf-token');
+        if (csrf) this.csrfToken = csrf;
+        if (request.status === 401 && typeof window !== 'undefined') {
+          this.csrfToken = null;
+          window.dispatchEvent(new Event('securityops:unauthorized'));
+        }
+        let envelope: ResponseEnvelope;
+        try {
+          envelope = JSON.parse(request.responseText) as ResponseEnvelope;
+        } catch {
+          reject(new ApiError(request.status || 500, 'Ungültige Antwort vom Backend.'));
+          return;
+        }
+        if (request.status < 200 || request.status >= 300 || !envelope.success) {
+          reject(new ApiError(request.status, envelope.message || 'Upload fehlgeschlagen', envelope.errors));
+          return;
+        }
+        onProgress?.(100);
+        resolve(envelope.data as T);
+      };
+      request.send(file);
+    });
+  }
+
+  async downloadFile(endpoint: string): Promise<Blob> {
+    const url = `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+    try {
+      const response = await fetch(url, { credentials: 'include' });
+      if (response.status === 401) {
+        this.csrfToken = null;
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('securityops:unauthorized'));
+      }
+      const csrf = response.headers.get('x-csrf-token');
+      if (csrf) this.csrfToken = csrf;
+      if (!response.ok) {
+        const envelope = await response.json() as ResponseEnvelope;
+        throw new ApiError(response.status, envelope.message || 'Download fehlgeschlagen', envelope.errors);
+      }
+      return await response.blob();
+    } catch (error) {
+      if (error instanceof ApiError) throw error;
+      throw new ApiError(500, error instanceof Error ? error.message : 'Download fehlgeschlagen.');
+    }
+  }
 }
 
 export const apiClient = new ApiClient();
