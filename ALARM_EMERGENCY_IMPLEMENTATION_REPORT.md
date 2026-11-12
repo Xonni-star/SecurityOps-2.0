@@ -28,6 +28,7 @@ Alle folgenden Prüfungen liefen lokal; die datenbankgebundenen Prüfungen nutzt
 | Migration, RLS-/API-Integration gegen isoliertes PostgreSQL | in der vollständigen Backend-Testsuite bestanden |
 | Produktions-Compose-Konfiguration | `docker compose ... config --no-interpolate --quiet` erfolgreich |
 | Backend- und Frontend-Container-Images | lokale Docker-Builds erfolgreich |
+| Pull-Request-CI | alle 4 CI-Jobs bestanden |
 | `git diff --check` | ohne Beanstandungen |
 
 Der Frontend-Build gibt bestehende Vite-Konfigurations- und Bundlegrößen-Warnungen aus, endet aber erfolgreich. Die Docker-Prüfung validierte die Produktions-Compose-Konfiguration und baute beide Images; es wurden keine Images gestartet und keine Bereitstellung vorgenommen.
@@ -40,4 +41,4 @@ Der Frontend-Build gibt bestehende Vite-Konfigurations- und Bundlegrößen-Warnu
 - Übungsdokumentation speichert das jüngste Übungsdatum am Plan und ein Ereignis; separate Datensätze je Übung gibt es nicht.
 - Die Alarm-API bietet derzeit feste Höchstgrenzen statt konfigurierbarer Pagination/Filterung.
 - Es fand keine Produktionsbereitstellung statt. Die Implementierung ist nicht für Produktion freigegeben.
-- Ein Pull Request und dessen CI-Ergebnis sind noch ausstehend.
+- PR [#12](https://github.com/Xonni-star/SecurityOps-2.0/pull/12) ist gegen `main` geöffnet; alle 4 CI-Jobs sind bestanden. Er bleibt offen, bis die fehlende Master-Brief-Anlage und ihre vollständigen Akzeptanzkriterien geprüft werden können.
