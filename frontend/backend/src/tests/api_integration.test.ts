@@ -37,6 +37,8 @@ let createdSopCustomerId: string | undefined;
 let createdSopShiftId: string | undefined;
 let createdCrossTenantClientId: string | undefined;
 let createdCrossTenantSiteId: string | undefined;
+let createdAlarmPlanId: string | undefined;
+const createdAlarmIncidentIds: string[] = [];
 const keyNumber = `API-KEY-${Date.now()}`;
 
 async function login(email: string): Promise<string> {
@@ -166,6 +168,26 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  if (createdAlarmPlanId || createdAlarmIncidentIds.length) {
+    const cleanup = await migrationPool.connect();
+    try {
+      await cleanup.query('SET session_replication_role = replica');
+      await cleanup.query(
+        `DELETE FROM emergency_management_events
+         WHERE tenant_id=$1 AND (emergency_plan_id=$2 OR alarm_incident_id=ANY($3::uuid[]))`,
+        [TENANT_FFM_ID,createdAlarmPlanId ?? null,createdAlarmIncidentIds]
+      );
+      if (createdAlarmIncidentIds.length) {
+        await cleanup.query('DELETE FROM alarm_incidents WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [TENANT_FFM_ID,createdAlarmIncidentIds]);
+      }
+      if (createdAlarmPlanId) {
+        await cleanup.query('DELETE FROM emergency_plans WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdAlarmPlanId]);
+      }
+    } finally {
+      await cleanup.query('SET session_replication_role = origin');
+      cleanup.release();
+    }
+  }
   if (createdSopShiftId) {
     await migrationPool.query('DELETE FROM shifts WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopShiftId]);
   }
@@ -1046,6 +1068,102 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(beforeEffectiveDate.body.data).not.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: createdSopId })
     ]));
+  });
+
+  test('Alarmmanagement speichert Notfallpläne, Vorfälle, Übungen und append-only Ereignisse tenantgebunden', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    const siteId = 'b1111111-1111-1111-1111-111111111111';
+    const plan = await request(app).post('/api/v1/emergency-plans').set(authHeaders(token)).send({
+      siteId,
+      scenario: 'BMA - Brandmeldeanlage',
+      chainOfAction: ['Leitstelle prüfen', 'Erstkraft entsenden'],
+      contacts: [{ role: 'Feuerwehr', name: 'Notruf', phone: '112' }],
+      isActive: true
+    });
+    expect(plan.status).toBe(201);
+    createdAlarmPlanId = plan.body.data.id;
+    expect(plan.body.data.revision_version).toBe(1);
+
+    const edited = await request(app).patch(`/api/v1/emergency-plans/${createdAlarmPlanId}`)
+      .set(authHeaders(token)).send({
+        contacts: [{ role: 'Feuerwehr', name: 'Leitstelle', phone: '112' }],
+        revisionVersion: 1
+      });
+    expect(edited.status).toBe(200);
+    expect(edited.body.data.revision_version).toBe(2);
+    expect((await request(app).patch(`/api/v1/emergency-plans/${createdAlarmPlanId}`)
+      .set(authHeaders(token)).send({ isActive: false, revisionVersion: 1 })).status).toBe(409);
+
+    const todayResult = await migrationPool.query('SELECT CURRENT_DATE::text AS today');
+    const drill = await request(app).post(`/api/v1/emergency-plans/${createdAlarmPlanId}/drills`)
+      .set(authHeaders(token)).send({ drillDate: todayResult.rows[0].today });
+    expect(drill.status).toBe(200);
+    expect(drill.body.data.last_drill_date).toBeTruthy();
+
+    const incident = await request(app).post('/api/v1/alarms').set(authHeaders(token)).send({
+      siteId, emergencyPlanId: createdAlarmPlanId,
+      scenario: 'BMA - Brandmeldeanlage', severity: 'Kritisch',
+      title: 'Brandmeldeanlage API-Test', description: 'Rauchmelder meldet Alarm.'
+    });
+    expect(incident.status).toBe(201);
+    const incidentId = incident.body.data.id as string;
+    createdAlarmIncidentIds.push(incidentId);
+
+    const acknowledged = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
+      .set(authHeaders(token)).send({ action: 'acknowledge', note: 'Einsatz übernommen.', revisionVersion: 1 });
+    expect(acknowledged.status).toBe(200);
+    const escalated = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
+      .set(authHeaders(token)).send({ action: 'escalate', note: 'Einsatzleitung informiert.', revisionVersion: 2 });
+    expect(escalated.status).toBe(200);
+    const resolved = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
+      .set(authHeaders(token)).send({ action: 'resolve', note: 'Fehlalarm nach Prüfung bestätigt.', revisionVersion: 3 });
+    expect(resolved.status).toBe(200);
+    expect(resolved.body.data).toMatchObject({
+      status: 'abgeschlossen',
+      revision_version: 4,
+      resolution_note: 'Fehlalarm nach Prüfung bestätigt.'
+    });
+
+    const incidents = await request(app).get('/api/v1/alarms').set(authHeaders(await login(SEED_USER_EMAIL)));
+    expect(incidents.status).toBe(200);
+    expect(incidents.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: incidentId, site_id: siteId, status: 'abgeschlossen' })
+    ]));
+    const history = await request(app).get(`/api/v1/alarms/${incidentId}/events`).set(authHeaders(token));
+    expect(history.status).toBe(200);
+    expect(history.body.data.map((event: any) => event.action)).toEqual(expect.arrayContaining([
+      'incident_resolved', 'incident_escalated', 'incident_acknowledged', 'incident_reported'
+    ]));
+    expect(history.body.data).toHaveLength(4);
+    const planHistory = await request(app).get(`/api/v1/emergency-plans/${createdAlarmPlanId}/events`).set(authHeaders(token));
+    expect(planHistory.status).toBe(200);
+    expect(planHistory.body.data.map((event: any) => event.action)).toEqual(
+      expect.arrayContaining(['plan_created', 'plan_updated', 'drill_recorded'])
+    );
+    expect((await request(app).get(`/api/v1/alarms/${incidentId}/events`)
+      .set(authHeaders(await login(BAVARIA_USER_EMAIL)))).status).toBe(404);
+  });
+
+  test('Wachdienst kann Vorfälle melden und beantworten, aber keine Notfallpläne verwalten', async () => {
+    const token = await login(SITE_RESTRICTED_USER_EMAIL);
+    const siteId = 'b1111111-1111-1111-1111-111111111111';
+    const forbiddenPlan = await request(app).post('/api/v1/emergency-plans').set(authHeaders(token)).send({
+      siteId, scenario: 'EMA - Einbruchsalarm', chainOfAction: ['Leitstelle informieren'],
+      contacts: [], isActive: true
+    });
+    expect(forbiddenPlan.status).toBe(403);
+
+    const reported = await request(app).post('/api/v1/alarms').set(authHeaders(token)).send({
+      siteId, scenario: 'EMA - Einbruchsalarm', severity: 'Dringend',
+      title: 'EMA API-Test', description: 'Bewegung im Lagerbereich.'
+    });
+    expect(reported.status).toBe(201);
+    const incidentId = reported.body.data.id as string;
+    createdAlarmIncidentIds.push(incidentId);
+    const closed = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
+      .set(authHeaders(token)).send({ action: 'resolve', note: 'Objekt geprüft, kein Einbruch.', revisionVersion: 1 });
+    expect(closed.status).toBe(200);
+    expect(closed.body.data.status).toBe('abgeschlossen');
   });
 
   test('Öffentlicher Health-Endpunkt gibt keine Datenbankfehlerdetails preis', async () => {

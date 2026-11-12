@@ -3,8 +3,8 @@
 Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
 
 > **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.**
-> DMS und SOP/Dienstanweisungen sind im Repository implementiert, aber nicht deployed. Alarme/Notfallpläne, Übergaben und Streifenkontrollen sind weiterhin offen.
-> Historischer Gesamtstatus: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md); aktuelle SOP-Umsetzung: [SOP_IMPLEMENTATION_REPORT.md](./SOP_IMPLEMENTATION_REPORT.md).
+> DMS, SOP/Dienstanweisungen und Alarm-/Notfallmanagement sind im Repository implementiert, aber nicht deployed oder für Produktion freigegeben. Übergaben und Streifenkontrollen sind weiterhin offen.
+> Historischer Gesamtstatus: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md); aktuelle SOP-Umsetzung: [SOP_IMPLEMENTATION_REPORT.md](./SOP_IMPLEMENTATION_REPORT.md); Alarm-/Notfallmanagement: [Implementierungsbericht](./ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md).
 
 ---
 
@@ -85,7 +85,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Wachbuch | teilweise | Lesen persistiert; Schreiben über Outbox/Sync |
 | Dokumente | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte PostgreSQL-Verwaltung, private Dateispeicherung, Versionen, Kategorien, Ordner, Audit und REST-API; Einschränkungen siehe [DMS-Bericht](./DMS_IMPLEMENTATION_REPORT.md) |
 | SOPs | implementiert, nicht deployed | Versionierter Prüf-/Freigabe-Workflow, Zuweisungen, Bestätigungen, JSON-Berichte; Einschränkungen siehe [SOP-API](./frontend/SOP_API.md) und [Implementierungsbericht](./SOP_IMPLEMENTATION_REPORT.md) |
-| Alarme/Notfallpläne | offen | Keine Tabelle, kein Endpunkt |
+| Alarme/Notfallpläne | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte Notfallpläne, Alarmvorfälle, Maßnahmenverlauf und Übungsdokumentation; Umfang und Einschränkungen siehe [API-Dokumentation](./frontend/ALARM_EMERGENCY_API.md) und [Implementierungsbericht](./ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md) |
 | Übergaben | offen | Nur lokales Mobile-Modul |
 | Streifenkontrollen | offen | Nur lokales Mobile-Modul |
 | Benutzer/Rechte | teilweise | Login/RBAC vorhanden; Verwaltungs-API offen |
@@ -127,6 +127,8 @@ npm --prefix frontend/backend run build
 * [frontend/KNOWN_ISSUES.md](./frontend/KNOWN_ISSUES.md) — bekannte Einschränkungen
 * [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md) — aktueller Umsetzungsstand
 * [DMS_IMPLEMENTATION_REPORT.md](./DMS_IMPLEMENTATION_REPORT.md) — DMS-Umfang, Sicherheitsmodell, Tests und offene Einschränkungen
+* [frontend/ALARM_EMERGENCY_API.md](./frontend/ALARM_EMERGENCY_API.md) — Alarm-/Notfall-API, Berechtigungen und Workflow
+* [ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md](./ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md) — umgesetzter Umfang, Validierung und Einschränkungen
 
 ---
 

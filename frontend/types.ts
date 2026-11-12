@@ -280,6 +280,31 @@ export interface EmergencyPlan {
   chainOfAction: string[];
   contacts: { role: string; name: string; phone: string }[];
   lastDrillDate: string;
+  isActive: boolean;
+  revisionVersion: number;
+  archivedAt?: string | null;
+}
+
+export type AlarmIncidentStatus = 'gemeldet' | 'bestätigt' | 'eskaliert' | 'abgeschlossen';
+
+export interface AlarmIncident {
+  id: string;
+  tenantId: string;
+  siteId: string;
+  siteName: string;
+  emergencyPlanId?: string | null;
+  scenario: EmergencyPlan['scenario'];
+  severity: 'Niedrig' | 'Normal' | 'Dringend' | 'Kritisch';
+  status: AlarmIncidentStatus;
+  title: string;
+  description: string;
+  reportedAt: string;
+  acknowledgedAt?: string | null;
+  escalatedAt?: string | null;
+  resolvedAt?: string | null;
+  reporterName?: string;
+  resolutionNote?: string | null;
+  revisionVersion: number;
 }
 
 export interface KeyItem {

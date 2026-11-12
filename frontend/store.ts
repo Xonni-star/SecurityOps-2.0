@@ -9,6 +9,7 @@ import {
   SOPDocument,
   SOPPendingAcknowledgement,
   EmergencyPlan,
+  AlarmIncident,
   KeyItem,
   TaskItem,
   ManagedDocument,
@@ -289,6 +290,45 @@ function mapGuardBookRow(row: any, tenantId: string): GuardBookEntry {
   };
 }
 
+function mapEmergencyPlanRow(row: any, tenantId: string): EmergencyPlan {
+  const steps = row.chain_of_action ?? row.action_steps ?? [];
+  return {
+    id: asString(row.id),
+    tenantId,
+    siteId: asString(row.site_id ?? row.siteId),
+    siteName: asString(row.site_name ?? row.siteName),
+    scenario: asString(row.scenario) as EmergencyPlan['scenario'],
+    chainOfAction: Array.isArray(steps) ? steps.filter((step: unknown): step is string => typeof step === 'string') : [],
+    contacts: Array.isArray(row.contacts) ? row.contacts : [],
+    lastDrillDate: asString(row.last_drill_date ?? row.lastDrillDate),
+    isActive: row.is_active ?? row.isActive ?? true,
+    revisionVersion: asNumber(row.revision_version ?? row.revisionVersion, 1),
+    archivedAt: row.archived_at ?? row.archivedAt ?? null
+  };
+}
+
+function mapAlarmIncidentRow(row: any, tenantId: string): AlarmIncident {
+  return {
+    id: asString(row.id),
+    tenantId,
+    siteId: asString(row.site_id ?? row.siteId),
+    siteName: asString(row.site_name ?? row.siteName),
+    emergencyPlanId: row.emergency_plan_id ?? row.emergencyPlanId ?? null,
+    scenario: asString(row.scenario) as EmergencyPlan['scenario'],
+    severity: asString(row.severity, 'Normal') as AlarmIncident['severity'],
+    status: asString(row.status, 'gemeldet') as AlarmIncident['status'],
+    title: asString(row.title),
+    description: asString(row.description),
+    reportedAt: asString(row.reported_at ?? row.reportedAt),
+    acknowledgedAt: row.acknowledged_at ?? row.acknowledgedAt ?? null,
+    escalatedAt: row.escalated_at ?? row.escalatedAt ?? null,
+    resolvedAt: row.resolved_at ?? row.resolvedAt ?? null,
+    reporterName: asString(row.reporter_name ?? row.reporterName),
+    resolutionNote: row.resolution_note ?? row.resolutionNote ?? null,
+    revisionVersion: asNumber(row.revision_version ?? row.revisionVersion, 1)
+  };
+}
+
 
 function mapShiftRow(row: any, tenantId: string): Shift {
   return {
@@ -471,6 +511,7 @@ interface SecurityOpsStore {
   guardBook: GuardBookEntry[];
   sops: SOPDocument[];
   emergencyPlans: EmergencyPlan[];
+  alarmIncidents: AlarmIncident[];
   keys: KeyItem[];
   tasks: TaskItem[];
   documents: ManagedDocument[];
@@ -486,6 +527,7 @@ interface SecurityOpsStore {
   getTenantGuardBook: () => GuardBookEntry[];
   getTenantSOPs: () => SOPDocument[];
   getTenantEmergencyPlans: () => EmergencyPlan[];
+  getTenantAlarmIncidents: () => AlarmIncident[];
   getTenantKeys: () => KeyItem[];
   getTenantTasks: () => TaskItem[];
   getTenantDocuments: () => ManagedDocument[];
@@ -574,7 +616,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         isAuthenticated: true,
         isAuthenticating: false,
         pendingSOPAcknowledgements: [],
-        sops: []
+        sops: [],
+        emergencyPlans: [],
+        alarmIncidents: []
       });
       await get().loadTenantData();
     } catch (error: any) {
@@ -602,7 +646,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       authError: null,
       documents: [],
       pendingSOPAcknowledgements: [],
-      sops: []
+      sops: [],
+      emergencyPlans: [],
+      alarmIncidents: []
     });
   },
 
@@ -628,7 +674,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       await get().loadTenantData();
     } catch {
       apiClient.setCsrfToken(null);
-      set({ authUser: null, isAuthenticated: false, documents: [], pendingSOPAcknowledgements: [], sops: [] });
+      set({
+        authUser: null, isAuthenticated: false, documents: [], pendingSOPAcknowledgements: [], sops: [],
+        emergencyPlans: [], alarmIncidents: []
+      });
     }
   },
 
@@ -647,12 +696,15 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       tasks: [],
       documents: [],
       sops: [],
+      emergencyPlans: [],
+      alarmIncidents: [],
       pendingSOPAcknowledgements: []
     });
 
     const permissions = get().authUser?.permissions || [];
     const canReadDocuments = permissions.includes('documents:read');
     const canReadSOPs = permissions.includes('sop:read') || permissions.includes('sop:manage');
+    const canReadAlarms = permissions.includes('alarm:read') || permissions.includes('alarm:manage');
     const [
       clientsResult,
       sitesResult,
@@ -662,7 +714,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       keysResult,
       tasksResult,
       documentsResult,
-      sopsResult
+      sopsResult,
+      emergencyPlansResult,
+      alarmIncidentsResult
     ] = await Promise.allSettled([
       apiClient.get<any[]>('/customers'),
       apiClient.get<any[]>('/sites'),
@@ -672,7 +726,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       apiClient.get<any[]>('/keys'),
       apiClient.get<any[]>('/tasks'),
       canReadDocuments ? apiClient.get<any[]>('/documents') : Promise.resolve([]),
-      canReadSOPs ? apiClient.get<any[]>('/sops') : Promise.resolve([])
+      canReadSOPs ? apiClient.get<any[]>('/sops') : Promise.resolve([]),
+      canReadAlarms ? apiClient.get<any[]>('/emergency-plans') : Promise.resolve([]),
+      canReadAlarms ? apiClient.get<any[]>('/alarms') : Promise.resolve([])
     ]);
 
     if (!isCurrentSOPIdentity(requestIdentity.tenantId, requestIdentity.userId)) return;
@@ -766,6 +822,18 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       errors.push(`Dienstanweisungen: ${errorText(sopsResult.reason)}`);
     }
 
+    if (canReadAlarms && emergencyPlansResult.status === 'fulfilled') {
+      nextState.emergencyPlans = emergencyPlansResult.value.map((row) => mapEmergencyPlanRow(row, tenantId));
+    } else if (canReadAlarms && emergencyPlansResult.status === 'rejected') {
+      errors.push(`Notfallpläne: ${errorText(emergencyPlansResult.reason)}`);
+    }
+
+    if (canReadAlarms && alarmIncidentsResult.status === 'fulfilled') {
+      nextState.alarmIncidents = alarmIncidentsResult.value.map((row) => mapAlarmIncidentRow(row, tenantId));
+    } else if (canReadAlarms && alarmIncidentsResult.status === 'rejected') {
+      errors.push(`Alarmvorfälle: ${errorText(alarmIncidentsResult.reason)}`);
+    }
+
     const dataLoadError = errors.length > 0 ? errors.join(' | ') : null;
     set({ ...nextState, isLoadingData: false, dataLoadError });
     if (canReadSOPs && sopsResult.status === 'fulfilled') void get().syncPendingSOPAcknowledgements();
@@ -785,7 +853,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   })(),
   setCurrentTenantId: (tenantId) => {
     apiClient.setTenantId(tenantId);
-    set({ currentTenantId: tenantId, pendingSOPAcknowledgements: [], sops: [] });
+    set({
+      currentTenantId: tenantId, pendingSOPAcknowledgements: [], sops: [],
+      emergencyPlans: [], alarmIncidents: []
+    });
     void get().loadTenantData();
   },
   getCurrentTenant: () => {
@@ -1305,6 +1376,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   sops: [],
   pendingSOPAcknowledgements: [],
   emergencyPlans: initialEmergencyPlans,
+  alarmIncidents: [],
   keys: initialKeys,
   tasks: initialTasks,
   documents: [],
@@ -1339,6 +1411,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   getTenantEmergencyPlans: () => {
     const { emergencyPlans, currentTenantId } = get();
     return emergencyPlans.filter((ep) => ep.tenantId === currentTenantId);
+  },
+  getTenantAlarmIncidents: () => {
+    const { alarmIncidents, currentTenantId } = get();
+    return alarmIncidents.filter((incident) => incident.tenantId === currentTenantId);
   },
   getTenantKeys: () => {
     const { keys, currentTenantId } = get();

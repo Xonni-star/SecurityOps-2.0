@@ -14,6 +14,7 @@ import * as resourceController from './controllers/resourceController';
 import * as employeeController from './controllers/employeeController';
 import * as documentController from './controllers/documentController';
 import * as sopController from './controllers/sopController';
+import * as alarmController from './controllers/alarmController';
 
 export const app = express();
 
@@ -164,6 +165,18 @@ app.post('/api/v1/sops/:id/withdraw', authenticateJwt, requirePermission('sop:pu
 app.post('/api/v1/sops/:id/archive', authenticateJwt, requirePermission('sop:archive'), sopController.archiveSop);
 app.get('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:read'), sopController.listAssignments);
 app.post('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:assign'), sopController.assignSop);
+
+// Alarm- und Notfallmanagement
+app.get('/api/v1/emergency-plans', authenticateJwt, requirePermission('alarm:read'), alarmController.listEmergencyPlans);
+app.post('/api/v1/emergency-plans', authenticateJwt, requirePermission('alarm:manage'), alarmController.createEmergencyPlan);
+app.patch('/api/v1/emergency-plans/:id', authenticateJwt, requirePermission('alarm:manage'), alarmController.updateEmergencyPlan);
+app.post('/api/v1/emergency-plans/:id/archive', authenticateJwt, requirePermission('alarm:manage'), alarmController.archiveEmergencyPlan);
+app.post('/api/v1/emergency-plans/:id/drills', authenticateJwt, requirePermission('alarm:manage'), alarmController.recordEmergencyDrill);
+app.get('/api/v1/emergency-plans/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmController.listEmergencyPlanEvents);
+app.get('/api/v1/alarms', authenticateJwt, requirePermission('alarm:read'), alarmController.listAlarmIncidents);
+app.post('/api/v1/alarms', authenticateJwt, requirePermission('alarm:report'), alarmController.reportAlarmIncident);
+app.get('/api/v1/alarms/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmController.listAlarmIncidentEvents);
+app.post('/api/v1/alarms/:id/transitions', authenticateJwt, requirePermission('alarm:respond'), alarmController.transitionAlarmIncident);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
