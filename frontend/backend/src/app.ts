@@ -124,6 +124,6 @@ app.post('/api/v1/logbook/revisions', authenticateJwt, requirePermission('logboo
 
 // Offline-Synchronisations-Endpunkte
 app.post('/api/v1/sync/push', authenticateJwt, syncController.pushSyncMutations);
-app.post('/api/v1/sync/conflicts/resolve', authenticateJwt, requirePermission('logbook:create'), syncController.resolveSyncConflict);
+app.post('/api/v1/sync/conflicts/resolve', authenticateJwt, syncController.resolveSyncConflict);
 
 app.use(errorHandler);

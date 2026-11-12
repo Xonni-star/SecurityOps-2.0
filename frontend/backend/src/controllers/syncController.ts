@@ -702,6 +702,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     const tenantId = req.user!.tenantId;
     const userEmail = req.user!.email;
     const body = conflictResolveSchema.parse(req.body);
+    const permissionByEntity = {
+      guardbook: 'logbook:create',
+      shift: 'shifts:manage',
+      task: 'tasks:manage',
+      key: 'keys:manage'
+    } as const;
+    if (!req.user!.permissions.includes(permissionByEntity[body.entityType])) {
+      res.status(403).json({ success: false, message: 'Zugriff verweigert: fehlende Berechtigung für diese Konfliktauflösung.' });
+      return;
+    }
 
     const payloadHash = computePayloadHash({
       clientUuid: body.clientUuid,
