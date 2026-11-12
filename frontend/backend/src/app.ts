@@ -123,7 +123,7 @@ app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create')
 app.post('/api/v1/logbook/revisions', authenticateJwt, requirePermission('logbook:create'), guardbookController.addGuardbookRevision);
 
 // Offline-Synchronisations-Endpunkte
-app.post('/api/v1/sync/push', authenticateJwt, requirePermission('logbook:create'), syncController.pushSyncMutations);
+app.post('/api/v1/sync/push', authenticateJwt, syncController.pushSyncMutations);
 app.post('/api/v1/sync/conflicts/resolve', authenticateJwt, requirePermission('logbook:create'), syncController.resolveSyncConflict);
 
 app.use(errorHandler);

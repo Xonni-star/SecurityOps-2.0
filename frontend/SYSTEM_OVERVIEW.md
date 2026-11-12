@@ -20,7 +20,7 @@
 | **QM & Anweisungen** | `SOPModule.tsx` | `/api/v1/sops` | `instructions`, `acknowledgements`| Ja | Ja |
 | **Alarmmanagement** | `AlarmsModule.tsx` | `/api/v1/alarms` | `alarm_plans` | Ja | Ja |
 | **Aufgaben & Maßnahmen**| `TasksModule.tsx` | `/api/v1/tasks` | `tasks` | Ja | Ja (Conflict Diff) |
-| **Dokumente (DMS)** | `DocumentsModule.tsx` | `/api/v1/documents` | `managed_documents` | Ja | Nein |
+| **Dokumente (DMS)** | `DocumentsModule.tsx` | Nicht vorhanden | Nicht vorhanden | Nein | Nein (nur lokale Metadaten; kein echter Datei-Upload/-Download) |
 | **Automationen & Watchdog**| `AutomationCenter.tsx` | `/api/v1/automations` | `automation_rules`, `logs` | Ja | Ja |
 | **Mobile Guard App** | `MobileAppShell.tsx` | `/api/v1/mobile/*` | `patrol_scans`, `handovers` | Ja | Ja |
 | **E2E-Abnahme & Release**| `E2EAcceptanceCenter.tsx`| `/api/v1/reporting/kpis`| Alle Tabellen | Ja | Ja |

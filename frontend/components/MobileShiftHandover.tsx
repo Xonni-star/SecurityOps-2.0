@@ -37,11 +37,12 @@ export const MobileShiftHandover: React.FC = () => {
   const openIncidents = guardBook.filter((g) => !g.resolved);
   const issuedKeys = keys.filter((k) => k.status === 'Ausgegeben');
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const relievingGuard = employees.find((e) => e.id === relievingGuardId);
 
-    submitShiftHandover({
+    try {
+    await submitShiftHandover({
       siteId: activeSite.id,
       siteName: activeSite.name,
       relievedGuardId: currentUserId,
@@ -56,6 +57,9 @@ export const MobileShiftHandover: React.FC = () => {
 
     setIsSubmitted(true);
     setTimeout(() => setIsSubmitted(false), 4000);
+    } catch {
+      alert('Schichtübergabe konnte nicht sicher lokal gespeichert werden. Bitte erneut versuchen.');
+    }
   };
 
   return (
@@ -70,7 +74,7 @@ export const MobileShiftHandover: React.FC = () => {
       {isSubmitted && (
         <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 font-semibold flex items-center gap-2">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>Schichtübergabe erfolgreich quittiert und archiviert!</span>
+          <span>{isOnline ? 'Schichtübergabe lokal erfasst. Serverbestätigung steht noch aus.' : 'Schichtübergabe offline lokal erfasst. Synchronisierung steht aus.'}</span>
         </div>
       )}
 

@@ -11,6 +11,8 @@ import {
   KeyItem,
   TaskItem,
   ManagedDocument,
+  PatrolScanEvent,
+  ShiftHandoverProtocol,
   AutomationRule,
   AutomationExecutionLog,
   NotificationDelivery,
@@ -26,8 +28,6 @@ import {
   ReportDefinition,
   ControllingKPIs,
   ShiftSwapRequest,
-  PatrolScanEvent,
-  ShiftHandoverProtocol,
   ConflictResolutionResult
 } from './types';
 import {
@@ -340,6 +340,8 @@ interface SecurityOpsStore {
   keys: KeyItem[];
   tasks: TaskItem[];
   documents: ManagedDocument[];
+  patrolScans: PatrolScanEvent[];
+  shiftHandovers: ShiftHandoverProtocol[];
 
   // Tenant-Partitioned Selectors
   getTenantClients: () => Client[];
@@ -352,6 +354,8 @@ interface SecurityOpsStore {
   getTenantKeys: () => KeyItem[];
   getTenantTasks: () => TaskItem[];
   getTenantDocuments: () => ManagedDocument[];
+  getTenantPatrolScans: () => PatrolScanEvent[];
+  getTenantShiftHandovers: () => ShiftHandoverProtocol[];
   getTenantAutomations: () => AutomationRule[];
   getTenantAuditLogs: () => SecurityAuditEntry[];
   getTenantExecutionLogs: () => AutomationExecutionLog[];
@@ -382,6 +386,8 @@ interface SecurityOpsStore {
   issueKey: (keyId: string, holderName: string, holderId: string, returnDate: string) => Promise<void>;
   returnKey: (keyId: string) => Promise<void>;
   addTask: (task: Omit<TaskItem, 'id' | 'tenantId'>) => Promise<void>;
+  addPatrolScan: (scan: Omit<PatrolScanEvent, 'id' | 'tenantId' | 'scannedAt' | 'offlineCaptured'>) => Promise<void>;
+  submitShiftHandover: (handover: Omit<ShiftHandoverProtocol, 'id' | 'tenantId' | 'handoverTime' | 'offlineCaptured'>) => Promise<void>;
   toggleTaskStatus: (taskId: string) => Promise<void>;
   addDocument: (doc: Omit<ManagedDocument, 'id' | 'tenantId' | 'uploadedAt'>) => void;
   deleteDocument: (docId: string) => void;
@@ -1087,6 +1093,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   keys: initialKeys,
   tasks: initialTasks,
   documents: initialDocuments,
+  patrolScans: [],
+  shiftHandovers: [],
 
   getTenantClients: () => {
     const { clients, currentTenantId } = get();
@@ -1127,6 +1135,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   getTenantDocuments: () => {
     const { documents, currentTenantId } = get();
     return documents.filter((d) => d.tenantId === currentTenantId);
+  },
+  getTenantPatrolScans: () => {
+    const { patrolScans, currentTenantId } = get();
+    return patrolScans.filter((scan) => scan.tenantId === currentTenantId);
+  },
+  getTenantShiftHandovers: () => {
+    const { shiftHandovers, currentTenantId } = get();
+    return shiftHandovers.filter((handover) => handover.tenantId === currentTenantId);
   },
   getTenantAutomations: () => {
     const { automations, currentTenantId } = get();
@@ -1541,6 +1557,26 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         'alert'
       );
     }
+  },
+
+  addPatrolScan: async (scan) => {
+    const { currentTenantId, isOnline } = get();
+    const scannedAt = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const record: PatrolScanEvent = { ...scan, id, tenantId: currentTenantId, scannedAt, offlineCaptured: !isOnline };
+    await get().enqueueOfflineAction({ tenantId: currentTenantId, entityType: 'patrol', action: 'CREATE', payload: record });
+    set((state) => ({ patrolScans: [record, ...state.patrolScans] }));
+    if (isOnline) void get().triggerManualSync();
+  },
+
+  submitShiftHandover: async (handover) => {
+    const { currentTenantId, isOnline } = get();
+    const handoverTime = new Date().toISOString();
+    const id = crypto.randomUUID();
+    const record: ShiftHandoverProtocol = { ...handover, id, tenantId: currentTenantId, handoverTime, offlineCaptured: !isOnline };
+    await get().enqueueOfflineAction({ tenantId: currentTenantId, entityType: 'handover', action: 'CREATE', payload: record });
+    set((state) => ({ shiftHandovers: [record, ...state.shiftHandovers] }));
+    if (isOnline) void get().triggerManualSync();
   },
 
   addGuardBookEntry: async (entry) => {

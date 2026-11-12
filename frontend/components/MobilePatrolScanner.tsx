@@ -29,7 +29,7 @@ export const MobilePatrolScanner: React.FC = () => {
   const scans = getTenantPatrolScans();
   const activeSite = sites[0];
 
-  const [selectedMethod, setSelectedMethod] = useState<'QR_CODE' | 'NFC_TAG' | 'MANUELL'>('QR_CODE');
+  const [selectedMethod, setSelectedMethod] = useState<'QR_CODE' | 'NFC_TAG' | 'MANUELL'>('MANUELL');
   const [activeCheckpoint, setActiveCheckpoint] = useState<Checkpoint>(activeSite?.checkpoints[0] || {} as Checkpoint);
   const [scanSuccessMessage, setScanSuccessMessage] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
@@ -58,7 +58,7 @@ export const MobilePatrolScanner: React.FC = () => {
     setCameraActive(false);
   };
 
-  const handleExecuteScan = (checkpoint: Checkpoint) => {
+  const handleExecuteScan = async (checkpoint: Checkpoint) => {
     // Anti-duplicate protection: check if same checkpoint was scanned in last 2 minutes
     const lastScan = scans.find((s) => s.checkpointId === checkpoint.id);
     if (lastScan) {
@@ -68,7 +68,8 @@ export const MobilePatrolScanner: React.FC = () => {
       }
     }
 
-    addPatrolScan({
+    try {
+    await addPatrolScan({
       siteId: activeSite.id,
       siteName: activeSite.name,
       checkpointId: checkpoint.id,
@@ -81,13 +82,16 @@ export const MobilePatrolScanner: React.FC = () => {
       notes: notes || 'Regulärer Kontrollgang-Scan'
     });
 
-    setScanSuccessMessage(`Kontrollpunkt ${checkpoint.code} (${checkpoint.name}) erfolgreich erfasst!`);
+    setScanSuccessMessage(`Kontrollpunkt ${checkpoint.code} lokal erfasst${isOnline ? ' – Serverbestätigung steht aus' : ' – offline, Synchronisierung steht aus'}.`);
     setNotes('');
     stopCamera();
 
     setTimeout(() => {
       setScanSuccessMessage(null);
     }, 3500);
+    } catch {
+      alert('Kontrollpunkt konnte nicht sicher lokal gespeichert werden. Bitte erneut versuchen.');
+    }
   };
 
   return (
@@ -115,7 +119,8 @@ export const MobilePatrolScanner: React.FC = () => {
       {/* Scan Method Switcher */}
       <div className="grid grid-cols-3 gap-2">
         <button
-          onClick={() => { setSelectedMethod('QR_CODE'); startCamera(); }}
+          disabled
+          title="QR-Decodierung ist derzeit nicht implementiert"
           className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition ${
             selectedMethod === 'QR_CODE'
               ? 'bg-blue-600/20 border-blue-500 text-white'
@@ -123,11 +128,12 @@ export const MobilePatrolScanner: React.FC = () => {
           }`}
         >
           <QrCode className="w-4 h-4 text-blue-400" />
-          <span className="font-semibold text-[11px]">QR-Code</span>
+          <span className="font-semibold text-[11px]">QR (nicht verfügbar)</span>
         </button>
 
         <button
-          onClick={() => { setSelectedMethod('NFC_TAG'); stopCamera(); }}
+          disabled
+          title="NFC-Lesen ist derzeit nicht implementiert"
           className={`p-3 rounded-xl border flex flex-col items-center gap-1.5 transition ${
             selectedMethod === 'NFC_TAG'
               ? 'bg-blue-600/20 border-blue-500 text-white'
@@ -135,7 +141,7 @@ export const MobilePatrolScanner: React.FC = () => {
           }`}
         >
           <Radio className="w-4 h-4 text-emerald-400" />
-          <span className="font-semibold text-[11px]">NFC-Tag</span>
+          <span className="font-semibold text-[11px]">NFC (nicht verfügbar)</span>
         </button>
 
         <button
