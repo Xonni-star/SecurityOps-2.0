@@ -209,12 +209,13 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
     const migrationFile = path.join(dir, '011_operational_sync_permissions.sql');
-    const migrationSql = fs.readFileSync(migrationFile, 'utf8');
+    const migrationSql = fs.readFileSync(path.join(REAL_MIGRATIONS_DIR, '011_operational_sync_permissions.sql'), 'utf8');
     fs.unlinkSync(migrationFile);
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
 
     const legacyWriter = await queryInDatabase<{ id: string }>(db, `INSERT INTO roles (name) VALUES ('legacy_offline_writer') RETURNING id`);
     const reader = await queryInDatabase<{ id: string }>(db, `INSERT INTO roles (name) VALUES ('offline_reader') RETURNING id`);
+    await queryInDatabase(db, `INSERT INTO permissions (code,module) VALUES ('logbook:create','logbook'),('logbook:read','logbook') ON CONFLICT (code) DO NOTHING`);
     await queryInDatabase(db, `INSERT INTO role_permissions (role_id,permission_id) SELECT $1,id FROM permissions WHERE code='logbook:create'`, [legacyWriter[0].id]);
     await queryInDatabase(db, `INSERT INTO role_permissions (role_id,permission_id) SELECT $1,id FROM permissions WHERE code='logbook:read'`, [reader[0].id]);
 
@@ -305,6 +306,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   test('7. Bestehende Datenbank mit 001–005 wird als Baseline übernommen', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
+    fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
     const employeeMigrationPath = path.join(dir, '007_employee_lifecycle.sql');
     const employeeMigration = fs.readFileSync(employeeMigrationPath, 'utf8');
     fs.unlinkSync(employeeMigrationPath);
@@ -324,7 +326,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['005', '006', '007', '009', '011']);
+    expect(result.applied).toEqual(['005', '006', '007', '009']);
     expect(result.baselined).toEqual(['001', '002', '003', '004']);
 
     const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
@@ -369,6 +371,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
   async function createFullBaselineDatabase(): Promise<{ db: string; dir: string }> {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
+    fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
     return { db, dir };
   }
@@ -988,7 +991,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(9);
+    expect(await historyRows(db)).toHaveLength(10);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {
