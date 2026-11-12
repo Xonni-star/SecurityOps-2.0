@@ -13,6 +13,7 @@ import * as syncController from './controllers/syncController';
 import * as resourceController from './controllers/resourceController';
 import * as employeeController from './controllers/employeeController';
 import * as documentController from './controllers/documentController';
+import * as sopController from './controllers/sopController';
 
 export const app = express();
 
@@ -145,6 +146,24 @@ app.get('/api/v1/documents/:id/audit', authenticateJwt, requirePermission('docum
 app.patch('/api/v1/documents/:id', authenticateJwt, requirePermission('documents:update'), documentController.updateDocument);
 app.post('/api/v1/documents/:id/archive', authenticateJwt, requirePermission('documents:archive'), documentController.archiveDocument);
 app.post('/api/v1/documents/:id/restore', authenticateJwt, requirePermission('documents:restore'), documentController.restoreDocument);
+
+// SOP / Dienstanweisungen
+app.get('/api/v1/sops', authenticateJwt, requirePermission('sop:read'), sopController.listSops);
+app.post('/api/v1/sops', authenticateJwt, requirePermission('sop:create'), sopController.createSop);
+app.get('/api/v1/sops/reports', authenticateJwt, requirePermission('sop:manage'), sopController.listSopReports);
+app.get('/api/v1/sops/reminders', authenticateJwt, requirePermission('sop:read'), sopController.listSopReminders);
+app.post('/api/v1/sops/assignments/:assignmentId/acknowledge', authenticateJwt, requirePermission('sop:acknowledge'), sopController.acknowledgeAssignment);
+app.patch('/api/v1/sops/:id', authenticateJwt, requirePermission('sop:update'), sopController.updateSop);
+app.get('/api/v1/sops/:id/versions', authenticateJwt, requirePermission('sop:read'), sopController.listVersions);
+app.post('/api/v1/sops/:id/versions', authenticateJwt, requirePermission('sop:update'), sopController.createVersion);
+app.post('/api/v1/sops/:id/submit', authenticateJwt, requirePermission('sop:submit'), sopController.submitSop);
+app.post('/api/v1/sops/:id/review', authenticateJwt, requirePermission('sop:review'), sopController.reviewSop);
+app.post('/api/v1/sops/:id/approve', authenticateJwt, requirePermission('sop:approve'), sopController.approveSop);
+app.post('/api/v1/sops/:id/publish', authenticateJwt, requirePermission('sop:publish'), sopController.publishSop);
+app.post('/api/v1/sops/:id/withdraw', authenticateJwt, requirePermission('sop:publish'), sopController.withdrawSop);
+app.post('/api/v1/sops/:id/archive', authenticateJwt, requirePermission('sop:archive'), sopController.archiveSop);
+app.get('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:read'), sopController.listAssignments);
+app.post('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:assign'), sopController.assignSop);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);

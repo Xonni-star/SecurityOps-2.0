@@ -215,14 +215,60 @@ export interface SOPDocument {
   title: string;
   category: 'Objektbezogen' | 'Allgemeine Dienstanweisung' | 'Notfall-SOP' | 'Arbeitssicherheit';
   siteId?: string;
+  customerId?: string;
+  description?: string;
+  effectiveFrom?: string;
+  effectiveUntil?: string;
+  dmsDocumentId?: string;
+  assignmentId?: string;
+  status?: 'draft' | 'in_review' | 'reviewed' | 'approved' | 'published' | 'withdrawn' | 'archived' | string;
   version: string;
   effectiveDate: string;
   author: string;
-  signedCount: number;
-  totalRequired: number;
+  dueAt?: string;
+  signedCount?: number;
+  totalRequired?: number;
   content: string;
   mandatoryAcknowledgment: boolean;
   unacknowledgedEmployeeNames?: string[];
+  currentUserAcknowledgment?: 'confirmed' | 'pending' | 'stale' | 'unacknowledged';
+  versionId?: string;
+  acknowledgedAt?: string;
+  assignments?: SOPAssignment[];
+}
+
+export interface SOPAssignment {
+  id: string;
+  type: 'employee' | 'site' | 'customer' | 'tenant';
+  targetId?: string;
+  targetName?: string;
+  status?: string;
+  dueAt?: string;
+  acknowledgedAt?: string;
+  employeeId?: string;
+  employeeName?: string;
+}
+
+export interface SOPVersion {
+  id: string;
+  version: string | number;
+  title?: string;
+  content?: string;
+  changeReason: string;
+  createdAt: string;
+  createdBy?: string;
+}
+
+export interface SOPPendingAcknowledgement {
+  tenantId: string;
+  userId: string;
+  sopId: string;
+  assignmentId: string;
+  clientMutationId: string;
+  capturedAt: string;
+  versionId: string;
+  version: string;
+  status?: 'pending' | 'stale';
 }
 
 export interface EmergencyPlan {

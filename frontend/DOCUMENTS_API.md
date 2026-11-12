@@ -22,7 +22,7 @@ Uploads use `Content-Type: application/octet-stream`, `X-File-Name` (URL-encoded
 | `PATCH /:id/relationship` | `documents:update` | Change/remove the tenant-validated relationship |
 | `GET /:id/audit` | `documents:read` | Read append-only DMS audit history |
 
-Supported relationship types are `customer`, `site`, `employee`, `shift`, and `incident` (a persisted `guardbook_entries` row). Relationship IDs are validated against a same-tenant PostgreSQL row and composite foreign key. SOP and alarm/incident-management module records do not yet have backend persistence and are not accepted as fake links.
+Supported relationship types are `customer`, `site`, `employee`, `shift`, and `incident` (a persisted `guardbook_entries` row). Relationship IDs are validated against a same-tenant PostgreSQL row and composite foreign key. SOPs are not a polymorphic DMS relationship type; a SOP version can instead reference an existing DMS document through its tenant-validated document foreign key. Alarm/incident-management module records do not yet have backend persistence and are not accepted as fake links.
 
 ## Folders, categories, and tags
 

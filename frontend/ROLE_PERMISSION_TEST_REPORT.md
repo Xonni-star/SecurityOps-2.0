@@ -10,4 +10,8 @@
 7. **Wachdienstmitarbeiter**: Mobiler Zugriff ("Mein Dienst", QR/NFC Scanner, Wachbuch, Schichtübergabe).
 8. **Lesender Zugriff (Auditor)**: Revisionssichere Einsicht in Berichte und Prüfprotokolle ohne Änderungsrechte.
 
-**Ergebnis**: Alle 8 Rollen werden serverseitig in `backend/api.py` via `require_permission` forciert. Direkte API-Aufrufe ohne erforderliche Berechtigung werden mit HTTP 403 abgewiesen.
+## 2. SOP-Berechtigungen und Funktionstrennung
+
+Die produktiven SOP-Routen sind in `backend/src/app.ts` registriert und erzwingen serverseitig die jeweiligen `sop:*`-Berechtigungen über `requirePermission`. `backend/src/seeds/seed.ts` weist alle SOP-Rechte Systemadministrator, Geschäftsführung, Einsatzleitung und Qualitätsmanagement zu; Personalverwaltung erhält Lesen, Erstellen, Aktualisieren, Einreichen, Zuweisen und Verwalten; Objektleitung und Wachdienstmitarbeiter erhalten Lesen und Bestätigen; Auditoren erhalten Lesen.
+
+Zusätzliche Controller-Prüfungen setzen Funktionstrennung pro konkreter Version durch: weder Ersteller noch Einreicher dürfen prüfen oder freigeben, und ein Prüfer darf die geprüfte Version nicht freigeben. API-Integrationstests und Controller-Regressionstests decken die Ablehnung unzulässiger Aktionen ab.

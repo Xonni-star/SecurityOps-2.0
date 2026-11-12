@@ -28,7 +28,7 @@ The frontend build reports Vite warnings about `__dirname` in the Vite config an
 ## Limitations and follow-up
 
 - No antivirus engine is configured; `not_scanned` is the only supported scan result in this deployment.
-- Relationships are limited to persisted customers, sites, employees, shifts, and guardbook incidents. SOP and alarm/alert relationships are unavailable until those modules have server-side persisted entities.
+- DMS polymorphic relationships are limited to persisted customers, sites, employees, shifts, and guardbook incidents. SOP versions can reference an existing DMS document through their tenant-scoped foreign key; alarm/alert relationships remain unavailable.
 - Authorization is based on tenant RLS and DMS role permissions. Per-document and per-folder ACLs are not implemented.
 - Offline mode does not cache file blobs or support offline DMS edits/uploads.
 - Archived documents and old versions are retained. Automatic retention and physical deletion policies are not implemented.

@@ -13,6 +13,11 @@ const SITE_RESTRICTED_USER_EMAIL = 'api.site-restricted@secops.local';
 const DMS_RESTRICTED_USER_EMAIL = 'api.dms-restricted@secops.local';
 const DMS_RESTRICTED_ROLE = 'DMS API restricted test';
 const TENANT_BAVARIA_ID = '22222222-2222-2222-2222-222222222222';
+const TENANT_FFM_ID = '11111111-1111-1111-1111-111111111111';
+const SOP_AUTHOR_EMAIL = `sop-author-${Date.now()}@example.test`;
+const SOP_REVIEWER_EMAIL = `sop-reviewer-${Date.now()}@example.test`;
+const SOP_APPROVER_EMAIL = `sop-approver-${Date.now()}@example.test`;
+const SOP_EMPLOYEE_EMAIL = `sop-employee-${Date.now()}@example.test`;
 const clientNumber = `API-TEST-${Date.now()}`;
 const siteCode = `API-SITE-${Date.now()}`;
 const personnelNumber = `API-MA-${Date.now()}`;
@@ -25,6 +30,13 @@ let archivedCustomerSiteCode: string | undefined;
 let createdTaskId: string | undefined;
 let createdDmsDocumentId: string | undefined;
 let createdDmsFolderId: string | undefined;
+let createdSopId: string | undefined;
+let createdSopEmployeeId: string | undefined;
+let createdSopSiteId: string | undefined;
+let createdSopCustomerId: string | undefined;
+let createdSopShiftId: string | undefined;
+let createdCrossTenantClientId: string | undefined;
+let createdCrossTenantSiteId: string | undefined;
 const keyNumber = `API-KEY-${Date.now()}`;
 
 async function login(email: string): Promise<string> {
@@ -99,9 +111,88 @@ beforeAll(async () => {
     `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)`,
     [dmsRestricted.rows[0].id, dmsRole.rows[0].id, '11111111-1111-1111-1111-111111111111']
   );
+
+  const authorRole = await migrationPool.query("SELECT id FROM roles WHERE name='Personalverwaltung' LIMIT 1");
+  const reviewerRole = await migrationPool.query("SELECT id FROM roles WHERE name='Qualitätsmanagement' LIMIT 1");
+  const employeeRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter' LIMIT 1");
+  if (!authorRole.rows.length || !reviewerRole.rows.length || !employeeRole.rows.length) {
+    throw new Error('SOP integration test requires Personalverwaltung, Qualitätsmanagement and Wachdienstmitarbeiter roles.');
+  }
+  const sopAuthor = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Author','+49 30 100') RETURNING id`,
+    [SOP_AUTHOR_EMAIL,passwordHash]
+  );
+  const sopReviewer = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Reviewer','+49 30 101') RETURNING id`,
+    [SOP_REVIEWER_EMAIL,passwordHash]
+  );
+  const sopApprover = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Approver','+49 30 103') RETURNING id`,
+    [SOP_APPROVER_EMAIL,passwordHash]
+  );
+  const sopEmployee = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Employee','+49 30 102') RETURNING id`,
+    [SOP_EMPLOYEE_EMAIL,passwordHash]
+  );
+  await migrationPool.query(
+    `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES
+      ($1,$2,$4),($3,$5,$4),($6,$5,$4),($7,$8,$4)`,
+    [sopAuthor.rows[0].id,authorRole.rows[0].id,sopReviewer.rows[0].id,TENANT_FFM_ID,
+      reviewerRole.rows[0].id,sopApprover.rows[0].id,sopEmployee.rows[0].id,employeeRole.rows[0].id]
+  );
+  const sopEmployeeRow = await migrationPool.query(
+    `INSERT INTO employees (tenant_id,personnel_number,first_name,last_name,email,phone,role,status,date_of_joining)
+     VALUES ($1,$2,'SOP','Employee',$3,'+49 30 102','Wachdienstmitarbeiter','Aktiv',CURRENT_DATE)
+     RETURNING id`,
+    [TENANT_FFM_ID,`SOP-INT-${Date.now()}`,SOP_EMPLOYEE_EMAIL]
+  );
+  createdSopEmployeeId = sopEmployeeRow.rows[0].id;
+  const sopClient = await migrationPool.query(
+    'SELECT id FROM clients WHERE tenant_id=$1 ORDER BY id LIMIT 1',
+    [TENANT_FFM_ID]
+  );
+  createdSopCustomerId = sopClient.rows[0].id;
+  const sopSite = await migrationPool.query(
+    `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+     VALUES ($1,$2,$3,'SOP membership test site','Testweg 1')
+     RETURNING id`,
+    [TENANT_FFM_ID,sopClient.rows[0].id,`SOP-SITE-${Date.now()}`]
+  );
+  createdSopSiteId = sopSite.rows[0].id;
 });
 
 afterAll(async () => {
+  if (createdSopShiftId) {
+    await migrationPool.query('DELETE FROM shifts WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopShiftId]);
+  }
+  if (createdSopId) {
+    const cleanup = await migrationPool.connect();
+    try {
+      await cleanup.query('SET session_replication_role = replica');
+      await cleanup.query('DELETE FROM sop_assignments WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_assignment_targets WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_events WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('UPDATE sop_instructions SET current_version_id=NULL,draft_version_id=NULL WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_versions WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_instructions WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopId]);
+    } finally {
+      await cleanup.query('SET session_replication_role = origin');
+      cleanup.release();
+    }
+  }
+  if (createdSopSiteId) {
+    await migrationPool.query('DELETE FROM sites WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopSiteId]);
+  }
+  if (createdCrossTenantSiteId) {
+    await migrationPool.query('DELETE FROM sites WHERE tenant_id=$1 AND id=$2', [TENANT_BAVARIA_ID,createdCrossTenantSiteId]);
+  }
+  if (createdCrossTenantClientId) {
+    await migrationPool.query('DELETE FROM clients WHERE tenant_id=$1 AND id=$2', [TENANT_BAVARIA_ID,createdCrossTenantClientId]);
+  }
   if (createdDmsDocumentId) {
     const cleanup = await migrationPool.connect();
     try {
@@ -144,6 +235,16 @@ afterAll(async () => {
   await migrationPool.query('DELETE FROM users WHERE email = $1', [DMS_RESTRICTED_USER_EMAIL]);
   await migrationPool.query('DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE name=$1)', [DMS_RESTRICTED_ROLE]);
   await migrationPool.query('DELETE FROM roles WHERE name=$1', [DMS_RESTRICTED_ROLE]);
+  await migrationPool.query(
+    'DELETE FROM user_sessions WHERE user_id IN (SELECT id FROM users WHERE email = ANY($1::text[]))',
+    [[SOP_AUTHOR_EMAIL,SOP_REVIEWER_EMAIL,SOP_APPROVER_EMAIL,SOP_EMPLOYEE_EMAIL]]
+  );
+  await migrationPool.query(
+    'DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = ANY($1::text[]))',
+    [[SOP_AUTHOR_EMAIL,SOP_REVIEWER_EMAIL,SOP_APPROVER_EMAIL,SOP_EMPLOYEE_EMAIL]]
+  );
+  await migrationPool.query('DELETE FROM employees WHERE id=$1', [createdSopEmployeeId ?? null]);
+  await migrationPool.query('DELETE FROM users WHERE email = ANY($1::text[])', [[SOP_AUTHOR_EMAIL,SOP_REVIEWER_EMAIL,SOP_APPROVER_EMAIL,SOP_EMPLOYEE_EMAIL]]);
   await pool.end();
   await migrationPool.end();
 });
@@ -355,6 +456,44 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const token = await login(SEED_USER_EMAIL);
     const employeeId = crypto.randomUUID();
     const mutationId = crypto.randomUUID();
+    const suffix = Date.now();
+    const foreignClient = await migrationPool.query(
+      `INSERT INTO clients (tenant_id,client_number,company_name,contact_person,email,phone,address,contract_start,contract_end)
+       VALUES ($1,$2,'Foreign sync site client','Test Person',$3,'+49 89 000','Test address',CURRENT_DATE,CURRENT_DATE + 365)
+       RETURNING id`,
+      [TENANT_BAVARIA_ID,`SYNC-FOREIGN-${suffix}`,`sync-foreign-${suffix}@example.test`]
+    );
+    createdCrossTenantClientId = foreignClient.rows[0].id;
+    const foreignSite = await migrationPool.query(
+      `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+       VALUES ($1,$2,$3,'Foreign sync site','Test address') RETURNING id`,
+      [TENANT_BAVARIA_ID,createdCrossTenantClientId,`SYNC-FOREIGN-${suffix}`]
+    );
+    createdCrossTenantSiteId = foreignSite.rows[0].id;
+
+    const invalidCreateId = crypto.randomUUID();
+    const invalidCreate = await request(app).post('/api/v1/employees/sync').set(authHeaders(token)).send({
+      deviceId: 'employee-outbox-test',
+      mutations: [{
+        clientUuid: crypto.randomUUID(), entityType: 'employee', action: 'CREATE',
+        clientTimestamp: new Date().toISOString(), baseVersion: 1,
+        payload: {
+          id: invalidCreateId, personnelNumber: `API-OFF-FOREIGN-${suffix}`,
+          firstName: 'Foreign', lastName: 'Site', email: `foreign-${suffix}@secops.local`,
+          phone: '+49 69 123', role: 'Wachdienstmitarbeiter', status: 'Aktiv',
+          weeklyHours: 40, hourlyRate: 19, dateOfJoining: '2026-01-01',
+          assignedSiteIds: [createdCrossTenantSiteId]
+        }
+      }]
+    });
+    expect(invalidCreate.status).toBe(200);
+    expect(invalidCreate.body.data[0].status).toBe('REJECTED');
+    const rejectedCreate = await migrationPool.query(
+      'SELECT 1 FROM employees WHERE tenant_id=$1 AND id=$2',
+      ['11111111-1111-1111-1111-111111111111',invalidCreateId]
+    );
+    expect(rejectedCreate.rows).toHaveLength(0);
+
     createdSyncedEmployeeId = employeeId;
     const mutation = {
       clientUuid: mutationId,
@@ -373,7 +512,8 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
         status: 'Aktiv',
         weeklyHours: 40,
         hourlyRate: 19,
-        dateOfJoining: '2026-01-01'
+        dateOfJoining: '2026-01-01',
+        assignedSiteIds: [createdSiteId]
       }
     };
     const send = () => request(app).post('/api/v1/employees/sync').set(authHeaders(token)).send({
@@ -387,6 +527,53 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(repeated.body.data).toEqual(first.body.data);
     const stored = await migrationPool.query('SELECT id FROM employees WHERE tenant_id=$1 AND id=$2', ['11111111-1111-1111-1111-111111111111', employeeId]);
     expect(stored.rows).toHaveLength(1);
+    let memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toEqual([{ site_id: createdSiteId }]);
+
+    const sendUpdate = (clientUuid: string, baseVersion: number, payload: Record<string, unknown>) =>
+      request(app).post('/api/v1/employees/sync').set(authHeaders(token)).send({
+        deviceId: 'employee-outbox-test',
+        mutations: [{
+          clientUuid, entityType: 'employee', action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(), baseVersion, payload: { id: employeeId, ...payload }
+        }]
+      });
+    const clearMembershipMutationId = crypto.randomUUID();
+    const clearMembership = await sendUpdate(clearMembershipMutationId, 1, { assignedSiteIds: [] });
+    expect(clearMembership.body.data[0]).toEqual(expect.objectContaining({ status: 'SYNCED', serverVersion: 2 }));
+    const replayedClear = await sendUpdate(clearMembershipMutationId, 1, { assignedSiteIds: [] });
+    expect(replayedClear.body.data).toEqual(clearMembership.body.data);
+    memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toHaveLength(0);
+
+    const invalidUpdate = await sendUpdate(crypto.randomUUID(), 2, {
+      firstName: 'Must not persist', assignedSiteIds: [createdCrossTenantSiteId!]
+    });
+    expect(invalidUpdate.body.data[0].status).toBe('REJECTED');
+    const unchangedEmployee = await migrationPool.query(
+      'SELECT first_name,revision_version FROM employees WHERE tenant_id=$1 AND id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(unchangedEmployee.rows[0]).toEqual({ first_name: 'Offline', revision_version: 2 });
+    memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toHaveLength(0);
+
+    const restoreMembership = await sendUpdate(crypto.randomUUID(), 2, { assignedSiteIds: [createdSiteId] });
+    expect(restoreMembership.body.data[0]).toEqual(expect.objectContaining({ status: 'SYNCED', serverVersion: 3 }));
+    memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toEqual([{ site_id: createdSiteId }]);
   });
 
   test('5. Mandant B sieht die neu angelegten Objekte und Mitarbeiter nicht', async () => {
@@ -694,6 +881,171 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(audit.body.data.map((item: any) => item.action)).toEqual(
       expect.arrayContaining(['created', 'uploaded', 'downloaded', 'version_created', 'version_restored', 'archived', 'restored'])
     );
+  });
+
+  test('SOP-Workflow veröffentlicht nur geprüfte Versionen und verlangt Kenntnisnahme je Version', async () => {
+    const authorToken = await login(SOP_AUTHOR_EMAIL);
+    const reviewerToken = await login(SOP_REVIEWER_EMAIL);
+    const approverToken = await login(SOP_APPROVER_EMAIL);
+    const employeeToken = await login(SOP_EMPLOYEE_EMAIL);
+    const todayResult = await migrationPool.query('SELECT CURRENT_DATE::text AS today');
+    const today = todayResult.rows[0].today;
+    const sopNumber = `SOP-API-${Date.now()}`;
+
+    const invalidDates = await request(app).post('/api/v1/sops').set(authHeaders(authorToken)).send({
+      sopNumber, title: 'Ungültige Frist', content: 'Test',
+      effectiveFrom: '2027-01-02', effectiveUntil: '2027-01-01'
+    });
+    expect(invalidDates.status).toBe(400);
+
+    const created = await request(app).post('/api/v1/sops').set(authHeaders(authorToken)).send({
+      sopNumber, title: 'SOP API Integration', description: 'Versionierte Dienstanweisung',
+      category: 'Allgemeine Dienstanweisung', content: 'Version 1 – Ausgangsanweisung',
+      mandatoryAcknowledgment: true, effectiveFrom: today
+    });
+    expect(created.status).toBe(201);
+    createdSopId = created.body.data.id;
+    expect(created.body.data.description).toBe('Versionierte Dienstanweisung');
+
+    const beforeApproval = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    expect(beforeApproval.status).toBe(200);
+    expect(beforeApproval.body.data).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: createdSopId })
+    ]));
+
+    const submitted = await request(app).post(`/api/v1/sops/${createdSopId}/submit`)
+      .set(authHeaders(authorToken)).send({});
+    expect(submitted.status).toBe(201);
+    const reviewed = await request(app).post(`/api/v1/sops/${createdSopId}/review`)
+      .set(authHeaders(reviewerToken)).send({ decision: 'reviewed', comment: 'Prüfung abgeschlossen.' });
+    expect(reviewed.status).toBe(200);
+    const selfApproved = await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(reviewerToken)).send({});
+    expect(selfApproved.status).toBe(403);
+    const approved = await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(approverToken)).send({});
+    expect(approved.status).toBe(200);
+    const published = await request(app).post(`/api/v1/sops/${createdSopId}/publish`)
+      .set(authHeaders(approverToken)).send({});
+    expect(published.status).toBe(200);
+
+    const siteMembership = await request(app).patch(`/api/v1/employees/${createdSopEmployeeId}`)
+      .set(authHeaders(await login(SEED_USER_EMAIL))).send({ revisionVersion: 1, assignedSiteIds: [createdSopSiteId] });
+    expect(siteMembership.status).toBe(200);
+    expect(siteMembership.body.data.assigned_site_ids).toEqual([createdSopSiteId]);
+    const futureShiftBeforeAssignment = await migrationPool.query(
+      'SELECT COUNT(*)::int AS count FROM shifts WHERE tenant_id=$1 AND employee_id=$2 AND site_id=$3 AND shift_date >= CURRENT_DATE',
+      [TENANT_FFM_ID,createdSopEmployeeId,createdSopSiteId]
+    );
+    expect(futureShiftBeforeAssignment.rows[0].count).toBe(0);
+
+    const assigned = await request(app).post(`/api/v1/sops/${createdSopId}/assignments`)
+      .set(authHeaders(authorToken)).send({
+        targets: [
+          { type: 'site', id: createdSopSiteId },
+          { type: 'customer', id: createdSopCustomerId }
+        ],
+        dueAt: new Date(Date.now() + 5 * 86400000).toISOString()
+      });
+    expect(assigned.status).toBe(201);
+      const materializedAssignment = await migrationPool.query(
+        'SELECT id FROM sop_assignments WHERE tenant_id=$1 AND sop_id=$2 AND version_id=$3 AND employee_id=$4',
+        [TENANT_FFM_ID,createdSopId,published.body.data.versionId,createdSopEmployeeId]
+      );
+      expect(materializedAssignment.rows).toHaveLength(1);
+    const targetCounts = await request(app).get(`/api/v1/sops/${createdSopId}/assignments`).set(authHeaders(authorToken));
+    expect(targetCounts.status).toBe(200);
+    expect(targetCounts.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'site', target_id: createdSopSiteId, total_required: 1, signed_count: 0 }),
+      expect.objectContaining({ type: 'customer', target_id: createdSopCustomerId, total_required: 1, signed_count: 0 })
+    ]));
+    const shiftAfterPublication = await migrationPool.query(
+      `INSERT INTO shifts (tenant_id,site_id,employee_id,shift_date,start_time,end_time,required_qualification)
+       VALUES ($1,$2,$3,CURRENT_DATE + INTERVAL '1 day','08:00','16:00','Allgemeine Qualifikation') RETURNING id`,
+      [TENANT_FFM_ID,createdSopSiteId,createdSopEmployeeId]
+    );
+    createdSopShiftId = shiftAfterPublication.rows[0].id;
+    await migrationPool.query('DELETE FROM shifts WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopShiftId]);
+    const countAfterShiftChange = await request(app).get(`/api/v1/sops/${createdSopId}/assignments`).set(authHeaders(authorToken));
+    expect(countAfterShiftChange.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'site', target_id: createdSopSiteId, total_required: 1, signed_count: 0 }),
+      expect.objectContaining({ type: 'customer', target_id: createdSopCustomerId, total_required: 1, signed_count: 0 })
+    ]));
+    const currentFirstVersion = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    const firstInstruction = currentFirstVersion.body.data.find((item: any) => item.id === createdSopId);
+    expect(firstInstruction).toMatchObject({
+      version: 1,
+      content: 'Version 1 – Ausgangsanweisung',
+      current_user_acknowledgment: 'unacknowledged'
+    });
+    expect(firstInstruction.assignment_id).toBeTruthy();
+
+    const acknowledgement = await request(app).post(
+      `/api/v1/sops/assignments/${firstInstruction.assignment_id}/acknowledge`
+    ).set(authHeaders(employeeToken)).send({
+      confirmed: true, clientMutationId: `sop-ack-${Date.now()}`, capturedAt: new Date().toISOString()
+    });
+    expect(acknowledgement.status).toBe(200);
+    expect(acknowledgement.body.data.acknowledged_at).toBeTruthy();
+    expect(acknowledgement.body.data.server_received_at).toBeTruthy();
+
+    const draftVersion = await request(app).post(`/api/v1/sops/${createdSopId}/versions`)
+      .set(authHeaders(authorToken)).send({
+        content: 'Version 2 – aktualisierte Anweisung', changeReason: 'Arbeitsablauf wurde aktualisiert.'
+      });
+    expect(draftVersion.status).toBe(201);
+    const submittedSecond = await request(app).post(`/api/v1/sops/${createdSopId}/submit`)
+      .set(authHeaders(authorToken)).send({});
+    expect(submittedSecond.status).toBe(201);
+    expect(submittedSecond.body.data.version).toBe(2);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/review`)
+      .set(authHeaders(reviewerToken)).send({ decision: 'reviewed', comment: 'Version 2 geprüft.' })).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(reviewerToken)).send({})).status).toBe(403);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/publish`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+
+    const currentSecondVersion = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    const secondInstruction = currentSecondVersion.body.data.find((item: any) => item.id === createdSopId);
+    expect(secondInstruction).toMatchObject({
+      version: 2,
+      content: 'Version 2 – aktualisierte Anweisung',
+      current_user_acknowledgment: 'unacknowledged'
+    });
+    expect(secondInstruction.assignment_id).not.toBe(firstInstruction.assignment_id);
+
+    const report = await request(app).get('/api/v1/sops/reports').set(authHeaders(authorToken));
+    expect(report.status).toBe(200);
+    expect(report.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ assignment_id: firstInstruction.assignment_id, status: 'superseded', acknowledged_at: expect.any(String) }),
+      expect.objectContaining({ assignment_id: secondInstruction.assignment_id, status: 'pending', acknowledged_at: null })
+    ]));
+    expect((await request(app).get('/api/v1/sops/reports').set(authHeaders(employeeToken))).status).toBe(403);
+
+    const tomorrow = new Date(`${today}T00:00:00.000Z`);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    const futureVersion = await request(app).post(`/api/v1/sops/${createdSopId}/versions`)
+      .set(authHeaders(authorToken)).send({
+        content: 'Noch nicht wirksame Version', changeReason: 'Gültigkeitsbeginn ist morgen.',
+        effectiveFrom: tomorrow.toISOString().slice(0, 10)
+      });
+    expect(futureVersion.status).toBe(201);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/submit`)
+      .set(authHeaders(authorToken)).send({})).status).toBe(201);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/review`)
+      .set(authHeaders(reviewerToken)).send({ decision: 'reviewed', comment: 'Zukünftige Version geprüft.' })).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(reviewerToken)).send({})).status).toBe(403);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/publish`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+    const beforeEffectiveDate = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    expect(beforeEffectiveDate.body.data).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: createdSopId })
+    ]));
   });
 
   test('Öffentlicher Health-Endpunkt gibt keine Datenbankfehlerdetails preis', async () => {

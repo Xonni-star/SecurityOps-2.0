@@ -17,7 +17,7 @@
 | **Dienstplanung** | `RosterModule.tsx` | `/api/v1/shifts` | `shifts` | Ja | Ja |
 | **Digitales Wachbuch** | `GuardBookModule.tsx` | `/api/v1/logbook` | `logbook_entries`, `revisions` | Ja | Ja (Append-Only) |
 | **Schlüssel & Zutritt** | `KeysModule.tsx` | `/api/v1/keys` | `keys` | Ja | Ja |
-| **QM & Anweisungen** | `SOPModule.tsx` | `/api/v1/sops` | `instructions`, `acknowledgements`| Ja | Ja |
+| **QM & Anweisungen** | `SOPModule.tsx` | `/api/v1/sops` | `sop_instructions`, `sop_versions`, `sop_events`, `sop_assignments` | Ja | Teilweise (lokale Vormerkung) |
 | **Alarmmanagement** | `AlarmsModule.tsx` | `/api/v1/alarms` | `alarm_plans` | Ja | Ja |
 | **Aufgaben & Maßnahmen**| `TasksModule.tsx` | `/api/v1/tasks` | `tasks` | Ja | Ja (Conflict Diff) |
 | **Dokumente (DMS)** | `DocumentsModule.tsx` | Nicht vorhanden | Nicht vorhanden | Nein | Nein (nur lokale Metadaten; kein echter Datei-Upload/-Download) |

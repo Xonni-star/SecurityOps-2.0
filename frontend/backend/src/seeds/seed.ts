@@ -74,7 +74,18 @@ export async function seedDatabase(): Promise<void> {
       { code: 'documents:archive', module: 'documents' },
       { code: 'documents:restore', module: 'documents' },
       { code: 'documents:manage', module: 'documents' },
-      { code: 'documents:approve', module: 'documents' }
+      { code: 'documents:approve', module: 'documents' },
+      { code: 'sop:read', module: 'sop' },
+      { code: 'sop:create', module: 'sop' },
+      { code: 'sop:update', module: 'sop' },
+      { code: 'sop:submit', module: 'sop' },
+      { code: 'sop:review', module: 'sop' },
+      { code: 'sop:approve', module: 'sop' },
+      { code: 'sop:publish', module: 'sop' },
+      { code: 'sop:assign', module: 'sop' },
+      { code: 'sop:acknowledge', module: 'sop' },
+      { code: 'sop:archive', module: 'sop' },
+      { code: 'sop:manage', module: 'sop' }
     ];
 
     for (const p of permissions) {
@@ -113,6 +124,23 @@ export async function seedDatabase(): Promise<void> {
         OR (r.name IN ('Objektleitung', 'Wachdienstmitarbeiter', 'Auditor') AND p.code IN (
           'documents:read', 'documents:download'
         ))
+      ON CONFLICT DO NOTHING;
+    `);
+
+    await client.query(`
+      INSERT INTO role_permissions (role_id, permission_id)
+      SELECT r.id, p.id
+      FROM roles r
+      JOIN permissions p ON
+        (r.name IN ('Systemadministrator', 'Geschäftsführung', 'Einsatzleitung', 'Qualitätsmanagement')
+          AND p.code LIKE 'sop:%')
+        OR (r.name = 'Personalverwaltung' AND p.code IN (
+          'sop:read', 'sop:create', 'sop:update', 'sop:submit', 'sop:assign', 'sop:manage'
+        ))
+        OR (r.name IN ('Objektleitung', 'Wachdienstmitarbeiter') AND p.code IN (
+          'sop:read', 'sop:acknowledge'
+        ))
+        OR (r.name = 'Auditor' AND p.code = 'sop:read')
       ON CONFLICT DO NOTHING;
     `);
 

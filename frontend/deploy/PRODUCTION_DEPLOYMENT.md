@@ -188,7 +188,7 @@ Häufige Ursachen:
 
 ## 11. Bekannte Einschränkungen
 
-- Dokumente, SOPs und Alarme besitzen weiterhin keine Datenbanktabellen/Endpunkte.
+- SOPs besitzen Tabellen und API-Endpunkte (Migration `013_sop_instructions.sql`), sind aber mit dieser Dokumentation nicht deployed oder für Produktion freigegeben. Alarm-/Notfallpläne besitzen weiterhin keine Datenbanktabellen/Endpunkte.
 - Es bestehen keine Verbindungen zu externen Sprachmodell- oder KI-Diensten; Wachbucheinträge werden manuell erfasst.
 - Redis und der frühere Python-Worker wurden entfernt, da das TypeScript-Backend sie nicht verwendet und der Python-Stack nicht lauffähig war.
 - Ein vollständiger Browser-E2E-Test ist nicht Teil dieses Deployment-Schritts.
