@@ -3,7 +3,7 @@
 // Behandelt transaction.onerror und transaction.onabort als echte Fehler. Keine verschluckten Fehler!
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export interface OutboxMutation {
   id: string; // Eindeutige client_mutation_id (UUID v4)
@@ -37,6 +37,18 @@ export interface StoredAttachment {
   blobData: string;
   capturedAt: string;
   synced: boolean;
+}
+
+export interface StoredSOPAcknowledgement {
+  clientMutationId: string;
+  tenantId: string;
+  userId: string;
+  sopId: string;
+  assignmentId: string;
+  versionId: string;
+  version: string;
+  capturedAt: string;
+  status: 'pending' | 'stale';
 }
 
 class IndexedDbService {
@@ -98,10 +110,21 @@ class IndexedDbService {
           attachStore.createIndex('entityId', 'entityId', { unique: false });
           attachStore.createIndex('synced', 'synced', { unique: false });
         }
+
+        if (!db.objectStoreNames.contains('sopAcknowledgements')) {
+          const sopStore = db.createObjectStore('sopAcknowledgements', { keyPath: 'clientMutationId' });
+          sopStore.createIndex('tenantUser', ['tenantId', 'userId'], { unique: false });
+          sopStore.createIndex('acknowledgementKey', 'acknowledgementKey', { unique: true });
+        }
       };
 
       request.onsuccess = (event) => {
         this.db = (event.target as IDBOpenDBRequest).result;
+        const openedDb = this.db;
+        openedDb.onversionchange = () => {
+          openedDb.close();
+          if (this.db === openedDb) this.db = null;
+        };
         resolve(this.db);
       };
 
@@ -234,6 +257,89 @@ class IndexedDbService {
 
   async markSynced(id: string): Promise<void> {
     await this.removeMutation(id);
+  }
+
+  async enqueueSOPAcknowledgement(
+    acknowledgement: StoredSOPAcknowledgement
+  ): Promise<{ acknowledgement: StoredSOPAcknowledgement; created: boolean }> {
+    const db = await this.init();
+    const acknowledgementKey = [
+      acknowledgement.tenantId,
+      acknowledgement.userId,
+      acknowledgement.assignmentId,
+      acknowledgement.versionId
+    ].join(':');
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('sopAcknowledgements', 'readwrite');
+      const store = tx.objectStore('sopAcknowledgements');
+      let result: { acknowledgement: StoredSOPAcknowledgement; created: boolean } | undefined;
+
+      tx.oncomplete = () => resolve(result!);
+      tx.onerror = () => reject(tx.error || new Error('Speichern der SOP-Kenntnisnahme fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('SOP-Kenntnisnahme-Transaktion abgebrochen'));
+
+      const existingRequest = store.index('acknowledgementKey').get(acknowledgementKey);
+      existingRequest.onsuccess = () => {
+        if (existingRequest.result) {
+          const existing = existingRequest.result as StoredSOPAcknowledgement;
+          result = { acknowledgement: existing, created: false };
+          return;
+        }
+        store.add({ ...acknowledgement, acknowledgementKey });
+        result = { acknowledgement, created: true };
+      };
+      existingRequest.onerror = () => tx.abort();
+    });
+  }
+
+  async getSOPAcknowledgements(tenantId: string, userId: string): Promise<StoredSOPAcknowledgement[]> {
+    const db = await this.init();
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('sopAcknowledgements', 'readonly');
+      const request = tx.objectStore('sopAcknowledgements')
+        .index('tenantUser')
+        .getAll(IDBKeyRange.only([tenantId, userId]));
+
+      request.onsuccess = () => resolve((request.result || []) as StoredSOPAcknowledgement[]);
+      request.onerror = () => reject(request.error || new Error('Lesen der SOP-Kenntnahmen fehlgeschlagen'));
+    });
+  }
+
+  async updateSOPAcknowledgement(
+    clientMutationId: string,
+    status: StoredSOPAcknowledgement['status']
+  ): Promise<void> {
+    const db = await this.init();
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('sopAcknowledgements', 'readwrite');
+      const store = tx.objectStore('sopAcknowledgements');
+
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error(`Aktualisierung der SOP-Kenntnahme ${clientMutationId} fehlgeschlagen`));
+      tx.onabort = () => reject(tx.error || new Error(`SOP-Kenntnahme-Transaktion ${clientMutationId} abgebrochen`));
+
+      const request = store.get(clientMutationId);
+      request.onsuccess = () => {
+        if (!request.result) return;
+        store.put({ ...request.result, status });
+      };
+      request.onerror = () => tx.abort();
+    });
+  }
+
+  async removeSOPAcknowledgement(clientMutationId: string): Promise<void> {
+    const db = await this.init();
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('sopAcknowledgements', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error(`Löschen der SOP-Kenntnahme ${clientMutationId} fehlgeschlagen`));
+      tx.onabort = () => reject(tx.error || new Error(`SOP-Kenntnahme-Transaktion ${clientMutationId} abgebrochen`));
+      tx.objectStore('sopAcknowledgements').delete(clientMutationId);
+    });
   }
 
   // --- ANHÄNGE & FOTODOKUMENTATION ---

@@ -260,12 +260,14 @@ export interface SOPVersion {
 }
 
 export interface SOPPendingAcknowledgement {
+  tenantId: string;
+  userId: string;
   sopId: string;
   assignmentId: string;
   clientMutationId: string;
   capturedAt: string;
-  versionId?: string;
-  version?: string;
+  versionId: string;
+  version: string;
   status?: 'pending' | 'stale';
 }
 

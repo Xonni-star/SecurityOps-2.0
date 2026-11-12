@@ -24,7 +24,7 @@ vi.mock('../services/apiClient', () => {
 
 import { useSecurityStore } from '../store';
 import { apiClient } from '../services/apiClient';
-import { offlineVault } from '../services/indexedDbService';
+import { offlineVault, type StoredSOPAcknowledgement } from '../services/indexedDbService';
 
 const mockedApi = apiClient as unknown as {
   get: ReturnType<typeof vi.fn>;
@@ -33,6 +33,11 @@ const mockedApi = apiClient as unknown as {
   setCsrfToken: ReturnType<typeof vi.fn>;
   post: ReturnType<typeof vi.fn>;
 };
+const durableSOPQueue = new Map<string, StoredSOPAcknowledgement>();
+
+function acknowledgementKey(ack: StoredSOPAcknowledgement): string {
+  return [ack.tenantId, ack.userId, ack.assignmentId, ack.versionId].join(':');
+}
 
 const customerRow = {
   id: '11111111-1111-1111-1111-111111111111',
@@ -117,9 +122,47 @@ function mockReadEndpoints(): void {
   });
 }
 
+function makeSOP(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'sop-ack-test',
+    assignmentId: 'assignment-ack-test',
+    tenantId: 'tenant-frankfurt',
+    sopNumber: 'DA-1',
+    title: 'Testanweisung',
+    category: 'Allgemeine Dienstanweisung',
+    version: '1',
+    versionId: 'version-1',
+    effectiveDate: '2026-01-01',
+    author: 'QM',
+    content: 'Test',
+    mandatoryAcknowledgment: true,
+    currentUserAcknowledgment: 'unacknowledged' as const,
+    ...overrides
+  };
+}
+
 beforeEach(() => {
-  vi.clearAllMocks();
+  vi.resetAllMocks();
+  vi.restoreAllMocks();
   localStorage.clear();
+  durableSOPQueue.clear();
+  vi.spyOn(offlineVault, 'enqueueSOPAcknowledgement').mockImplementation(async (acknowledgement) => {
+    const key = acknowledgementKey(acknowledgement);
+    const existing = [...durableSOPQueue.values()].find((item) => acknowledgementKey(item) === key);
+    if (existing) return { acknowledgement: existing, created: false };
+    durableSOPQueue.set(acknowledgement.clientMutationId, acknowledgement);
+    return { acknowledgement, created: true };
+  });
+  vi.spyOn(offlineVault, 'getSOPAcknowledgements').mockImplementation(async (tenantId, userId) =>
+    [...durableSOPQueue.values()].filter((item) => item.tenantId === tenantId && item.userId === userId)
+  );
+  vi.spyOn(offlineVault, 'updateSOPAcknowledgement').mockImplementation(async (clientMutationId, status) => {
+    const item = durableSOPQueue.get(clientMutationId);
+    if (item) durableSOPQueue.set(clientMutationId, { ...item, status });
+  });
+  vi.spyOn(offlineVault, 'removeSOPAcknowledgement').mockImplementation(async (clientMutationId) => {
+    durableSOPQueue.delete(clientMutationId);
+  });
   useSecurityStore.setState({
     clients: [],
     sites: [],
@@ -130,6 +173,10 @@ beforeEach(() => {
     tasks: [],
     notifications: [],
     authUser: null,
+    currentTenantId: 'tenant-frankfurt',
+    currentUserId: 'user-regression',
+    sops: [],
+    pendingSOPAcknowledgements: [],
     isAuthenticated: false,
     isAuthenticating: false,
     authError: null,
@@ -186,128 +233,159 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(mockedApi.get).toHaveBeenCalledWith('/sops');
   });
 
-  test('SOP-Kenntnisnahme wird erst nach erfolgreicher Serverantwort bestätigt', async () => {
-    const sop = {
-      id: 'sop-ack-test', assignmentId: 'assignment-ack-test', tenantId: 'tenant-frankfurt',
-      sopNumber: 'DA-1', title: 'Testanweisung', category: 'Allgemeine Dienstanweisung',
-      version: '1', effectiveDate: '2026-01-01', author: 'QM', content: 'Test',
-      mandatoryAcknowledgment: true, currentUserAcknowledgment: 'unacknowledged' as const
-    };
-    useSecurityStore.setState({ sops: [sop], isOnline: true, pendingSOPAcknowledgements: [] });
-    mockedApi.post.mockResolvedValueOnce({ acknowledged: true });
+  test('offline capture is durably bound to user, tenant, assignment and exact version before showing pending', async () => {
+    const sop = makeSOP();
+    useSecurityStore.setState({
+      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [], currentTenantId: 'tenant-frankfurt',
+      authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sop:read'] }
+    });
 
     expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(true);
-    expect(mockedApi.post).toHaveBeenCalledWith(
-      `/sops/assignments/${sop.assignmentId}/acknowledge`,
-      expect.objectContaining({ confirmed: true, clientMutationId: expect.any(String), capturedAt: expect.any(String) })
-    );
-    expect(useSecurityStore.getState().sops[0].currentUserAcknowledgment).toBe('confirmed');
+    expect([...durableSOPQueue.values()]).toEqual([
+      expect.objectContaining({
+        tenantId: 'tenant-frankfurt', userId: 'user-regression', sopId: sop.id,
+        assignmentId: sop.assignmentId, versionId: sop.versionId, capturedAt: expect.any(String),
+        clientMutationId: expect.any(String), status: 'pending'
+      })
+    ]);
+    expect(useSecurityStore.getState().sops[0].currentUserAcknowledgment).toBe('pending');
+    expect(localStorage.getItem('sop-acknowledgements:tenant-frankfurt:user-regression')).toBeNull();
+    expect(mockedApi.post).not.toHaveBeenCalled();
   });
 
-  test('fehlgeschlagene Online-Kenntnisnahme wird nicht als bestätigt angezeigt', async () => {
-    const sop = {
-      id: 'sop-ack-fail', assignmentId: 'assignment-fail', tenantId: 'tenant-frankfurt', sopNumber: 'DA-2', title: 'Fehlerfall',
-      category: 'Allgemeine Dienstanweisung', version: '1', effectiveDate: '2026-01-01',
-      author: 'QM', content: 'Test', mandatoryAcknowledgment: true,
-      currentUserAcknowledgment: 'unacknowledged' as const
-    };
-    useSecurityStore.setState({ sops: [sop], isOnline: true, pendingSOPAcknowledgements: [] });
-    mockedApi.post.mockRejectedValueOnce(new Error('Serverfehler'));
+  test('does not show pending when durable IndexedDB persistence fails', async () => {
+    const sop = makeSOP();
+    vi.spyOn(offlineVault, 'enqueueSOPAcknowledgement').mockRejectedValueOnce(new Error('IndexedDB unavailable'));
+    useSecurityStore.setState({
+      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [],
+      authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sop:read'] }
+    });
 
     expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(false);
     expect(useSecurityStore.getState().sops[0].currentUserAcknowledgment).toBe('unacknowledged');
-  });
-
-  test('Offline-Kenntnisnahme bleibt vorgemerkt und wird erst nach bestätigter Synchronisierung bestätigt', async () => {
-    const sop = {
-      id: 'sop-ack-offline', assignmentId: 'assignment-offline', tenantId: 'tenant-frankfurt',
-      sopNumber: 'DA-3', title: 'Offline', category: 'Allgemeine Dienstanweisung',
-      version: '1', effectiveDate: '2026-01-01', author: 'QM', content: 'Test',
-      versionId: 'version-offline-1', mandatoryAcknowledgment: true, currentUserAcknowledgment: 'unacknowledged' as const
-    };
-    localStorage.clear();
-    useSecurityStore.setState({
-      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [], currentUserId: 'user-regression',
-      authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sop:read'] }
-    });
-
-    expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(true);
-    expect(mockedApi.post).not.toHaveBeenCalled();
-    expect(useSecurityStore.getState().sops[0].currentUserAcknowledgment).toBe('pending');
-    expect(JSON.parse(localStorage.getItem('sop-acknowledgements:tenant-frankfurt:user-regression') || '[]')).toEqual([
-      expect.objectContaining({ sopId: sop.id, assignmentId: sop.assignmentId, versionId: sop.versionId, version: sop.version, status: 'pending' })
-    ]);
-
-    useSecurityStore.setState({ isOnline: true });
-    mockedApi.get.mockResolvedValueOnce([{
-      id: sop.id, assignment_id: sop.assignmentId, version_id: sop.versionId,
-      version_number: sop.version, status: 'published'
-    }]);
-    mockedApi.post.mockResolvedValueOnce({ acknowledged: true });
-    await useSecurityStore.getState().syncPendingSOPAcknowledgements();
-    expect(mockedApi.post).toHaveBeenCalledWith(
-      `/sops/assignments/${sop.assignmentId}/acknowledge`,
-      expect.objectContaining({ confirmed: true })
-    );
-    expect(useSecurityStore.getState().sops[0].currentUserAcknowledgment).toBe('confirmed');
     expect(useSecurityStore.getState().pendingSOPAcknowledgements).toHaveLength(0);
   });
 
-  test('an offline acknowledgment is not replayed for a different assignment or revision', async () => {
-    const sop = {
-      id: 'sop-ack-stale', assignmentId: 'assignment-old', tenantId: 'tenant-frankfurt',
-      sopNumber: 'DA-4', title: 'Revision', category: 'Allgemeine Dienstanweisung',
-      version: '1', versionId: 'version-1', effectiveDate: '2026-01-01',
-      author: 'QM', content: 'Alt', mandatoryAcknowledgment: true,
-      currentUserAcknowledgment: 'unacknowledged' as const
-    };
-    localStorage.clear();
+  test('deduplicates repeated capture of the same assignment revision', async () => {
+    const sop = makeSOP();
     useSecurityStore.setState({
-      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [], currentUserId: 'user-regression',
+      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [],
+      authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sop:read'] }
+    });
+
+    expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(true);
+    expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(true);
+    expect(durableSOPQueue.size).toBe(1);
+    expect(useSecurityStore.getState().pendingSOPAcknowledgements).toHaveLength(1);
+    expect(useSecurityStore.getState().pendingSOPAcknowledgements[0].clientMutationId)
+      .toBe([...durableSOPQueue.values()][0].clientMutationId);
+  });
+
+  test('re-hydrates after reload and retries failures with the same mutation ID and captured time', async () => {
+    const sop = makeSOP();
+    useSecurityStore.setState({
+      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [], currentTenantId: 'tenant-frankfurt',
       authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sop:read'] }
     });
     expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(true);
+    const captured = [...durableSOPQueue.values()][0];
 
+    mockReadEndpoints();
+    mockedApi.get.mockImplementation((endpoint: string) => {
+      if (endpoint === '/sops') return Promise.resolve([{
+        id: sop.id, assignment_id: sop.assignmentId, version_id: sop.versionId,
+        version_number: sop.version, status: 'published'
+      }]);
+      if (endpoint === '/customers' || endpoint === '/sites' || endpoint === '/employees' ||
+        endpoint === '/logbook' || endpoint === '/shifts' || endpoint === '/keys' || endpoint === '/tasks') {
+        return Promise.resolve([]);
+      }
+      return Promise.reject(new Error(`Unerwarteter Endpunkt: ${endpoint}`));
+    });
+    useSecurityStore.setState({ sops: [], pendingSOPAcknowledgements: [] });
+    await useSecurityStore.getState().loadTenantData();
+    expect(useSecurityStore.getState().pendingSOPAcknowledgements).toEqual([
+      expect.objectContaining({ clientMutationId: captured.clientMutationId, capturedAt: captured.capturedAt })
+    ]);
+
+    Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
+    useSecurityStore.setState({ isOnline: true });
+    window.dispatchEvent(new Event('offline'));
+    expect(useSecurityStore.getState().isOnline).toBe(false);
+    mockedApi.post.mockRejectedValue(new Error('temporärer Fehler'));
+    window.dispatchEvent(new Event('online'));
+    await vi.waitFor(() => expect(mockedApi.post).toHaveBeenCalledTimes(1));
+    expect(useSecurityStore.getState().isOnline).toBe(true);
+    expect(durableSOPQueue.get(captured.clientMutationId)).toMatchObject({
+      clientMutationId: captured.clientMutationId, capturedAt: captured.capturedAt, status: 'pending'
+    });
+    expect(useSecurityStore.getState().pendingSOPAcknowledgements).toContainEqual(
+      expect.objectContaining({ clientMutationId: captured.clientMutationId, status: 'pending' })
+    );
+    expect(useSecurityStore.getState().notifications.filter(
+      (notification) => notification.title === 'SOP-Synchronisierung ausstehend'
+    )).toHaveLength(1);
+
+    window.dispatchEvent(new Event('online'));
+    await vi.waitFor(() => expect(mockedApi.post).toHaveBeenCalledTimes(2));
+    expect(useSecurityStore.getState().notifications.filter(
+      (notification) => notification.title === 'SOP-Synchronisierung ausstehend'
+    )).toHaveLength(1);
+
+    mockedApi.post.mockResolvedValueOnce({ acknowledged: true });
+    await useSecurityStore.getState().syncPendingSOPAcknowledgements();
+    const payloads = mockedApi.post.mock.calls.map((call) => call[1]);
+    expect(payloads).toHaveLength(3);
+    expect(payloads[0]).toMatchObject({
+      confirmed: true, clientMutationId: captured.clientMutationId, capturedAt: captured.capturedAt
+    });
+    expect(payloads[1]).toEqual(payloads[0]);
+    expect(payloads[2]).toEqual(payloads[0]);
+    expect(durableSOPQueue.has(captured.clientMutationId)).toBe(false);
+    expect(useSecurityStore.getState().sops[0].currentUserAcknowledgment).toBe('confirmed');
+  });
+
+  test('marks an acknowledgement stale and never transfers it to a newer revision', async () => {
+    const sop = makeSOP();
+    useSecurityStore.setState({
+      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [],
+      authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sop:read'] }
+    });
+    expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(true);
+    const captured = [...durableSOPQueue.values()][0];
     useSecurityStore.setState({ isOnline: true });
     mockedApi.get.mockResolvedValueOnce([{
-      id: sop.id, assignment_id: 'assignment-new', version_id: 'version-2',
-      version_number: '2', status: 'published'
+      id: sop.id, assignment_id: sop.assignmentId, version_id: 'version-2', version_number: '2', status: 'published'
     }]);
     await useSecurityStore.getState().syncPendingSOPAcknowledgements();
 
     expect(mockedApi.post).not.toHaveBeenCalled();
-    expect(useSecurityStore.getState().pendingSOPAcknowledgements[0]).toMatchObject({
-      assignmentId: 'assignment-old', versionId: 'version-1', status: 'stale'
-    });
+    expect(durableSOPQueue.get(captured.clientMutationId)?.status).toBe('stale');
     expect(useSecurityStore.getState().sops[0].currentUserAcknowledgment).toBe('stale');
   });
 
-  test('an offline acknowledgment is stale if the assignment remains but the version changes', async () => {
-    const sop = {
-      id: 'sop-ack-version-stale', assignmentId: 'assignment-stable', tenantId: 'tenant-frankfurt',
-      sopNumber: 'DA-5', title: 'Versionswechsel', category: 'Allgemeine Dienstanweisung',
-      version: '4', versionId: 'version-4', effectiveDate: '2026-01-01',
-      author: 'QM', content: 'Revision 4', mandatoryAcknowledgment: true,
-      currentUserAcknowledgment: 'unacknowledged' as const
-    };
-    localStorage.clear();
+  test('does not replay a queued acknowledgement after tenant or user switching', async () => {
+    const sop = makeSOP();
     useSecurityStore.setState({
-      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [], currentUserId: 'user-regression',
+      sops: [sop], isOnline: false, pendingSOPAcknowledgements: [],
       authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sop:read'] }
     });
     expect(await useSecurityStore.getState().acknowledgeSOP(sop.id)).toBe(true);
+    const captured = [...durableSOPQueue.values()][0];
 
-    useSecurityStore.setState({ isOnline: true });
+    useSecurityStore.setState({
+      isOnline: true, currentTenantId: 'tenant-hamburg', pendingSOPAcknowledgements: [], sops: [makeSOP({ tenantId: 'tenant-hamburg' })],
+      authUser: { id: 'different-user', email: '', fullName: '', role: '', tenantId: 'tenant-hamburg', tenantName: '', permissions: ['sop:read'] }
+    });
     mockedApi.get.mockResolvedValueOnce([{
-      id: sop.id, assignment_id: sop.assignmentId, version_id: 'version-5',
-      version_number: '5', status: 'published'
+      id: sop.id, assignment_id: sop.assignmentId, version_id: sop.versionId, version_number: sop.version, status: 'published'
     }]);
     await useSecurityStore.getState().syncPendingSOPAcknowledgements();
 
+    expect(offlineVault.getSOPAcknowledgements).toHaveBeenCalledWith('tenant-hamburg', 'different-user');
     expect(mockedApi.post).not.toHaveBeenCalled();
-    expect(useSecurityStore.getState().pendingSOPAcknowledgements[0]).toMatchObject({
-      assignmentId: 'assignment-stable', versionId: 'version-4', status: 'stale'
-    });
+    expect(durableSOPQueue.get(captured.clientMutationId)).toEqual(captured);
+    expect(useSecurityStore.getState().pendingSOPAcknowledgements).toHaveLength(0);
   });
 
   test('Wachbucheintrag bleibt manuell erfassbar und wird offline in der mandantengebundenen Outbox gesichert', async () => {
@@ -540,6 +618,8 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
   test('Kundenbearbeitung und Archivierung verwenden die persistente API mit Revisionsstand', async () => {
     mockReadEndpoints();
     await useSecurityStore.getState().loadTenantData();
+    expect(useSecurityStore.getState().clients).toHaveLength(1);
+    expect(useSecurityStore.getState().isOnline).toBe(true);
     mockedApi.patch.mockResolvedValueOnce({ ...customerRow, company_name: 'Geändert GmbH', revision_version: 2 });
     await useSecurityStore.getState().updateClient(customerRow.id, { companyName: 'Geändert GmbH' });
     expect(mockedApi.patch).toHaveBeenCalledWith(`/customers/${customerRow.id}`, expect.objectContaining({ companyName: 'Geändert GmbH', revisionVersion: 1 }));
@@ -661,7 +741,8 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
       status: 'Aktiv',
       weekly_hours: 40,
       hourly_rate: 19.5,
-      date_of_joining: '2026-01-01'
+      date_of_joining: '2026-01-01',
+      assigned_site_ids: ['22222222-2222-2222-2222-222222222222']
     });
 
     await useSecurityStore.getState().addEmployee({
@@ -674,25 +755,33 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
       status: 'Aktiv',
       weeklyHours: 40,
       qualifications: [],
-      assignedSiteIds: [],
+      assignedSiteIds: ['22222222-2222-2222-2222-222222222222'],
       hourlyRate: 19.5,
       dateOfJoining: '2026-01-01'
     });
 
     expect(mockedApi.post).toHaveBeenCalledWith(
       '/employees',
-      expect.objectContaining({ personnelNumber: 'MA-API-2', status: 'Aktiv' })
+      expect.objectContaining({
+        personnelNumber: 'MA-API-2',
+        status: 'Aktiv',
+        assignedSiteIds: ['22222222-2222-2222-2222-222222222222']
+      })
     );
 
     mockedApi.patch.mockResolvedValueOnce({});
 
     await useSecurityStore.getState().updateEmployee('77777777-7777-7777-7777-777777777777', {
-      status: 'Urlaub'
+      status: 'Urlaub',
+      assignedSiteIds: ['22222222-2222-2222-2222-222222222222']
     });
 
     expect(mockedApi.patch).toHaveBeenCalledWith(
       '/employees/77777777-7777-7777-7777-777777777777',
-      expect.objectContaining({ status: 'Urlaub' })
+      expect.objectContaining({
+        status: 'Urlaub',
+        assignedSiteIds: ['22222222-2222-2222-2222-222222222222']
+      })
     );
 
     const state = useSecurityStore.getState();

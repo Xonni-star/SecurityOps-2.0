@@ -474,6 +474,9 @@ export async function reviewSop(req: Request, res: Response, next: NextFunction)
     const result = await withTenantTransaction(user.tenantId, async db => {
       const sop = await getSopForUpdate(db, user.tenantId, sopId);
       if (sop.status !== 'in_review' || !sop.draft_version_id) throw statusError(409, 'Nur eingereichte Dienstanweisungen können geprüft werden.');
+      if (sop.created_by === user.userId || sop.submitted_by_user_id === user.userId) {
+        throw statusError(403, 'Autor und Einreicher dürfen die eigene Dienstanweisungsversion nicht prüfen.');
+      }
       const status = body.decision === 'reviewed' ? 'reviewed' : 'draft';
       await db.query(
         `UPDATE sop_instructions SET status=$1,reviewed_by_user_id=$2,reviewed_at=CURRENT_TIMESTAMP,
@@ -501,7 +504,9 @@ export async function approveSop(req: Request, res: Response, next: NextFunction
     const result = await withTenantTransaction(user.tenantId, async db => {
       const sop = await getSopForUpdate(db, user.tenantId, sopId);
       if (sop.status !== 'reviewed' || !sop.draft_version_id) throw statusError(409, 'Die Dienstanweisung muss zuvor geprüft worden sein.');
-      if (sop.created_by === user.userId) throw statusError(403, 'Der Autor darf die eigene Dienstanweisung nicht freigeben.');
+      if (sop.created_by === user.userId || sop.submitted_by_user_id === user.userId) {
+        throw statusError(403, 'Autor und Einreicher dürfen die eigene Dienstanweisungsversion nicht freigeben.');
+      }
       if (sop.reviewed_by_user_id === user.userId) throw statusError(403, 'Der Prüfer darf dieselbe Dienstanweisung nicht freigeben.');
       await db.query(
         `UPDATE sop_instructions SET status='approved',approved_by_user_id=$1,approved_at=CURRENT_TIMESTAMP,
@@ -524,20 +529,20 @@ async function materializeAssignments(db: PoolClient, tenantId: string, sopId: s
        WHERE t.tenant_id=$1 AND t.sop_id=$2 AND t.target_type='employee'
          AND e.status='Aktiv' AND e.archived_at IS NULL
        UNION
-       SELECT sh.employee_id,t.due_at
+       SELECT esa.employee_id,t.due_at
        FROM sop_assignment_targets t
-       JOIN shifts sh ON sh.site_id=t.site_id AND sh.tenant_id=t.tenant_id
-       JOIN employees e ON e.id=sh.employee_id AND e.tenant_id=sh.tenant_id
+       JOIN employee_site_assignments esa ON esa.site_id=t.site_id AND esa.tenant_id=t.tenant_id
+       JOIN employees e ON e.id=esa.employee_id AND e.tenant_id=esa.tenant_id
        WHERE t.tenant_id=$1 AND t.sop_id=$2 AND t.target_type='site'
-         AND sh.shift_date >= CURRENT_DATE AND e.status='Aktiv' AND e.archived_at IS NULL
+         AND e.status='Aktiv' AND e.archived_at IS NULL
        UNION
-       SELECT sh.employee_id,t.due_at
+       SELECT esa.employee_id,t.due_at
        FROM sop_assignment_targets t
        JOIN sites st ON st.client_id=t.customer_id AND st.tenant_id=t.tenant_id
-       JOIN shifts sh ON sh.site_id=st.id AND sh.tenant_id=st.tenant_id
-       JOIN employees e ON e.id=sh.employee_id AND e.tenant_id=sh.tenant_id
+       JOIN employee_site_assignments esa ON esa.site_id=st.id AND esa.tenant_id=st.tenant_id
+       JOIN employees e ON e.id=esa.employee_id AND e.tenant_id=esa.tenant_id
        WHERE t.tenant_id=$1 AND t.sop_id=$2 AND t.target_type='customer'
-         AND sh.shift_date >= CURRENT_DATE AND e.status='Aktiv' AND e.archived_at IS NULL
+         AND e.status='Aktiv' AND e.archived_at IS NULL
        UNION
        SELECT e.id,t.due_at
        FROM sop_assignment_targets t
@@ -650,14 +655,19 @@ export async function listAssignments(req: Request, res: Response, next: NextFun
                     COUNT(DISTINCT a.id) FILTER (WHERE a.acknowledged_at IS NOT NULL)::int AS signed_count
              FROM sop_assignments a
              JOIN employees e ON e.id=a.employee_id AND e.tenant_id=a.tenant_id
-             LEFT JOIN shifts sh ON sh.employee_id=e.id AND sh.tenant_id=e.tenant_id
-               AND sh.shift_date >= CURRENT_DATE
-             LEFT JOIN sites assigned_site ON assigned_site.id=sh.site_id AND assigned_site.tenant_id=sh.tenant_id
              WHERE a.tenant_id=t.tenant_id AND a.sop_id=t.sop_id AND a.version_id=s.current_version_id
                AND (t.target_type='tenant'
                  OR (t.target_type='employee' AND a.employee_id=t.employee_id)
-                 OR (t.target_type='site' AND sh.site_id=t.site_id)
-                 OR (t.target_type='customer' AND assigned_site.client_id=t.customer_id))
+                 OR (t.target_type='site' AND EXISTS (
+                   SELECT 1 FROM employee_site_assignments esa
+                   WHERE esa.tenant_id=a.tenant_id AND esa.employee_id=a.employee_id AND esa.site_id=t.site_id
+                 ))
+                 OR (t.target_type='customer' AND EXISTS (
+                   SELECT 1 FROM employee_site_assignments esa
+                   JOIN sites assigned_site ON assigned_site.id=esa.site_id AND assigned_site.tenant_id=esa.tenant_id
+                   WHERE esa.tenant_id=a.tenant_id AND esa.employee_id=a.employee_id
+                     AND assigned_site.client_id=t.customer_id
+                 )))
            ) counts ON true
            WHERE t.tenant_id=$1 AND t.sop_id=$2 ORDER BY t.created_at DESC`,
           [user.tenantId,sopId]

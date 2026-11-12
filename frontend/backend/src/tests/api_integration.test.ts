@@ -32,6 +32,11 @@ let createdDmsDocumentId: string | undefined;
 let createdDmsFolderId: string | undefined;
 let createdSopId: string | undefined;
 let createdSopEmployeeId: string | undefined;
+let createdSopSiteId: string | undefined;
+let createdSopCustomerId: string | undefined;
+let createdSopShiftId: string | undefined;
+let createdCrossTenantClientId: string | undefined;
+let createdCrossTenantSiteId: string | undefined;
 const keyNumber = `API-KEY-${Date.now()}`;
 
 async function login(email: string): Promise<string> {
@@ -146,9 +151,24 @@ beforeAll(async () => {
     [TENANT_FFM_ID,`SOP-INT-${Date.now()}`,SOP_EMPLOYEE_EMAIL]
   );
   createdSopEmployeeId = sopEmployeeRow.rows[0].id;
+  const sopClient = await migrationPool.query(
+    'SELECT id FROM clients WHERE tenant_id=$1 ORDER BY id LIMIT 1',
+    [TENANT_FFM_ID]
+  );
+  createdSopCustomerId = sopClient.rows[0].id;
+  const sopSite = await migrationPool.query(
+    `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+     VALUES ($1,$2,$3,'SOP membership test site','Testweg 1')
+     RETURNING id`,
+    [TENANT_FFM_ID,sopClient.rows[0].id,`SOP-SITE-${Date.now()}`]
+  );
+  createdSopSiteId = sopSite.rows[0].id;
 });
 
 afterAll(async () => {
+  if (createdSopShiftId) {
+    await migrationPool.query('DELETE FROM shifts WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopShiftId]);
+  }
   if (createdSopId) {
     const cleanup = await migrationPool.connect();
     try {
@@ -163,6 +183,15 @@ afterAll(async () => {
       await cleanup.query('SET session_replication_role = origin');
       cleanup.release();
     }
+  }
+  if (createdSopSiteId) {
+    await migrationPool.query('DELETE FROM sites WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopSiteId]);
+  }
+  if (createdCrossTenantSiteId) {
+    await migrationPool.query('DELETE FROM sites WHERE tenant_id=$1 AND id=$2', [TENANT_BAVARIA_ID,createdCrossTenantSiteId]);
+  }
+  if (createdCrossTenantClientId) {
+    await migrationPool.query('DELETE FROM clients WHERE tenant_id=$1 AND id=$2', [TENANT_BAVARIA_ID,createdCrossTenantClientId]);
   }
   if (createdDmsDocumentId) {
     const cleanup = await migrationPool.connect();
@@ -427,6 +456,44 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const token = await login(SEED_USER_EMAIL);
     const employeeId = crypto.randomUUID();
     const mutationId = crypto.randomUUID();
+    const suffix = Date.now();
+    const foreignClient = await migrationPool.query(
+      `INSERT INTO clients (tenant_id,client_number,company_name,contact_person,email,phone,address,contract_start,contract_end)
+       VALUES ($1,$2,'Foreign sync site client','Test Person',$3,'+49 89 000','Test address',CURRENT_DATE,CURRENT_DATE + 365)
+       RETURNING id`,
+      [TENANT_BAVARIA_ID,`SYNC-FOREIGN-${suffix}`,`sync-foreign-${suffix}@example.test`]
+    );
+    createdCrossTenantClientId = foreignClient.rows[0].id;
+    const foreignSite = await migrationPool.query(
+      `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+       VALUES ($1,$2,$3,'Foreign sync site','Test address') RETURNING id`,
+      [TENANT_BAVARIA_ID,createdCrossTenantClientId,`SYNC-FOREIGN-${suffix}`]
+    );
+    createdCrossTenantSiteId = foreignSite.rows[0].id;
+
+    const invalidCreateId = crypto.randomUUID();
+    const invalidCreate = await request(app).post('/api/v1/employees/sync').set(authHeaders(token)).send({
+      deviceId: 'employee-outbox-test',
+      mutations: [{
+        clientUuid: crypto.randomUUID(), entityType: 'employee', action: 'CREATE',
+        clientTimestamp: new Date().toISOString(), baseVersion: 1,
+        payload: {
+          id: invalidCreateId, personnelNumber: `API-OFF-FOREIGN-${suffix}`,
+          firstName: 'Foreign', lastName: 'Site', email: `foreign-${suffix}@secops.local`,
+          phone: '+49 69 123', role: 'Wachdienstmitarbeiter', status: 'Aktiv',
+          weeklyHours: 40, hourlyRate: 19, dateOfJoining: '2026-01-01',
+          assignedSiteIds: [createdCrossTenantSiteId]
+        }
+      }]
+    });
+    expect(invalidCreate.status).toBe(200);
+    expect(invalidCreate.body.data[0].status).toBe('REJECTED');
+    const rejectedCreate = await migrationPool.query(
+      'SELECT 1 FROM employees WHERE tenant_id=$1 AND id=$2',
+      ['11111111-1111-1111-1111-111111111111',invalidCreateId]
+    );
+    expect(rejectedCreate.rows).toHaveLength(0);
+
     createdSyncedEmployeeId = employeeId;
     const mutation = {
       clientUuid: mutationId,
@@ -445,7 +512,8 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
         status: 'Aktiv',
         weeklyHours: 40,
         hourlyRate: 19,
-        dateOfJoining: '2026-01-01'
+        dateOfJoining: '2026-01-01',
+        assignedSiteIds: [createdSiteId]
       }
     };
     const send = () => request(app).post('/api/v1/employees/sync').set(authHeaders(token)).send({
@@ -459,6 +527,53 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(repeated.body.data).toEqual(first.body.data);
     const stored = await migrationPool.query('SELECT id FROM employees WHERE tenant_id=$1 AND id=$2', ['11111111-1111-1111-1111-111111111111', employeeId]);
     expect(stored.rows).toHaveLength(1);
+    let memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toEqual([{ site_id: createdSiteId }]);
+
+    const sendUpdate = (clientUuid: string, baseVersion: number, payload: Record<string, unknown>) =>
+      request(app).post('/api/v1/employees/sync').set(authHeaders(token)).send({
+        deviceId: 'employee-outbox-test',
+        mutations: [{
+          clientUuid, entityType: 'employee', action: 'UPDATE',
+          clientTimestamp: new Date().toISOString(), baseVersion, payload: { id: employeeId, ...payload }
+        }]
+      });
+    const clearMembershipMutationId = crypto.randomUUID();
+    const clearMembership = await sendUpdate(clearMembershipMutationId, 1, { assignedSiteIds: [] });
+    expect(clearMembership.body.data[0]).toEqual(expect.objectContaining({ status: 'SYNCED', serverVersion: 2 }));
+    const replayedClear = await sendUpdate(clearMembershipMutationId, 1, { assignedSiteIds: [] });
+    expect(replayedClear.body.data).toEqual(clearMembership.body.data);
+    memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toHaveLength(0);
+
+    const invalidUpdate = await sendUpdate(crypto.randomUUID(), 2, {
+      firstName: 'Must not persist', assignedSiteIds: [createdCrossTenantSiteId!]
+    });
+    expect(invalidUpdate.body.data[0].status).toBe('REJECTED');
+    const unchangedEmployee = await migrationPool.query(
+      'SELECT first_name,revision_version FROM employees WHERE tenant_id=$1 AND id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(unchangedEmployee.rows[0]).toEqual({ first_name: 'Offline', revision_version: 2 });
+    memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toHaveLength(0);
+
+    const restoreMembership = await sendUpdate(crypto.randomUUID(), 2, { assignedSiteIds: [createdSiteId] });
+    expect(restoreMembership.body.data[0]).toEqual(expect.objectContaining({ status: 'SYNCED', serverVersion: 3 }));
+    memberships = await migrationPool.query(
+      'SELECT site_id FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2',
+      ['11111111-1111-1111-1111-111111111111',employeeId]
+    );
+    expect(memberships.rows).toEqual([{ site_id: createdSiteId }]);
   });
 
   test('5. Mandant B sieht die neu angelegten Objekte und Mitarbeiter nicht', async () => {
@@ -814,12 +929,48 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
       .set(authHeaders(approverToken)).send({});
     expect(published.status).toBe(200);
 
+    const siteMembership = await request(app).patch(`/api/v1/employees/${createdSopEmployeeId}`)
+      .set(authHeaders(await login(SEED_USER_EMAIL))).send({ revisionVersion: 1, assignedSiteIds: [createdSopSiteId] });
+    expect(siteMembership.status).toBe(200);
+    expect(siteMembership.body.data.assigned_site_ids).toEqual([createdSopSiteId]);
+    const futureShiftBeforeAssignment = await migrationPool.query(
+      'SELECT COUNT(*)::int AS count FROM shifts WHERE tenant_id=$1 AND employee_id=$2 AND site_id=$3 AND shift_date >= CURRENT_DATE',
+      [TENANT_FFM_ID,createdSopEmployeeId,createdSopSiteId]
+    );
+    expect(futureShiftBeforeAssignment.rows[0].count).toBe(0);
+
     const assigned = await request(app).post(`/api/v1/sops/${createdSopId}/assignments`)
       .set(authHeaders(authorToken)).send({
-        targets: [{ type: 'employee', id: createdSopEmployeeId }],
+        targets: [
+          { type: 'site', id: createdSopSiteId },
+          { type: 'customer', id: createdSopCustomerId }
+        ],
         dueAt: new Date(Date.now() + 5 * 86400000).toISOString()
       });
     expect(assigned.status).toBe(201);
+      const materializedAssignment = await migrationPool.query(
+        'SELECT id FROM sop_assignments WHERE tenant_id=$1 AND sop_id=$2 AND version_id=$3 AND employee_id=$4',
+        [TENANT_FFM_ID,createdSopId,published.body.data.versionId,createdSopEmployeeId]
+      );
+      expect(materializedAssignment.rows).toHaveLength(1);
+    const targetCounts = await request(app).get(`/api/v1/sops/${createdSopId}/assignments`).set(authHeaders(authorToken));
+    expect(targetCounts.status).toBe(200);
+    expect(targetCounts.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'site', target_id: createdSopSiteId, total_required: 1, signed_count: 0 }),
+      expect.objectContaining({ type: 'customer', target_id: createdSopCustomerId, total_required: 1, signed_count: 0 })
+    ]));
+    const shiftAfterPublication = await migrationPool.query(
+      `INSERT INTO shifts (tenant_id,site_id,employee_id,shift_date,start_time,end_time,required_qualification)
+       VALUES ($1,$2,$3,CURRENT_DATE + INTERVAL '1 day','08:00','16:00','Allgemeine Qualifikation') RETURNING id`,
+      [TENANT_FFM_ID,createdSopSiteId,createdSopEmployeeId]
+    );
+    createdSopShiftId = shiftAfterPublication.rows[0].id;
+    await migrationPool.query('DELETE FROM shifts WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopShiftId]);
+    const countAfterShiftChange = await request(app).get(`/api/v1/sops/${createdSopId}/assignments`).set(authHeaders(authorToken));
+    expect(countAfterShiftChange.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'site', target_id: createdSopSiteId, total_required: 1, signed_count: 0 }),
+      expect.objectContaining({ type: 'customer', target_id: createdSopCustomerId, total_required: 1, signed_count: 0 })
+    ]));
     const currentFirstVersion = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
     const firstInstruction = currentFirstVersion.body.data.find((item: any) => item.id === createdSopId);
     expect(firstInstruction).toMatchObject({

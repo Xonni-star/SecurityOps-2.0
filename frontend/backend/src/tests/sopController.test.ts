@@ -1,6 +1,6 @@
 import { Request, NextFunction } from 'express';
 import { withTenantTransaction } from '../config/database';
-import { acknowledgeAssignment, approveSop } from '../controllers/sopController';
+import { acknowledgeAssignment, approveSop, assignSop, reviewSop } from '../controllers/sopController';
 
 jest.mock('../config/database', () => ({
   withTenantTransaction: jest.fn()
@@ -43,9 +43,71 @@ beforeEach(() => {
 });
 
 describe('SOP separation of duties and acknowledgements', () => {
+  test('explicit employee targets continue to materialize an assignment', async () => {
+    const versionId = '77777777-7777-4777-8777-777777777777';
+    const target = { id: '88888888-8888-4888-8888-888888888888', target_type: 'employee', employee_id: employeeId };
+    transaction.query.mockResolvedValueOnce({ rows: [{
+      id: sopId, status: 'published', current_version_id: versionId
+    }] })
+      .mockResolvedValueOnce({ rows: [{ id: employeeId }] })
+      .mockResolvedValueOnce({ rows: [target] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = response();
+
+    await assignSop(request({ body: { targets: [{ type: 'employee', id: employeeId }] } }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(201);
+    expect(res.body.data.targets).toEqual([target]);
+    expect(transaction.query.mock.calls[3][0]).toContain("t.target_type='employee'");
+  });
+
+  test('author cannot review their own instruction or write a review event', async () => {
+    transaction.query.mockResolvedValueOnce({ rows: [{
+      id: sopId, created_by: userId, status: 'in_review', draft_version_id: '77777777-7777-4777-8777-777777777777'
+    }] });
+    const res = response();
+
+    await reviewSop(request({ body: { decision: 'reviewed', comment: 'Self review' } }), res, next);
+
+    expect((next as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }));
+    expect(res.json).not.toHaveBeenCalled();
+    expect(transaction.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('submitter cannot review their submitted version', async () => {
+    transaction.query.mockResolvedValueOnce({ rows: [{
+      id: sopId, created_by: authorId, submitted_by_user_id: userId,
+      status: 'in_review', draft_version_id: '77777777-7777-4777-8777-777777777777'
+    }] });
+    const res = response();
+
+    await reviewSop(request({ body: { decision: 'reviewed', comment: 'Self review' } }), res, next);
+
+    expect((next as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }));
+    expect(res.json).not.toHaveBeenCalled();
+    expect(transaction.query).toHaveBeenCalledTimes(1);
+  });
+
   test('author cannot approve their own instruction', async () => {
     transaction.query.mockResolvedValueOnce({ rows: [{
       id: sopId, created_by: userId, status: 'reviewed', draft_version_id: '77777777-7777-4777-8777-777777777777'
+    }] });
+    const res = response();
+
+    await approveSop(request(), res, next);
+
+    expect((next as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }));
+    expect(res.json).not.toHaveBeenCalled();
+    expect(transaction.query).toHaveBeenCalledTimes(1);
+  });
+
+  test('submitter cannot approve their submitted version after another reviewer reviewed it', async () => {
+    transaction.query.mockResolvedValueOnce({ rows: [{
+      id: sopId, created_by: authorId, submitted_by_user_id: userId,
+      reviewed_by_user_id: otherEmployeeId, status: 'reviewed',
+      draft_version_id: '88888888-8888-4888-8888-888888888888'
     }] });
     const res = response();
 

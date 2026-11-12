@@ -57,7 +57,6 @@ export const SOPModule: React.FC = () => {
   const sops = useSecurityStore((state) => state.sops);
   const loadTenantData = useSecurityStore((state) => state.loadTenantData);
   const acknowledgeSOP = useSecurityStore((state) => state.acknowledgeSOP);
-  const syncPendingSOPAcknowledgements = useSecurityStore((state) => state.syncPendingSOPAcknowledgements);
   const authUser = useSecurityStore((state) => state.authUser);
   const isOnline = useSecurityStore((state) => state.isOnline);
   const sites = useSecurityStore((state) => state.sites);
@@ -103,7 +102,6 @@ export const SOPModule: React.FC = () => {
   useEffect(() => {
     const handleOnline = () => {
       setBrowserOnline(true);
-      void syncPendingSOPAcknowledgements();
     };
     const handleOffline = () => setBrowserOnline(false);
     window.addEventListener('online', handleOnline);
@@ -112,7 +110,7 @@ export const SOPModule: React.FC = () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [syncPendingSOPAcknowledgements]);
+  }, []);
 
   useEffect(() => {
     if (view === 'dashboard' && can('sop:read')) {

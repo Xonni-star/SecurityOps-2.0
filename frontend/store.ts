@@ -58,6 +58,9 @@ export type ThemeMode = 'dark' | 'light';
 
 // Mutex zur Verhinderung paralleler Synchronisationsläufe
 let isSyncRunningMutex = false;
+let isSOPSyncRunning = false;
+let lastSOPSyncFailureNoticeAt = 0;
+const SOP_SYNC_FAILURE_NOTICE_COOLDOWN_MS = 30_000;
 
 export interface AuthUser {
   id: string;
@@ -107,33 +110,65 @@ function mapSOPRow(row: any, tenantId: string): SOPDocument {
 }
 
 function matchesPendingSOPRevision(sop: SOPDocument | undefined, acknowledgement: SOPPendingAcknowledgement): boolean {
-  if (!sop || sop.assignmentId !== acknowledgement.assignmentId) return false;
-  if (acknowledgement.versionId) return sop.versionId === acknowledgement.versionId;
-  return !acknowledgement.version || sop.version === acknowledgement.version;
+  return Boolean(sop && sop.assignmentId === acknowledgement.assignmentId &&
+    sop.versionId === acknowledgement.versionId && sop.version === acknowledgement.version);
 }
 
-function readPendingSOPAcknowledgements(tenantId: string, userId: string): SOPPendingAcknowledgement[] {
+function currentSOPIdentity(state: SecurityOpsStore): { tenantId: string; userId: string } {
+  return {
+    tenantId: state.currentTenantId || state.authUser?.tenantId || '',
+    userId: state.authUser?.id || state.currentUserId
+  };
+}
+
+function isCurrentSOPIdentity(tenantId: string, userId: string): boolean {
+  const identity = currentSOPIdentity(useSecurityStore.getState());
+  return identity.tenantId === tenantId && identity.userId === userId;
+}
+
+function legacySOPQueueKey(tenantId: string, userId: string): string {
+  return `sop-acknowledgements:${tenantId}:${userId}`;
+}
+
+async function migrateLegacySOPAcknowledgements(tenantId: string, userId: string): Promise<void> {
+  let stored: string | null;
   try {
-    const stored = localStorage.getItem(`sop-acknowledgements:${tenantId}:${userId}`);
-    if (!stored) return [];
-    const parsed: unknown = JSON.parse(stored);
-    return Array.isArray(parsed) ? parsed.filter((item): item is SOPPendingAcknowledgement =>
-      item && typeof item.sopId === 'string' && typeof item.assignmentId === 'string' &&
-      typeof item.clientMutationId === 'string' && typeof item.capturedAt === 'string' &&
-      (item.status === undefined || item.status === 'pending' || item.status === 'stale')
-    ) : [];
+    if (typeof localStorage === 'undefined') return;
+    stored = localStorage.getItem(legacySOPQueueKey(tenantId, userId));
   } catch {
-    return [];
+    return;
   }
-}
-
-function persistPendingSOPAcknowledgements(tenantId: string, userId: string, pending: SOPPendingAcknowledgement[]): void {
+  if (!stored) return;
+  let parsed: unknown;
   try {
-    const key = `sop-acknowledgements:${tenantId}:${userId}`;
-    if (pending.length) localStorage.setItem(key, JSON.stringify(pending));
-    else localStorage.removeItem(key);
+    parsed = JSON.parse(stored);
   } catch {
-    throw new Error('Die ausstehende Kenntnisnahme konnte nicht lokal gespeichert werden.');
+    return;
+  }
+  if (!Array.isArray(parsed)) return;
+  let allMigrated = true;
+  for (const item of parsed) {
+    if (!item || typeof item.sopId !== 'string' || typeof item.assignmentId !== 'string' ||
+      typeof item.clientMutationId !== 'string' || typeof item.capturedAt !== 'string' ||
+      typeof item.versionId !== 'string' || typeof item.version !== 'string' ||
+      (item.status !== undefined && item.status !== 'pending' && item.status !== 'stale')) {
+      allMigrated = false;
+      continue;
+    }
+    await offlineVault.enqueueSOPAcknowledgement({
+      tenantId,
+      userId,
+      sopId: item.sopId,
+      assignmentId: item.assignmentId,
+      clientMutationId: item.clientMutationId,
+      capturedAt: item.capturedAt,
+      versionId: item.versionId,
+      version: item.version,
+      status: item.status === 'stale' ? 'stale' : 'pending'
+    });
+  }
+  if (allMigrated) {
+    try { localStorage.removeItem(legacySOPQueueKey(tenantId, userId)); } catch { /* IndexedDB is the durable copy. */ }
   }
 }
 
@@ -533,7 +568,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       apiClient.setCsrfToken(data.csrfToken);
       const user = data.user as AuthUser;
       apiClient.setTenantId(user.tenantId);
-      set({ authUser: user, currentTenantId: user.tenantId, isAuthenticated: true, isAuthenticating: false });
+      set({
+        authUser: user,
+        currentTenantId: user.tenantId,
+        isAuthenticated: true,
+        isAuthenticating: false,
+        pendingSOPAcknowledgements: [],
+        sops: []
+      });
       await get().loadTenantData();
     } catch (error: any) {
       apiClient.setCsrfToken(null);
@@ -554,7 +596,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       // Die lokale Sitzung wird in jedem Fall beendet.
     }
     apiClient.setCsrfToken(null);
-    set({ authUser: null, isAuthenticated: false, authError: null, documents: [] });
+    set({
+      authUser: null,
+      isAuthenticated: false,
+      authError: null,
+      documents: [],
+      pendingSOPAcknowledgements: [],
+      sops: []
+    });
   },
 
   restoreSession: async () => {
@@ -571,17 +620,20 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           permissions: Array.isArray(me.permissions) ? me.permissions : []
         },
         isAuthenticated: true,
-        currentTenantId: me.tenantId ?? me.tenant_id ?? ''
+        currentTenantId: me.tenantId ?? me.tenant_id ?? '',
+        pendingSOPAcknowledgements: [],
+        sops: []
       });
       apiClient.setTenantId(me.tenantId ?? me.tenant_id ?? '');
       await get().loadTenantData();
     } catch {
       apiClient.setCsrfToken(null);
-      set({ authUser: null, isAuthenticated: false, documents: [] });
+      set({ authUser: null, isAuthenticated: false, documents: [], pendingSOPAcknowledgements: [], sops: [] });
     }
   },
 
   loadTenantData: async () => {
+    const requestIdentity = currentSOPIdentity(get());
     set({
       isLoadingData: true,
       dataLoadError: null,
@@ -594,7 +646,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       keys: [],
       tasks: [],
       documents: [],
-      sops: []
+      sops: [],
+      pendingSOPAcknowledgements: []
     });
 
     const permissions = get().authUser?.permissions || [];
@@ -622,7 +675,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       canReadSOPs ? apiClient.get<any[]>('/sops') : Promise.resolve([])
     ]);
 
-    const tenantId = get().authUser?.tenantId || get().currentTenantId;
+    if (!isCurrentSOPIdentity(requestIdentity.tenantId, requestIdentity.userId)) return;
+    const tenantId = requestIdentity.tenantId;
     const errors: string[] = [];
     const nextState: Partial<SecurityOpsStore> = {};
 
@@ -675,33 +729,39 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
 
     if (canReadSOPs && sopsResult.status === 'fulfilled') {
-      const currentUserId = get().authUser?.id || get().currentUserId;
-      const persistedPending = readPendingSOPAcknowledgements(tenantId, currentUserId);
+      const currentUserId = requestIdentity.userId;
       const loadedSOPs = sopsResult.value.map((row) => mapSOPRow(row, tenantId));
-      const pending = persistedPending.map((ack) => ({
-        ...ack,
-        status: ack.status === 'stale' || !matchesPendingSOPRevision(loadedSOPs.find((sop) => sop.id === ack.sopId), ack)
-          ? 'stale' as const
-          : 'pending' as const
-      }));
-      if (pending.some((ack, index) => ack.status !== persistedPending[index]?.status)) {
-        try {
-          persistPendingSOPAcknowledgements(tenantId, currentUserId, pending);
-        } catch {
-          get().addNotification('Offline-Status nicht aktualisiert', 'Die lokale Kenntnisnahme konnte nicht auf eine neue Revision geprüft werden.', 'alert');
+      try {
+        await migrateLegacySOPAcknowledgements(tenantId, currentUserId);
+        const persistedPending = await offlineVault.getSOPAcknowledgements(tenantId, currentUserId);
+        if (!isCurrentSOPIdentity(tenantId, currentUserId)) return;
+        const pending: SOPPendingAcknowledgement[] = [];
+        for (const ack of persistedPending) {
+          const currentAck: SOPPendingAcknowledgement = {
+            ...ack,
+            status: ack.status === 'stale' ||
+              !matchesPendingSOPRevision(loadedSOPs.find((sop) => sop.id === ack.sopId), ack)
+              ? 'stale'
+              : 'pending'
+          };
+          if (currentAck.status === 'stale' && ack.status !== 'stale') {
+            await offlineVault.updateSOPAcknowledgement(ack.clientMutationId, 'stale').catch(() => undefined);
+          }
+          pending.push(currentAck);
         }
+        nextState.sops = loadedSOPs.map((sop) => {
+          const ack = pending.find((item) => item.sopId === sop.id);
+          if (!ack) return sop;
+          return {
+            ...sop,
+            currentUserAcknowledgment: ack.status === 'pending' ? 'pending' : 'stale'
+          };
+        });
+        nextState.pendingSOPAcknowledgements = pending;
+      } catch (error) {
+        errors.push(`Offline-Kenntnahmen: ${errorText(error)}`);
+        nextState.sops = loadedSOPs;
       }
-      nextState.sops = loadedSOPs.map((sop) => {
-        const ack = pending.find((item) => item.sopId === sop.id);
-        if (!ack) return sop;
-        return {
-          ...sop,
-          currentUserAcknowledgment: matchesPendingSOPRevision(sop, ack) && ack.status !== 'stale'
-            ? 'pending'
-            : 'stale'
-        };
-      });
-      nextState.pendingSOPAcknowledgements = pending;
     } else if (canReadSOPs && sopsResult.status === 'rejected') {
       errors.push(`Dienstanweisungen: ${errorText(sopsResult.reason)}`);
     }
@@ -725,7 +785,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   })(),
   setCurrentTenantId: (tenantId) => {
     apiClient.setTenantId(tenantId);
-    set({ currentTenantId: tenantId });
+    set({ currentTenantId: tenantId, pendingSOPAcknowledgements: [], sops: [] });
+    void get().loadTenantData();
   },
   getCurrentTenant: () => {
     const { tenants, currentTenantId } = get();
@@ -1510,7 +1571,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         status: e.status,
         weeklyHours: e.weeklyHours,
         hourlyRate: e.hourlyRate,
-        dateOfJoining: e.dateOfJoining
+        dateOfJoining: e.dateOfJoining,
+        assignedSiteIds: e.assignedSiteIds || []
       };
       if (!get().isOnline) {
         await get().enqueueOfflineAction({ tenantId: currentTenantId, entityType: 'employee', action: 'CREATE', payload: { id, ...payload }, baseVersion: 1 });
@@ -1566,7 +1628,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       'status',
       'weeklyHours',
       'hourlyRate',
-      'dateOfJoining'
+      'dateOfJoining',
+      'assignedSiteIds'
     ];
 
     for (const key of allowed) {
@@ -1836,87 +1899,66 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
   acknowledgeSOP: async (sopId) => {
     const state = get();
+    const identity = currentSOPIdentity(state);
     const sop = state.sops.find((item) => item.id === sopId);
     if (!sop || sop.currentUserAcknowledgment === 'confirmed') return false;
+    if (!identity.tenantId || !identity.userId || sop.tenantId !== identity.tenantId) {
+      get().addNotification('Kenntnisnahme nicht gespeichert', 'Die Sitzung passt nicht zum Mandanten dieser Dienstanweisung.', 'alert');
+      return false;
+    }
     if (!sop.assignmentId) {
       get().addNotification('Keine Zuweisung gefunden', 'Für diese Dienstanweisung ist keine persönliche Kenntnisnahme-Zuweisung verfügbar.', 'alert');
       return false;
     }
-    const capturedAt = new Date().toISOString();
-    const clientMutationId = newMutationEntityId();
-    const pendingAck: SOPPendingAcknowledgement = {
-      sopId,
-      assignmentId: sop.assignmentId,
-      clientMutationId,
-      capturedAt,
-      versionId: sop.versionId,
-      version: sop.version,
-      status: 'pending'
-    };
-    const shouldQueueOffline = !state.isOnline ||
-      (typeof navigator !== 'undefined' && navigator.onLine === false);
-
-    if (shouldQueueOffline) {
-      const userId = state.authUser?.id || state.currentUserId;
-      const pending = [...state.pendingSOPAcknowledgements.filter((ack) => ack.sopId !== sopId), pendingAck];
-      try {
-        persistPendingSOPAcknowledgements(state.currentTenantId, userId, pending);
-        set({
-          pendingSOPAcknowledgements: pending,
-          sops: get().sops.map((item) => item.id === sopId
-            ? { ...item, currentUserAcknowledgment: 'pending', acknowledgedAt: capturedAt }
-            : item)
-        });
-        get().addNotification('Kenntnisnahme vorgemerkt', 'Offline erfasst – noch nicht serverseitig bestätigt.', 'warning');
-        return true;
-      } catch (error) {
-        get().addNotification('Kenntnisnahme nicht gespeichert', errorText(error), 'alert');
-        return false;
-      }
+    if (!sop.versionId) {
+      get().addNotification('Kenntnisnahme nicht gespeichert', 'Die exakte SOP-Version ist nicht verfügbar.', 'alert');
+      return false;
     }
 
     try {
-      await apiClient.post(`/sops/assignments/${sop.assignmentId}/acknowledge`, {
-        confirmed: true,
-        clientMutationId,
-        capturedAt
+      const { acknowledgement, created } = await offlineVault.enqueueSOPAcknowledgement({
+        tenantId: identity.tenantId,
+        userId: identity.userId,
+        sopId,
+        assignmentId: sop.assignmentId,
+        versionId: sop.versionId,
+        version: sop.version,
+        clientMutationId: newMutationEntityId(),
+        capturedAt: new Date().toISOString(),
+        status: 'pending'
       });
-      const currentUserId = get().authUser?.id || get().currentUserId;
-      const remaining = get().pendingSOPAcknowledgements.filter((ack) => ack.sopId !== sopId);
-      try {
-        persistPendingSOPAcknowledgements(get().currentTenantId, currentUserId, remaining);
-      } catch {
-        get().addNotification('Lokale Warteschlange nicht bereinigt', 'Der Server hat die Kenntnisnahme bestätigt; ein älterer lokaler Offline-Eintrag blieb erhalten.', 'warning');
+      if (acknowledgement.status === 'stale') {
+        get().addNotification('Kenntnisnahme veraltet', 'Diese Version wurde bereits als veraltet erkannt und wird nicht erneut übertragen.', 'warning');
+        return false;
       }
+      const pendingAck: SOPPendingAcknowledgement = { ...acknowledgement, status: 'pending' };
+      if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return true;
       set((current) => ({
-        pendingSOPAcknowledgements: remaining,
+        pendingSOPAcknowledgements: [
+          ...current.pendingSOPAcknowledgements.filter((ack) => ack.clientMutationId !== pendingAck.clientMutationId),
+          pendingAck
+        ],
         sops: current.sops.map((item) => item.id === sopId && matchesPendingSOPRevision(item, pendingAck)
-          ? { ...item, currentUserAcknowledgment: 'confirmed', acknowledgedAt: capturedAt }
+          ? { ...item, currentUserAcknowledgment: 'pending', acknowledgedAt: pendingAck.capturedAt }
           : item)
       }));
-      get().addNotification('Kenntnisnahme bestätigt', 'Die Bestätigung wurde vom Server gespeichert.', 'info');
+
+      if (get().isOnline && !(typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        await get().syncPendingSOPAcknowledgements();
+      }
+      const currentSOP = get().sops.find((item) => item.id === sopId);
+      if (currentSOP?.currentUserAcknowledgment === 'confirmed') {
+        get().addNotification('Kenntnisnahme bestätigt', 'Die Bestätigung wurde vom Server gespeichert.', 'info');
+      } else {
+        get().addNotification(
+          created ? 'Kenntnisnahme vorgemerkt' : 'Kenntnisnahme weiterhin vorgemerkt',
+          'Dauerhaft lokal gespeichert; die Übertragung wird bei verfügbarer Verbindung mit derselben Kennung wiederholt.',
+          'warning'
+        );
+      }
       return true;
     } catch (error) {
-      const offlineNow = typeof navigator !== 'undefined' && navigator.onLine === false;
-      if (offlineNow) {
-        const userId = get().authUser?.id || get().currentUserId;
-        const pending = [...get().pendingSOPAcknowledgements.filter((ack) => ack.sopId !== sopId), pendingAck];
-        try {
-          persistPendingSOPAcknowledgements(get().currentTenantId, userId, pending);
-          set({
-            pendingSOPAcknowledgements: pending,
-            sops: get().sops.map((item) => item.id === sopId
-              ? { ...item, currentUserAcknowledgment: 'pending', acknowledgedAt: capturedAt }
-              : item)
-          });
-          get().addNotification('Kenntnisnahme vorgemerkt', 'Verbindung verloren – noch nicht serverseitig bestätigt.', 'warning');
-          return true;
-        } catch (storageError) {
-          get().addNotification('Kenntnisnahme nicht gespeichert', errorText(storageError), 'alert');
-          return false;
-        }
-      }
-      get().addNotification('Kenntnisnahme fehlgeschlagen', errorText(error), 'alert');
+      get().addNotification('Kenntnisnahme nicht gespeichert', errorText(error), 'alert');
       return false;
     }
   },
@@ -1925,54 +1967,65 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     if (!get().isOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) return;
     const permissions = get().authUser?.permissions || [];
     if (!permissions.includes('sop:read') && !permissions.includes('sop:manage')) return;
-    const userId = get().authUser?.id || get().currentUserId;
-    const pending = [...get().pendingSOPAcknowledgements];
-    let latestSOPs: SOPDocument[];
+    if (isSOPSyncRunning) return;
+    const identity = currentSOPIdentity(get());
+    if (!identity.tenantId || !identity.userId) return;
+    isSOPSyncRunning = true;
     try {
+      await migrateLegacySOPAcknowledgements(identity.tenantId, identity.userId);
+      const pending = await offlineVault.getSOPAcknowledgements(identity.tenantId, identity.userId);
+      if (!isCurrentSOPIdentity(identity.tenantId, identity.userId) || !pending.length) return;
       const rows = await apiClient.get<any[]>('/sops');
-      latestSOPs = rows.map((row) => mapSOPRow(row, get().authUser?.tenantId || get().currentTenantId));
-    } catch {
-      return;
-    }
-    for (const ack of pending) {
-      if (ack.status === 'stale') continue;
-      const latestSOP = latestSOPs.find((sop) => sop.id === ack.sopId);
-      const currentSOP = get().sops.find((sop) => sop.id === ack.sopId);
-      if (!currentSOP) continue;
-      if (!matchesPendingSOPRevision(latestSOP, ack) || !matchesPendingSOPRevision(currentSOP, ack)) {
-        const staleQueue = get().pendingSOPAcknowledgements.map((entry) =>
-          entry.clientMutationId === ack.clientMutationId ? { ...entry, status: 'stale' as const } : entry
-        );
-        try {
-          persistPendingSOPAcknowledgements(get().currentTenantId, userId, staleQueue);
-        } catch {
-          // Keep the item locally pending if its stale state cannot be persisted.
+      const latestSOPs = rows.map((row) => mapSOPRow(row, identity.tenantId));
+      if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
+      for (const ack of pending) {
+        if (ack.tenantId !== identity.tenantId || ack.userId !== identity.userId) continue;
+        if (ack.status === 'stale') continue;
+        const latestSOP = latestSOPs.find((sop) => sop.id === ack.sopId);
+        const currentSOP = get().sops.find((sop) => sop.id === ack.sopId);
+        if (!matchesPendingSOPRevision(latestSOP, ack) || !matchesPendingSOPRevision(currentSOP, ack)) {
+          await offlineVault.updateSOPAcknowledgement(ack.clientMutationId, 'stale').catch(() => undefined);
+          if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
+          set((current) => ({
+            pendingSOPAcknowledgements: current.pendingSOPAcknowledgements.map((entry) =>
+              entry.clientMutationId === ack.clientMutationId ? { ...entry, status: 'stale' } : entry
+            ),
+            sops: current.sops.map((item) => item.id === ack.sopId
+              ? { ...item, currentUserAcknowledgment: 'stale' }
+              : item)
+          }));
+          continue;
         }
-        set({
-          pendingSOPAcknowledgements: staleQueue,
-          sops: get().sops.map((item) => item.id === ack.sopId
-            ? { ...item, currentUserAcknowledgment: 'stale' }
-            : item)
-        });
-        continue;
-      }
-      try {
+        if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
         await apiClient.post(`/sops/assignments/${ack.assignmentId}/acknowledge`, {
           confirmed: true,
           clientMutationId: ack.clientMutationId,
           capturedAt: ack.capturedAt
         });
-        const remaining = get().pendingSOPAcknowledgements.filter((entry) => entry.clientMutationId !== ack.clientMutationId);
-        persistPendingSOPAcknowledgements(get().currentTenantId, userId, remaining);
-        set({
-          pendingSOPAcknowledgements: remaining,
-          sops: get().sops.map((item) => item.id === ack.sopId && matchesPendingSOPRevision(item, ack)
+        await offlineVault.removeSOPAcknowledgement(ack.clientMutationId);
+        if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
+        set((current) => ({
+          pendingSOPAcknowledgements: current.pendingSOPAcknowledgements.filter(
+            (entry) => entry.clientMutationId !== ack.clientMutationId
+          ),
+          sops: current.sops.map((item) => item.id === ack.sopId && matchesPendingSOPRevision(item, ack)
             ? { ...item, currentUserAcknowledgment: 'confirmed', acknowledgedAt: ack.capturedAt }
             : item)
-        });
-      } catch {
-        // Keep the durable entry pending until the server confirms it.
+        }));
       }
+    } catch (error) {
+      const now = Date.now();
+      if (isCurrentSOPIdentity(identity.tenantId, identity.userId) &&
+        now - lastSOPSyncFailureNoticeAt >= SOP_SYNC_FAILURE_NOTICE_COOLDOWN_MS) {
+        lastSOPSyncFailureNoticeAt = now;
+        get().addNotification(
+          'SOP-Synchronisierung ausstehend',
+          `Die lokal gespeicherte Kenntnisnahme bleibt für einen späteren Versuch erhalten. ${errorText(error)}`,
+          'warning'
+        );
+      }
+    } finally {
+      isSOPSyncRunning = false;
     }
   },
 
@@ -2118,3 +2171,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       sites: state.sites.map((s) => (s.id === siteId ? { ...s, activeAlarms: 0 } : s))
     }))
 }));
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('online', () => {
+    useSecurityStore.setState({ isOnline: true });
+    void useSecurityStore.getState().syncPendingSOPAcknowledgements();
+  });
+  window.addEventListener('offline', () => {
+    useSecurityStore.setState({ isOnline: false });
+  });
+}
