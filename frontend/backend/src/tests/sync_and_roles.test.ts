@@ -464,7 +464,9 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     });
     expect(result.status).toBe(200);
     expect(result.body.data[0]).toMatchObject({ status: 'REJECTED', clientUuid: mutationId });
-    const receipt = await pool.query('SELECT 1 FROM sync_idempotency_receipts WHERE tenant_id=$1 AND client_mutation_id=$2', [testTenantA, mutationId]);
+    const receipt = await withTenantTransaction(testTenantA, (tx) =>
+      tx.query('SELECT 1 FROM sync_idempotency_receipts WHERE tenant_id=$1 AND client_mutation_id=$2', [testTenantA, mutationId])
+    );
     expect(receipt.rowCount).toBe(0);
     const conflict = await request(app).post('/api/v1/sync/conflicts/resolve').set(authHeaders(token)).send({
       clientUuid: `forbidden-conflict-${Date.now()}`, entityType: 'shift', strategy: 'USE_SERVER', expectedVersion: 1
