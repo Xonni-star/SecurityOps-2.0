@@ -38,6 +38,7 @@ htmlcov/
 *.tar.gz.enc
 /var/backups/
 secops_dev_data/
+backend/var/documents/
 
 # OS / Editor Files
 .DS_Store

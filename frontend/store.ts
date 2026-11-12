@@ -42,7 +42,6 @@ import {
   initialEmergencyPlans,
   initialKeys,
   initialTasks,
-  initialDocuments,
   initialAutomations,
   initialAutomationTemplates,
   initialExecutionLogs,
@@ -247,6 +246,38 @@ function mapTaskRow(row: any, tenantId: string): TaskItem {
   };
 }
 
+export function mapDmsDocumentRow(row: any, tenantId: string): ManagedDocument {
+  const linkedEntityType = asString(row.linked_entity_type, 'general');
+  const scanStatus = row.scan_status === 'clean' || row.scan_status === 'infected' ? row.scan_status : 'not_scanned';
+  return {
+    id: asString(row.id),
+    tenantId,
+    title: asString(row.title),
+    fileName: asString(row.original_filename),
+    categoryId: asString(row.category_id),
+    category: asString(row.category_name),
+    sizeBytes: asNumber(row.size_bytes),
+    uploadedAt: asString(row.version_created_at ?? row.created_at),
+    version: String(asNumber(row.current_version, 1)),
+    status: asString(row.status),
+    scanStatus,
+    contentType: asString(row.content_type),
+    folderId: row.folder_id ?? undefined,
+    folderName: row.folder_name ?? undefined,
+    description: asString(row.description),
+    documentNumber: row.document_number ?? undefined,
+    validFrom: row.valid_from ?? undefined,
+    validUntil: row.valid_until ?? undefined,
+    tags: Array.isArray(row.tags) ? row.tags : [],
+    linkedEntityType: ['customer', 'site', 'employee', 'shift', 'incident'].includes(linkedEntityType)
+      ? linkedEntityType as ManagedDocument['linkedEntityType']
+      : 'general',
+    linkedEntityId: row.linked_entity_id ?? undefined,
+    linkedEntityName: row.linked_entity_name ?? undefined,
+    archivedAt: row.archived_at ?? undefined
+  };
+}
+
 interface SecurityOpsStore {
   // Theme
   theme: ThemeMode;
@@ -340,6 +371,7 @@ interface SecurityOpsStore {
   keys: KeyItem[];
   tasks: TaskItem[];
   documents: ManagedDocument[];
+  setDocuments: (documents: ManagedDocument[]) => void;
   patrolScans: PatrolScanEvent[];
   shiftHandovers: ShiftHandoverProtocol[];
 
@@ -389,8 +421,6 @@ interface SecurityOpsStore {
   addPatrolScan: (scan: Omit<PatrolScanEvent, 'id' | 'tenantId' | 'scannedAt' | 'offlineCaptured'>) => Promise<void>;
   submitShiftHandover: (handover: Omit<ShiftHandoverProtocol, 'id' | 'tenantId' | 'handoverTime' | 'offlineCaptured'>) => Promise<void>;
   toggleTaskStatus: (taskId: string) => Promise<void>;
-  addDocument: (doc: Omit<ManagedDocument, 'id' | 'tenantId' | 'uploadedAt'>) => void;
-  deleteDocument: (docId: string) => void;
   addEmergencyPlan: (plan: Omit<EmergencyPlan, 'id' | 'tenantId'>) => void;
   resolveAlarm: (siteId: string) => void;
 }
@@ -431,7 +461,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         { skipAuth: true }
       );
       apiClient.setCsrfToken(data.csrfToken);
-      set({ authUser: data.user as AuthUser, isAuthenticated: true, isAuthenticating: false });
+      const user = data.user as AuthUser;
+      apiClient.setTenantId(user.tenantId);
+      set({ authUser: user, currentTenantId: user.tenantId, isAuthenticated: true, isAuthenticating: false });
       await get().loadTenantData();
     } catch (error: any) {
       apiClient.setCsrfToken(null);
@@ -452,7 +484,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       // Die lokale Sitzung wird in jedem Fall beendet.
     }
     apiClient.setCsrfToken(null);
-    set({ authUser: null, isAuthenticated: false, authError: null });
+    set({ authUser: null, isAuthenticated: false, authError: null, documents: [] });
   },
 
   restoreSession: async () => {
@@ -468,12 +500,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           tenantName: '',
           permissions: Array.isArray(me.permissions) ? me.permissions : []
         },
-        isAuthenticated: true
+        isAuthenticated: true,
+        currentTenantId: me.tenantId ?? me.tenant_id ?? ''
       });
+      apiClient.setTenantId(me.tenantId ?? me.tenant_id ?? '');
       await get().loadTenantData();
     } catch {
       apiClient.setCsrfToken(null);
-      set({ authUser: null, isAuthenticated: false });
+      set({ authUser: null, isAuthenticated: false, documents: [] });
     }
   },
 
@@ -488,9 +522,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       guardBook: [],
       shifts: [],
       keys: [],
-      tasks: []
+      tasks: [],
+      documents: []
     });
 
+    const canReadDocuments = get().authUser?.permissions.includes('documents:read') ?? false;
     const [
       clientsResult,
       sitesResult,
@@ -498,7 +534,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       logbookResult,
       shiftsResult,
       keysResult,
-      tasksResult
+      tasksResult,
+      documentsResult
     ] = await Promise.allSettled([
       apiClient.get<any[]>('/customers'),
       apiClient.get<any[]>('/sites'),
@@ -506,10 +543,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       apiClient.get<any[]>('/logbook'),
       apiClient.get<any[]>('/shifts'),
       apiClient.get<any[]>('/keys'),
-      apiClient.get<any[]>('/tasks')
+      apiClient.get<any[]>('/tasks'),
+      canReadDocuments ? apiClient.get<any[]>('/documents') : Promise.resolve([])
     ]);
 
-    const tenantId = get().currentTenantId;
+    const tenantId = get().authUser?.tenantId || get().currentTenantId;
     const errors: string[] = [];
     const nextState: Partial<SecurityOpsStore> = {};
 
@@ -553,6 +591,12 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       nextState.tasks = tasksResult.value.map((row) => mapTaskRow(row, tenantId));
     } else {
       errors.push(`Aufgaben: ${errorText(tasksResult.reason)}`);
+    }
+
+    if (documentsResult.status === 'fulfilled') {
+      nextState.documents = documentsResult.value.map((row) => mapDmsDocumentRow(row, tenantId));
+    } else {
+      errors.push(`Dokumente: ${errorText(documentsResult.reason)}`);
     }
 
     const dataLoadError = errors.length > 0 ? errors.join(' | ') : null;
@@ -1092,7 +1136,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   emergencyPlans: initialEmergencyPlans,
   keys: initialKeys,
   tasks: initialTasks,
-  documents: initialDocuments,
+  documents: [],
+  setDocuments: (documents) => set({ documents }),
   patrolScans: [],
   shiftHandovers: [],
 
@@ -1133,8 +1178,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     return tasks.filter((t) => t.tenantId === currentTenantId);
   },
   getTenantDocuments: () => {
-    const { documents, currentTenantId } = get();
-    return documents.filter((d) => d.tenantId === currentTenantId);
+    const { documents, authUser } = get();
+    const trustedTenantId = authUser?.tenantId;
+    return trustedTenantId ? documents.filter((d) => d.tenantId === trustedTenantId) : [];
   },
   getTenantPatrolScans: () => {
     const { patrolScans, currentTenantId } = get();
@@ -1816,22 +1862,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       );
     }
   },
-
-  addDocument: (doc) => {
-    const { currentTenantId } = get();
-    const newDoc: ManagedDocument = {
-      ...doc,
-      id: `doc-${Date.now()}`,
-      tenantId: currentTenantId,
-      uploadedAt: new Date().toISOString().replace('T', ' ').substring(0, 16)
-    };
-    set((state) => ({ documents: [newDoc, ...state.documents] }));
-  },
-
-  deleteDocument: (docId) =>
-    set((state) => ({
-      documents: state.documents.filter((d) => d.id !== docId)
-    })),
 
   addEmergencyPlan: (plan) => {
     const { currentTenantId } = get();

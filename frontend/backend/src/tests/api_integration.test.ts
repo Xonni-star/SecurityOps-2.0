@@ -4,11 +4,14 @@ import crypto from 'crypto';
 import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
 import { authHeaders } from './testUtils';
+import { removeDocumentBlob } from '../services/documentFiles';
 
 const SEED_PASSWORD = 'SecOpsVault2025SecurePassword!';
 const SEED_USER_EMAIL = 'a.schmidt@ffm-sec.de';
 const BAVARIA_USER_EMAIL = 'api.bavaria@secops.local';
 const SITE_RESTRICTED_USER_EMAIL = 'api.site-restricted@secops.local';
+const DMS_RESTRICTED_USER_EMAIL = 'api.dms-restricted@secops.local';
+const DMS_RESTRICTED_ROLE = 'DMS API restricted test';
 const TENANT_BAVARIA_ID = '22222222-2222-2222-2222-222222222222';
 const clientNumber = `API-TEST-${Date.now()}`;
 const siteCode = `API-SITE-${Date.now()}`;
@@ -20,6 +23,8 @@ let createdShiftId: string | undefined;
 let createdKeyId: string | undefined;
 let archivedCustomerSiteCode: string | undefined;
 let createdTaskId: string | undefined;
+let createdDmsDocumentId: string | undefined;
+let createdDmsFolderId: string | undefined;
 const keyNumber = `API-KEY-${Date.now()}`;
 
 async function login(email: string): Promise<string> {
@@ -41,6 +46,10 @@ beforeAll(async () => {
   ]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [BAVARIA_USER_EMAIL]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [SITE_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = $1)', [DMS_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM users WHERE email = $1', [DMS_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE name=$1)', [DMS_RESTRICTED_ROLE]);
+  await migrationPool.query('DELETE FROM roles WHERE name=$1', [DMS_RESTRICTED_ROLE]);
 
   const passwordHash = await argon2.hash(SEED_PASSWORD, { type: argon2.argon2id });
   const userResult = await migrationPool.query(
@@ -71,9 +80,51 @@ beforeAll(async () => {
   const restrictedRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter' LIMIT 1");
   if (!restrictedRole.rows.length) throw new Error('Seed-Rolle Wachdienstmitarbeiter fehlt.');
   await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [restrictedUser.rows[0].id, restrictedRole.rows[0].id, '11111111-1111-1111-1111-111111111111']);
+
+  const dmsRestricted = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'DMS','Restricted','+49 30 002') RETURNING id`,
+    [DMS_RESTRICTED_USER_EMAIL, passwordHash]
+  );
+  const dmsRole = await migrationPool.query(
+    `INSERT INTO roles (name,description) VALUES ($1,'DMS permission boundary test') RETURNING id`,
+    [DMS_RESTRICTED_ROLE]
+  );
+  await migrationPool.query(
+    `INSERT INTO role_permissions (role_id,permission_id)
+     SELECT $1,id FROM permissions WHERE code='documents:read'`,
+    [dmsRole.rows[0].id]
+  );
+  await migrationPool.query(
+    `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)`,
+    [dmsRestricted.rows[0].id, dmsRole.rows[0].id, '11111111-1111-1111-1111-111111111111']
+  );
 });
 
 afterAll(async () => {
+  if (createdDmsDocumentId) {
+    const cleanup = await migrationPool.connect();
+    try {
+      await cleanup.query('SET session_replication_role = replica');
+      const versions = await cleanup.query(
+        'SELECT DISTINCT storage_key FROM document_versions WHERE tenant_id=$1 AND document_id=$2',
+        ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]
+      );
+      await cleanup.query('DELETE FROM document_audit_events WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
+      await cleanup.query('DELETE FROM document_tag_assignments WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
+      await cleanup.query('DELETE FROM document_relationships WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
+      await cleanup.query('UPDATE document_versions SET restored_from_version=NULL WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
+      await cleanup.query('DELETE FROM document_versions WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
+      await cleanup.query('DELETE FROM documents WHERE tenant_id=$1 AND id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
+      for (const version of versions.rows) await removeDocumentBlob(version.storage_key);
+    } finally {
+      await cleanup.query('SET session_replication_role = origin');
+      cleanup.release();
+    }
+  }
+  if (createdDmsFolderId) {
+    await migrationPool.query('DELETE FROM document_folders WHERE tenant_id=$1 AND id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsFolderId]);
+  }
   if (archivedCustomerSiteCode) await migrationPool.query('DELETE FROM sites WHERE site_code = $1', [archivedCustomerSiteCode]);
   await migrationPool.query('DELETE FROM tasks WHERE id = $1', [createdTaskId ?? null]);
   await migrationPool.query('DELETE FROM keys WHERE id = $1 OR key_number = $2', [createdKeyId ?? null, keyNumber]);
@@ -89,6 +140,10 @@ afterAll(async () => {
   await migrationPool.query('DELETE FROM users WHERE email = $1', [BAVARIA_USER_EMAIL]);
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email=$1)', [SITE_RESTRICTED_USER_EMAIL]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [SITE_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email=$1)', [DMS_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM users WHERE email = $1', [DMS_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query('DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE name=$1)', [DMS_RESTRICTED_ROLE]);
+  await migrationPool.query('DELETE FROM roles WHERE name=$1', [DMS_RESTRICTED_ROLE]);
   await pool.end();
   await migrationPool.end();
 });
@@ -540,6 +595,105 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const list = await request(app).get('/api/v1/logbook').set(authHeaders(token));
     expect(list.status).toBe(200);
     expect(list.body.data).toEqual(expect.arrayContaining([expect.objectContaining({ title })]));
+  });
+
+  test('DMS-Upload, Download, Versionierung, Archiv, Audit und Mandantentrennung funktionieren serverseitig', async () => {
+    const token = await login(SEED_USER_EMAIL);
+    const categories = await request(app).get('/api/v1/documents/categories').set(authHeaders(token));
+    expect(categories.status).toBe(200);
+    const categoryId = categories.body.data.find((item: any) => item.name === 'Verträge')?.id;
+    expect(categoryId).toBeTruthy();
+
+    const folder = await request(app).post('/api/v1/documents/folders').set(authHeaders(token)).send({ name: `DMS API ${Date.now()}` });
+    expect(folder.status).toBe(201);
+    createdDmsFolderId = folder.body.data.id;
+
+    const filename = 'integration-contract.pdf';
+    const firstBytes = Buffer.from('%PDF-1.7\nDMS integration test v1\n');
+    const upload = await request(app)
+      .post('/api/v1/documents')
+      .query({ title: `DMS integration ${Date.now()}`, categoryId, folderId: createdDmsFolderId })
+      .set(authHeaders(token))
+      .set('Content-Type', 'application/octet-stream')
+      .set('X-File-Name', encodeURIComponent(filename))
+      .send(firstBytes);
+    expect(upload.status).toBe(201);
+    createdDmsDocumentId = upload.body.data.id;
+    expect(upload.body.data.size_bytes).toBe(firstBytes.length);
+    expect(upload.body.data.scan_status).toBe('not_scanned');
+
+    const invalidUpload = await request(app)
+      .post('/api/v1/documents')
+      .query({ title: 'Bad signature', categoryId })
+      .set(authHeaders(token))
+      .set('Content-Type', 'application/octet-stream')
+      .set('X-File-Name', encodeURIComponent('fake.pdf'))
+      .send(Buffer.from('not actually a PDF'));
+    expect(invalidUpload.status).toBe(415);
+
+    const listed = await request(app).get('/api/v1/documents').set(authHeaders(token));
+    expect(listed.status).toBe(200);
+    expect(listed.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: createdDmsDocumentId, original_filename: filename, current_version: 1 })
+    ]));
+
+    const downloaded = await request(app)
+      .get(`/api/v1/documents/${createdDmsDocumentId}/download`)
+      .set(authHeaders(token))
+      .buffer()
+      .parse((response, callback) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on('end', () => callback(null, Buffer.concat(chunks)));
+      });
+    expect(downloaded.status).toBe(200);
+    expect(downloaded.body).toEqual(firstBytes);
+
+    const secondBytes = Buffer.from('%PDF-1.7\nDMS integration test v2\n');
+    const version = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions`)
+      .set(authHeaders(token))
+      .set('Content-Type', 'application/octet-stream')
+      .set('X-File-Name', encodeURIComponent('integration-contract-v2.pdf'))
+      .send(secondBytes);
+    expect(version.status).toBe(201);
+    expect(version.body.data.version_number).toBe(2);
+
+    const history = await request(app).get(`/api/v1/documents/${createdDmsDocumentId}/versions`).set(authHeaders(token));
+    expect(history.body.data.map((item: any) => item.version_number)).toEqual([2, 1]);
+    const restoreVersion = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions/1/restore`)
+      .set(authHeaders(token))
+      .send({});
+    expect(restoreVersion.status).toBe(201);
+    expect(restoreVersion.body.data.version_number).toBe(3);
+
+    const bavariaToken = await login(BAVARIA_USER_EMAIL);
+    const foreignDetail = await request(app).get(`/api/v1/documents/${createdDmsDocumentId}`).set(authHeaders(bavariaToken));
+    const foreignDownload = await request(app).get(`/api/v1/documents/${createdDmsDocumentId}/download`).set(authHeaders(bavariaToken));
+    const foreignUpdate = await request(app).patch(`/api/v1/documents/${createdDmsDocumentId}`).set(authHeaders(bavariaToken)).send({ title: 'Fremder Zugriff' });
+    expect(foreignDetail.status).toBe(404);
+    expect(foreignDownload.status).toBe(404);
+    expect(foreignUpdate.status).toBe(404);
+
+    const restrictedToken = await login(DMS_RESTRICTED_USER_EMAIL);
+    const restrictedList = await request(app).get('/api/v1/documents').set(authHeaders(restrictedToken));
+    const restrictedDownload = await request(app).get(`/api/v1/documents/${createdDmsDocumentId}/download`).set(authHeaders(restrictedToken));
+    const restrictedUpdate = await request(app).patch(`/api/v1/documents/${createdDmsDocumentId}`).set(authHeaders(restrictedToken)).send({ title: 'Nicht erlaubt' });
+    expect(restrictedList.status).toBe(200);
+    expect(restrictedDownload.status).toBe(403);
+    expect(restrictedUpdate.status).toBe(403);
+
+    const archive = await request(app).post(`/api/v1/documents/${createdDmsDocumentId}/archive`).set(authHeaders(token)).send({});
+    expect(archive.status).toBe(200);
+    const restore = await request(app).post(`/api/v1/documents/${createdDmsDocumentId}/restore`).set(authHeaders(token)).send({});
+    expect(restore.status).toBe(200);
+
+    const audit = await request(app).get(`/api/v1/documents/${createdDmsDocumentId}/audit`).set(authHeaders(token));
+    expect(audit.status).toBe(200);
+    expect(audit.body.data.map((item: any) => item.action)).toEqual(
+      expect.arrayContaining(['created', 'uploaded', 'downloaded', 'version_created', 'version_restored', 'archived', 'restored'])
+    );
   });
 
   test('Öffentlicher Health-Endpunkt gibt keine Datenbankfehlerdetails preis', async () => {

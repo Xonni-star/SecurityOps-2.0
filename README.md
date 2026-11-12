@@ -2,8 +2,8 @@
 
 Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
 
-> **Projektstatus: TEILWEISE produktionsreif.**
-> Die Kernmodule sind integriert; Dokumente, SOPs, Alarme/Notfallpläne, Übergaben und Streifenkontrollen sind noch offen.
+> **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.**
+> Das DMS ist lokal implementiert und verifiziert, aber nicht deployed. SOPs, Alarme/Notfallpläne, Übergaben und Streifenkontrollen sind noch offen.
 > Verbindliche, tagesaktuelle Übersicht: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md).
 
 ---
@@ -83,7 +83,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Schlüssel | CRUD fertig | Historie teilweise |
 | Aufgaben | CRUD fertig | — |
 | Wachbuch | teilweise | Lesen persistiert; Schreiben über Outbox/Sync |
-| Dokumente | offen | Keine Tabelle, kein Endpunkt |
+| Dokumente | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte PostgreSQL-Verwaltung, private Dateispeicherung, Versionen, Kategorien, Ordner, Audit und REST-API; Einschränkungen siehe [DMS-Bericht](./DMS_IMPLEMENTATION_REPORT.md) |
 | SOPs | offen | Keine Tabelle, kein Endpunkt |
 | Alarme/Notfallpläne | offen | Keine Tabelle, kein Endpunkt |
 | Übergaben | offen | Nur lokales Mobile-Modul |
@@ -126,6 +126,7 @@ npm --prefix frontend/backend run build
 * [frontend/SECURITY_AUDIT.md](./frontend/SECURITY_AUDIT.md) — Sicherheitsaudit
 * [frontend/KNOWN_ISSUES.md](./frontend/KNOWN_ISSUES.md) — bekannte Einschränkungen
 * [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md) — aktueller Umsetzungsstand
+* [DMS_IMPLEMENTATION_REPORT.md](./DMS_IMPLEMENTATION_REPORT.md) — DMS-Umfang, Sicherheitsmodell, Tests und offene Einschränkungen
 
 ---
 

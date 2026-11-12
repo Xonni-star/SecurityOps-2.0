@@ -66,7 +66,15 @@ export async function seedDatabase(): Promise<void> {
       { code: 'patrol:create', module: 'patrol' },
       { code: 'handover:create', module: 'handover' },
       { code: 'shifts:read', module: 'shifts' },
-      { code: 'shifts:manage', module: 'shifts' }
+      { code: 'shifts:manage', module: 'shifts' },
+      { code: 'documents:read', module: 'documents' },
+      { code: 'documents:create', module: 'documents' },
+      { code: 'documents:update', module: 'documents' },
+      { code: 'documents:download', module: 'documents' },
+      { code: 'documents:archive', module: 'documents' },
+      { code: 'documents:restore', module: 'documents' },
+      { code: 'documents:manage', module: 'documents' },
+      { code: 'documents:approve', module: 'documents' }
     ];
 
     for (const p of permissions) {
@@ -90,6 +98,23 @@ export async function seedDatabase(): Promise<void> {
         }
       }
     }
+
+    await client.query(`
+      INSERT INTO role_permissions (role_id, permission_id)
+      SELECT r.id, p.id
+      FROM roles r
+      JOIN permissions p ON
+        (r.name IN ('Systemadministrator', 'Geschäftsführung') AND p.code LIKE 'documents:%')
+        OR (r.name = 'Qualitätsmanagement' AND p.code LIKE 'documents:%')
+        OR (r.name = 'Personalverwaltung' AND p.code IN (
+          'documents:read', 'documents:create', 'documents:update', 'documents:download',
+          'documents:archive', 'documents:restore'
+        ))
+        OR (r.name IN ('Objektleitung', 'Wachdienstmitarbeiter', 'Auditor') AND p.code IN (
+          'documents:read', 'documents:download'
+        ))
+      ON CONFLICT DO NOTHING;
+    `);
 
     // 4. Testbenutzer mit echtem Argon2id Hash anlegen
     const testPassword = 'SecOpsVault2025SecurePassword!';

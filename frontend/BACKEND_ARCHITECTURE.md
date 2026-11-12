@@ -1,26 +1,35 @@
-# SecurityOps 2.0 - Phase 3 Backend & API Specification
+# SecurityOps 2.0 – Backend- und API-Architektur
 
-## 1. Architectural Overview
-The SecurityOps 2.0 Backend is constructed as a decoupled, multi-tenant Python FastAPI service operating with SQLAlchemy 2.0 and PostgreSQL 16+ Row Level Security (RLS).
+## Laufzeit und Schichten
 
-### Architectural Layers
-1. **API Router Layer (`backend/api.py`)**: Request validation, HTTP status mapping, and OpenAPI contracts.
-2. **Security & Cryptography (`backend/security.py`)**: Argon2id hashing, verified JWT claims, and brute-force tracking.
-3. **Pydantic Validation Schemas (`backend/schemas.py`)**: Strict input/output sanitation.
-4. **Service & Domain Layer (`backend/services.py`)**: Enforces multi-tenant business rules and conflict checks.
-5. **Database ORM (`backend/models.py`)**: Declarative models with composite foreign keys `(id, tenant_id)`.
+Die operative Fach-API liegt in `frontend/backend/src/` und verwendet Express 4, TypeScript und PostgreSQL 16. `app.ts` registriert Authentifizierungs-, Fach- und DMS-Routen; Controller validieren Eingaben mit Zod und rufen Datenbankoperationen über `withTenantTransaction` auf. Der Produktionsprozess verbindet sich ausschließlich als `secops_app_user`; Migrationen laufen separat als `secops_admin`.
 
----
+Die Session-Authentifizierung verwendet ein zufälliges HttpOnly-Cookie. `authenticateJwt` ist aus Kompatibilitätsgründen benannt, prüft aber den Session-Hash in `user_sessions` und lädt Tenant, Rolle sowie Berechtigungen aus der Datenbank. `requirePermission` erzwingt Rechte auf jeder geschützten Route. Die Datenbank setzt `app.current_tenant` pro Transaktion und erzwingt RLS.
 
-## 2. Strict Multi-Tenant Enforcement Contract
-To prevent authorization bypasses, **the backend never trusts a tenant_id sent in request bodies or query headers**.
-- The tenant context is extracted strictly from the cryptographically verified JWT token claims.
-- The `tenant_context_middleware` injects `app.current_tenant` into the PostgreSQL session, causing Row Level Security (RLS) to physically filter queries.
+## DMS-Datenfluss
 
----
+1. Das Frontend sendet einen binären Upload (`application/octet-stream`) mit Dateiname als Metadatum. Es werden weder Base64-Dateien noch Daten in `localStorage`/IndexedDB geschrieben.
+2. Der Server validiert Dateigröße, Dateiendung **und** Signatur/Formatinhalt (bei OOXML zusätzlich ZIP-Verzeichnis, CRC, Content-Type und Haupteintrag). Browser-MIME-Angaben werden nicht vertraut.
+3. Ein zufällig generierter UUID-Speicherschlüssel adressiert ein privates Blob im konfigurierten Speicherpfad. Originaldateinamen werden ausschließlich als Metadaten gespeichert.
+4. PostgreSQL-Transaktionen legen Dokument, Version, Zuordnung und Audit-Einträge atomar an. Dateien werden vor dem Commit geschrieben und bei Fehlern best-effort entfernt; unerreichbare Dateien sind keine Downloadobjekte, da Downloads zuerst eine tenant-gefilterte DB-Version auflösen.
+5. Versionen sind unveränderlich. Wiederherstellung erzeugt eine neue Versionsnummer, die denselben unveränderlichen Blob referenzieren kann. Archivierung ist soft-delete; ältere Versionen bleiben erhalten.
 
-## 3. Offline-First Sync Contract
-The `/api/v1/sync/push` endpoint handles intermittent connectivity gracefully:
-- Every client mutation carries a unique `client_uuid`.
-- Re-transmissions of identical UUIDs are handled idempotently.
-- If a client attempts to update a record whose server revision counter is ahead of the client's version, the system marks the mutation as `CONFLICT` and records it in `sync_conflicts` for review rather than overwriting data destructively.
+## DMS-Tabellen und Tenant-Isolation
+
+Migration `012_document_management.sql` führt Kategorien, Ordner, Dokumente, Versionen, Beziehungen, Schlagwörter, Zuweisungen und Audit-Ereignisse ein. Sämtliche DMS-Tabellen haben erzwungenes RLS. Beziehungen zu Kunden, Objekten, Mitarbeitern, Schichten und Wachbuchereignissen verwenden zusammengesetzte Fremdschlüssel mit `tenant_id`; ein ID-Wert allein reicht daher nicht, um einen fremden Mandantendatensatz zu verknüpfen.
+
+Audit-Ereignisse sind für die Anwendungsrolle nur les- und anlegbar. Ein Trigger weist Updates und Deletes zurück. Es gibt keinen API-Endpunkt zum physischen Löschen von Dokumenten oder Versionen.
+
+## REST-API
+
+Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Das vollständige Request-/Response-Verzeichnis sowie Rechte stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md).
+
+## Betrieb
+
+Die Standard-Dateigröße beträgt 10 MiB und ist über `DMS_MAX_FILE_SIZE_BYTES` bis maximal 100 MiB konfigurierbar. In Docker wird das persistente Volume `secops_documents` außerhalb des statischen Frontends eingebunden. Der Containerbenutzer `node` erhält ein privates Verzeichnis mit Modus `0700`. Der tägliche verschlüsselte Backup-Dienst sichert DB-Dump und Datei-Volume gemeinsam.
+
+Es ist kein Virenscanner in der vorhandenen Deployment-Architektur enthalten. Die Scanner-Schnittstelle meldet deshalb `not_scanned`; Uploads werden nicht fälschlich als virengeprüft gekennzeichnet.
+
+## Nicht verfügbare Beziehungen
+
+Das aktuelle Backend besitzt keine persistierten SOP-, Alarm-/Notfallplan- oder separaten Ereignis-/Dienstanweisungstabellen. Das DMS verknüpft nur vorhandene, tenantgebundene Backend-Entitäten; nicht vorhandene Beziehungen werden nicht durch frei eingegebene IDs vorgetäuscht. Für SOP- und Alarmverknüpfungen müssen zuerst deren serverseitige Fachmodelle/API ergänzt werden.

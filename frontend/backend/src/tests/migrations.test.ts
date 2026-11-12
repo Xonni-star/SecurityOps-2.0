@@ -1,6 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { Client } from 'pg';
 import { runMigrations } from '../migrations/runner';
 import { env } from '../config/env';
@@ -20,8 +21,8 @@ function migrationUrl(): string {
   return env.DATABASE_MIGRATION_URL;
 }
 
-function withDatabaseName(name: string): string {
-  const url = new URL(migrationUrl());
+function withDatabaseName(name: string, connectionString = migrationUrl()): string {
+  const url = new URL(connectionString);
   url.pathname = `/${name}`;
   return url.toString();
 }
@@ -110,13 +111,94 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
     expect(result.baselined).toEqual([]);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
     expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
     expect(await tableExists(db, 'sync_conflict_resolution_receipts')).toBe(true);
+    expect(await tableExists(db, 'documents')).toBe(true);
+
+    const dmsSecurity = await queryInDatabase<{
+      row_security: boolean;
+      force_row_security: boolean;
+      can_read_documents: boolean;
+      can_update_audit: boolean;
+      can_delete_audit: boolean;
+    }>(db, `
+      SELECT c.relrowsecurity AS row_security, c.relforcerowsecurity AS force_row_security,
+             has_table_privilege('secops_app_user', 'public.documents', 'SELECT') AS can_read_documents,
+             has_table_privilege('secops_app_user', 'public.document_audit_events', 'UPDATE') AS can_update_audit,
+             has_table_privilege('secops_app_user', 'public.document_audit_events', 'DELETE') AS can_delete_audit
+      FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+      WHERE n.nspname='public' AND c.relname='documents'
+    `);
+    expect(dmsSecurity[0]).toEqual({
+      row_security: true,
+      force_row_security: true,
+      can_read_documents: true,
+      can_update_audit: false,
+      can_delete_audit: false
+    });
+  });
+
+  test('DMS RLS und zusammengesetzte Mandanten-Fremdschlüssel verhindern Cross-Tenant-Zugriff', async () => {
+    const db = await createTestDatabase();
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: makeMigrationsDir(), logger: noopLogger });
+    const tenantA = randomUUID();
+    const tenantB = randomUUID();
+    const userId = randomUUID();
+    const setup = new Client({ connectionString: withDatabaseName(db) });
+    await setup.connect();
+    try {
+      await setup.query(
+        `INSERT INTO tenants (id,name,subdomain,tax_number,bwr_register_id)
+         VALUES ($1,'Tenant A',$2,'A-123','A-REG'),($3,'Tenant B',$4,'B-123','B-REG')`,
+        [tenantA, `${tenantA}.test`, tenantB, `${tenantB}.test`]
+      );
+      await setup.query(
+        `INSERT INTO users (id,email,password_hash,first_name,last_name)
+         VALUES ($1,$2,'test-hash','DMS','Test')`,
+        [userId, `${userId}@example.test`]
+      );
+    } finally {
+      await setup.end();
+    }
+
+    const client = new Client({ connectionString: withDatabaseName(db, env.DATABASE_URL) });
+    await client.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query("SELECT set_config('app.current_tenant',$1,true)", [tenantA]);
+      const categoryA = await client.query(
+        'INSERT INTO document_categories (tenant_id,name,created_by) VALUES ($1,$2,$3) RETURNING id',
+        [tenantA, `Category A ${tenantA}`, userId]
+      );
+      await client.query("SELECT set_config('app.current_tenant',$1,true)", [tenantB]);
+      const categoryB = await client.query(
+        'INSERT INTO document_categories (tenant_id,name,created_by) VALUES ($1,$2,$3) RETURNING id',
+        [tenantB, `Category B ${tenantB}`, userId]
+      );
+
+      await client.query("SELECT set_config('app.current_tenant',$1,true)", [tenantA]);
+      const visibleCategories = await client.query('SELECT id FROM document_categories');
+      expect(visibleCategories.rows.map((row) => row.id)).toEqual([categoryA.rows[0].id]);
+
+      await client.query('SAVEPOINT cross_tenant_document');
+      await expect(client.query(
+        `INSERT INTO documents (tenant_id,title,category_id,created_by)
+         VALUES ($1,'Cross-tenant reference',$2,$3)`,
+        [tenantA, categoryB.rows[0].id, userId]
+      )).rejects.toMatchObject({ code: '23503' });
+      await client.query('ROLLBACK TO SAVEPOINT cross_tenant_document');
+      await client.query('ROLLBACK');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      await client.end();
+    }
   });
 
   test('2. Zweiter Lauf führt keine Migration erneut aus', async () => {
@@ -134,7 +216,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(second.applied).toEqual([]);
     expect(second.baselined).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
 
     const after = await historyRows(db);
     expect(after).toEqual(before);
@@ -249,7 +331,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(await tableExists(db, 'migration_marker_006')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012']);
   });
 
   test('4. Fehlerhafte Migration wird nicht registriert und zurückgerollt', async () => {
@@ -307,11 +389,15 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
     fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
+    const dmsMigrationPath = path.join(dir, '012_document_management.sql');
+    const dmsMigration = fs.readFileSync(dmsMigrationPath, 'utf8');
+    fs.unlinkSync(dmsMigrationPath);
     const employeeMigrationPath = path.join(dir, '007_employee_lifecycle.sql');
     const employeeMigration = fs.readFileSync(employeeMigrationPath, 'utf8');
     fs.unlinkSync(employeeMigrationPath);
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
     fs.writeFileSync(employeeMigrationPath, employeeMigration);
+    fs.writeFileSync(dmsMigrationPath, dmsMigration);
 
     await queryInDatabase(
       db,
@@ -326,14 +412,14 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['005', '006', '007', '009']);
+    expect(result.applied).toEqual(['005', '006', '007', '009', '012']);
     expect(result.baselined).toEqual(['001', '002', '003', '004']);
 
     const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
     expect(tenants.some((row) => row.name === 'Baseline-Test')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '012']);
   });
 
   test('8. Unvollständige Baseline führt zu sicherem Abbruch', async () => {
@@ -372,6 +458,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
     fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
+    fs.rmSync(path.join(dir, '012_document_management.sql'), { force: true });
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
     return { db, dir };
   }
@@ -569,9 +656,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
     expect(result.baselined).toEqual([]);
-    expect((await historyRows(db))).toHaveLength(9);
+    expect((await historyRows(db))).toHaveLength(10);
   });
 
   test('26. Fremde Tabelle verhindert die Einstufung als leere Datenbank', async () => {
@@ -970,7 +1057,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011']);
+    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012']);
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -978,7 +1065,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012']);
   });
 
   test('47. Fremdes Objekt bei Migration oberhalb 004 wird erkannt', async () => {
@@ -991,7 +1078,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(10);
+    expect(await historyRows(db)).toHaveLength(11);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {

@@ -274,16 +274,25 @@ export interface ManagedDocument {
   tenantId: string;
   title: string;
   fileName: string;
-  category: 'Vertrag' | 'Dienstanweisung' | 'Personalakte' | 'Vorfallsbericht' | 'Auditnachweis';
+  categoryId: string;
+  category: string;
   sizeBytes: number;
   uploadedAt: string;
   version: string;
-  linkedEntityType: 'customer' | 'site' | 'employee' | 'incident' | 'general';
+  status: string;
+  scanStatus: 'clean' | 'infected' | 'not_scanned';
+  contentType: string;
+  folderId?: string;
+  folderName?: string;
+  description: string;
+  documentNumber?: string;
+  validFrom?: string;
+  validUntil?: string;
+  tags: Array<{ id: string; name: string }>;
+  linkedEntityType: 'customer' | 'site' | 'employee' | 'shift' | 'incident' | 'general';
   linkedEntityId?: string;
   linkedEntityName?: string;
-  url?: string;
-  sha256Hash?: string;
-  scannedClean?: boolean;
+  archivedAt?: string;
 }
 
 export type SyncStatus = 'synced' | 'pending' | 'conflict' | 'failed';

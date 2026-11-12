@@ -37,6 +37,7 @@ Werte in `.env` setzen:
 | `JWT_EXPIRES_IN` | Session-Laufzeit, z. B. `8h` |
 | `CORS_ORIGIN` | Exakte öffentliche Origin, z. B. `https://securityops.example` |
 | `BACKUP_ENCRYPTION_KEY` | Schlüssel für verschlüsselte Backups |
+| `DMS_MAX_FILE_SIZE_BYTES` | Maximale Uploadgröße je Datei (Default 10 MiB, Obergrenze 100 MiB) |
 
 Secrets erzeugen:
 
@@ -64,7 +65,10 @@ Startreihenfolge (durch Compose-Bedingungen erzwungen):
 2. `migrate` führt alle Migrationen mit `secops_admin` aus.
 3. `db-init` setzt das Passwort für `secops_app_user`.
 4. `backend` startet und prüft die App-Rolle (kein Superuser, kein BYPASSRLS).
+   Ein einmaliger `dms-storage-init`-Dienst bereitet davor das private Volume vor.
 5. `proxy` startet, sobald das Backend healthy ist.
+
+Der DMS-Dateispeicher liegt im separaten Docker-Volume `secops_documents`, außerhalb des statischen Frontend-Verzeichnisses. Der Backend-Prozess greift als unprivilegierter Benutzer auf ein Verzeichnis mit Modus `0700` zu. Für lokale Deployments auf VM/Hostebene müssen Datenträger- und Volume-Verschlüsselung separat aktiviert werden.
 
 Status:
 
@@ -131,13 +135,15 @@ Neue Migrationen laufen beim Start über `migrate`. Vorher ein Backup erstellen.
 
 ## 8. Backup und Wiederherstellung
 
-Backups laufen automatisch alle 24 Stunden (`backup`-Dienst) und werden AES-256-verschlüsselt im Volume `secops_backups` gespeichert (30 Tage Retention).
+Backups laufen automatisch alle 24 Stunden (`backup`-Dienst). Ein Backup enthält den PostgreSQL-Dump **und** das private DMS-Dateivolume im selben mit AES-256-CBC/PBKDF2 verschlüsselten Archiv (`secops_backups`, 30 Tage Retention). Restore spielt beide Bestandteile zurück; bei Archiven aus der Zeit vor dem DMS erscheint eine Warnung, falls kein Dateivolume enthalten ist.
 
 Manuell:
 
 ```bash
 docker compose -f docker-compose.production.yml exec -T backup \
   sh -c 'pg_dump -h db -U secops_admin -d securityops_v2 -F c -f /var/backups/manual.dump'
+
+Der obige Einzelbefehl erzeugt nur einen Datenbankdump. Für eine vollständige DMS-Wiederherstellung das verschlüsselte Archiv des `backup`-Dienstes verwenden; DB und Dateien müssen gemeinsam zurückgespielt werden.
 ```
 
 Wiederherstellung:

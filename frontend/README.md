@@ -56,3 +56,11 @@ npm run build
    - `POST /api/v1/sync/conflicts/resolve` trennt Konfliktentscheidungen in `sync_conflict_resolution_receipts`.
    - Das Frontend entfernt Mutationen erst nach bestätigtem Servererfolg (`applied: true`, `serverState`); bei Fehlern bleibt die Outbox unversehrt.
 3. **Least-Privilege**: Die Anwendung verbindet sich im operativen Betrieb ausschließlich als unprivilegierter Benutzer `secops_app_user` (ohne Superuser- oder BYPASSRLS-Rechte).
+
+## 4. Dokumentenmanagement
+
+Das DMS verwendet `/api/v1/documents` und PostgreSQL-Migration `012_document_management.sql`. Es persistiert Dokumentmetadaten, tenantgebundene Ordner/Kategorien/Tags, Beziehungen, unveränderliche Versionen und Append-Only-Auditereignisse. Datei-Uploads werden serverseitig anhand Signatur und Inhalt geprüft und unter einem generierten Schlüssel im privaten persistenten Speicher außerhalb des Frontends abgelegt. Die Standardgrenze beträgt 10 MiB pro Datei (`DMS_MAX_FILE_SIZE_BYTES`, maximal 100 MiB).
+
+Die `secops_documents`-Dateien werden mit der Datenbank gemeinsam gesichert und wiederhergestellt. Es ist kein Virenscanner in der vorhandenen Deployment-Architektur verfügbar; der UI-Status bleibt daher `nicht durchgeführt`. DMS-Dateizugriff und Änderungen sind online erforderlich; Metadaten werden nicht in IndexedDB/LocalStorage gespeichert.
+
+API-Details und bekannte Einschränkungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md) und [DMS_IMPLEMENTATION_REPORT.md](../DMS_IMPLEMENTATION_REPORT.md).

@@ -1,15 +1,15 @@
 # SecurityOps 2.0 - Backup- und Wiederherstellungskonzept
 
-## 1. Mandantenspezifisches und Gesamtsystem-Backup
-1. **Tägliches Volldump**:
-   ```bash
-   pg_dump -U secops_admin -h localhost -d securityops_v2 -F c -b -v -f /var/backups/secops_$(date +%Y%m%d).dump
-   ```
-2. **Mandantenisoliertes Backup** (via RLS / Table Scans):
-   ```bash
-   COPY (SELECT * FROM logbook_entries WHERE tenant_id = '11111111-1111-1111-1111-111111111111') TO '/var/backups/tenant_frankfurt_logbook.csv' WITH CSV HEADER;
-   ```
+## 1. Vollständiges Backup
 
-## 2. Wiederherstellung & Integritätsprüfung
-- Einspielen mit `pg_restore --clean --if-exists -d securityops_v2 /var/backups/secops_YYYYMMDD.dump`.
-- Automatische Re-Aktivierung aller RLS Policies nach Restore.
+Der Produktionsdienst erstellt täglich ein Archiv mit PostgreSQL-Dump und dem privaten Docker-Volume `secops_documents`. Das gesamte Archiv wird mit AES-256-CBC/PBKDF2 verschlüsselt, im Volume `secops_backups` gespeichert und nach 30 Tagen gelöscht. Der Dateiinhalt ist unveränderlich; Metadaten und Audit werden gemeinsam mit dem Dump gesichert.
+
+Ein isolierter Datenbankdump allein reicht für das DMS nicht aus: Er enthält keine Datei-Blobs. Manuelle Dumps sind daher nur Datenbank-Sicherungen und müssen zusammen mit einem konsistenten Export von `secops_documents` aufbewahrt werden.
+
+## 2. Wiederherstellung
+
+Mit `frontend/deploy/restore.sh <archiv.tar.gz.enc>` wird der Backend-Schreibzugriff gestoppt, das Datenbankarchiv restauriert, das DMS-Dateivolume zurückgespielt und danach Backend/Proxy gestartet. Restore muss Datenbank und Blobs aus demselben Backup verwenden; andernfalls können Metadaten auf nicht vorhandene Dateien zeigen. Ältere Archive ohne `documents/` enthalten keine DMS-Dateien und werden entsprechend gewarnt.
+
+## 3. Datenträgerverschlüsselung und Aufbewahrung
+
+Das Docker-Volume ist nicht selbst verschlüsselt. Produktion muss zusätzlich verschlüsselte Hostdatenträger bzw. verschlüsselte Volume-Speicherung verwenden und Dateibackups wie Datenbankbackups gemäß der organisationsweiten Aufbewahrungsfrist löschen. Das DMS implementiert derzeit keine automatische tenant-spezifische Aufbewahrungs- oder physische Löschrichtlinie; archivierte Dokumente und frühere Versionen bleiben absichtlich erhalten.

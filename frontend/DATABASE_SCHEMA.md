@@ -31,3 +31,13 @@ CREATE POLICY tenant_isolation_policy ON logbook_entries
     USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
 ```
+
+## 4. Dokumentenmanagement (Migration 012)
+
+`document_categories`, `document_folders`, `documents`, `document_versions`, `document_relationships`, `document_tags`, `document_tag_assignments` und `document_audit_events` sind mandantengebundene Tabellen mit `ENABLE` und `FORCE ROW LEVEL SECURITY` anhand `app.current_tenant`. Anwendungszugriffe laufen ausschließlich über `withTenantTransaction`.
+
+Kategorien, Ordner und Dokumente haben zusammengesetzte Schlüssel/Fremdschlüssel mit `tenant_id`. Beziehungen zu `clients`, `sites`, `employees`, `shifts` und `guardbook_entries` nutzen ebenfalls zusammengesetzte Tenant-FKs. Die Datenbank verhindert so fremdmandantige Zuordnungen unabhängig von Frontend-IDs. Dokumentversionen sind immutable; für eine Wiederherstellung wird eine neue Versionsnummer erstellt, die auf denselben unveränderlichen Blob-Schlüssel verweisen darf.
+
+`document_audit_events` enthält Actor, Dokument, Mandant, Aktion, JSON-Details und Zeitstempel. `secops_app_user` darf Auditdaten nur lesen und einfügen. Zusätzlich weist ein Trigger `UPDATE` und `DELETE` zurück. Dokumente werden archiviert, nicht physisch gelöscht.
+
+Datei-Blobs werden getrennt von PostgreSQL unter einem zufälligen UUID-Schlüssel im privaten `DMS_STORAGE_PATH` abgelegt. Das Originaldateiname ist nur Metadatum. Das persistente Docker-Volume heißt `secops_documents`; Datei-Backups müssen zusammen mit dem Datenbankdump wiederhergestellt werden.

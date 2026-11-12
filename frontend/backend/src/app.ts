@@ -12,6 +12,7 @@ import * as guardbookController from './controllers/guardbookController';
 import * as syncController from './controllers/syncController';
 import * as resourceController from './controllers/resourceController';
 import * as employeeController from './controllers/employeeController';
+import * as documentController from './controllers/documentController';
 
 export const app = express();
 
@@ -49,7 +50,7 @@ const corsOptions: CorsOptions = {
   // Muss alle tatsächlich registrierten API-Methoden enthalten.
   // PUT wird nirgends verwendet und deshalb bewusst nicht freigegeben.
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token', 'X-File-Name']
 };
 
 app.use(cors(corsOptions));
@@ -117,6 +118,33 @@ app.patch('/api/v1/employees/:id/qualifications/:qualificationId', authenticateJ
 app.post('/api/v1/employees/:id/absences', authenticateJwt, requirePermission('employees:absence:manage'), employeeController.createAbsence);
 app.post('/api/v1/employees/:id/absences/:absenceId/review', authenticateJwt, requirePermission('employees:absence:approve'), employeeController.reviewAbsence);
 app.post('/api/v1/employees/sync', authenticateJwt, employeeController.syncEmployeeMutations);
+
+// DMS metadata and file operations are always tenant-scoped and permission-gated.
+app.get('/api/v1/documents', authenticateJwt, requirePermission('documents:read'), documentController.listDocuments);
+app.post('/api/v1/documents', authenticateJwt, requirePermission('documents:create'),
+  express.raw({ type: 'application/octet-stream', limit: documentController.documentUploadBodyParserLimit() }),
+  documentController.uploadDocument);
+app.get('/api/v1/documents/categories', authenticateJwt, requirePermission('documents:read'), documentController.listDocumentCategories);
+app.post('/api/v1/documents/categories', authenticateJwt, requirePermission('documents:manage'), documentController.createDocumentCategory);
+app.patch('/api/v1/documents/categories/:id', authenticateJwt, requirePermission('documents:manage'), documentController.updateDocumentCategory);
+app.get('/api/v1/documents/folders', authenticateJwt, requirePermission('documents:read'), documentController.listDocumentFolders);
+app.post('/api/v1/documents/folders', authenticateJwt, requirePermission('documents:create'), documentController.createDocumentFolder);
+app.patch('/api/v1/documents/folders/:id', authenticateJwt, requirePermission('documents:update'), documentController.updateDocumentFolder);
+app.post('/api/v1/documents/folders/:id/archive', authenticateJwt, requirePermission('documents:archive'), documentController.archiveDocumentFolder);
+app.get('/api/v1/documents/tags', authenticateJwt, requirePermission('documents:read'), documentController.listDocumentTags);
+app.get('/api/v1/documents/:id', authenticateJwt, requirePermission('documents:read'), documentController.getDocument);
+app.get('/api/v1/documents/:id/versions', authenticateJwt, requirePermission('documents:read'), documentController.listDocumentVersions);
+app.post('/api/v1/documents/:id/versions', authenticateJwt, requirePermission('documents:update'),
+  express.raw({ type: 'application/octet-stream', limit: documentController.documentUploadBodyParserLimit() }),
+  documentController.createDocumentVersion);
+app.post('/api/v1/documents/:id/versions/:version/restore', authenticateJwt, requirePermission('documents:update'), documentController.restoreDocumentVersion);
+app.get('/api/v1/documents/:id/download', authenticateJwt, requirePermission('documents:download'), documentController.downloadDocument);
+app.patch('/api/v1/documents/:id/relationship', authenticateJwt, requirePermission('documents:update'), documentController.updateDocumentRelationship);
+app.post('/api/v1/documents/:id/move', authenticateJwt, requirePermission('documents:update'), documentController.moveDocument);
+app.get('/api/v1/documents/:id/audit', authenticateJwt, requirePermission('documents:read'), documentController.listDocumentAudit);
+app.patch('/api/v1/documents/:id', authenticateJwt, requirePermission('documents:update'), documentController.updateDocument);
+app.post('/api/v1/documents/:id/archive', authenticateJwt, requirePermission('documents:archive'), documentController.archiveDocument);
+app.post('/api/v1/documents/:id/restore', authenticateJwt, requirePermission('documents:restore'), documentController.restoreDocument);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);
