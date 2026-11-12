@@ -79,6 +79,26 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
+        const permissionByEntity = {
+          guardbook: 'logbook:create',
+          shift: 'shifts:manage',
+          task: 'tasks:manage',
+          key: 'keys:manage',
+          patrol: 'patrol:create',
+          handover: 'handover:create'
+        } as const;
+        const requiredPermission = permissionByEntity[mut.entityType];
+        if (!req.user!.permissions.includes(requiredPermission)) {
+          results.push({
+            clientUuid: mut.clientUuid,
+            serverId: 'none',
+            status: 'REJECTED',
+            serverVersion: mut.baseVersion,
+            message: 'Mutation abgewiesen: fehlende Berechtigung für diesen Vorgang.'
+          });
+          continue;
+        }
+
         const payloadHash = computePayloadHash(mut.payload);
 
         // Transaction Advisory Lock zur Verhinderung paralleler Race Conditions
@@ -682,6 +702,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     const tenantId = req.user!.tenantId;
     const userEmail = req.user!.email;
     const body = conflictResolveSchema.parse(req.body);
+    const permissionByEntity = {
+      guardbook: 'logbook:create',
+      shift: 'shifts:manage',
+      task: 'tasks:manage',
+      key: 'keys:manage'
+    } as const;
+    if (!req.user!.permissions.includes(permissionByEntity[body.entityType])) {
+      res.status(403).json({ success: false, message: 'Zugriff verweigert: fehlende Berechtigung für diese Konfliktauflösung.' });
+      return;
+    }
 
     const payloadHash = computePayloadHash({
       clientUuid: body.clientUuid,

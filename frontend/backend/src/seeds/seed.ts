@@ -63,6 +63,8 @@ export async function seedDatabase(): Promise<void> {
       { code: 'tasks:manage', module: 'tasks' },
       { code: 'logbook:read', module: 'logbook' },
       { code: 'logbook:create', module: 'logbook' },
+      { code: 'patrol:create', module: 'patrol' },
+      { code: 'handover:create', module: 'handover' },
       { code: 'shifts:read', module: 'shifts' },
       { code: 'shifts:manage', module: 'shifts' }
     ];

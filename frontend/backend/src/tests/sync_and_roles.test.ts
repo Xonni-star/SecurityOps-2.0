@@ -35,7 +35,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
     const pRes = await pool.query(
       "SELECT id FROM permissions WHERE code = ANY($1::text[])",
-      [['logbook:create', 'employees:create', 'employees:update', 'employees:archive', 'employees:restore', 'qualifications:manage', 'employees:absence:manage', 'employees:absence:approve']]
+      [['logbook:create', 'shifts:manage', 'tasks:manage', 'keys:manage', 'patrol:create', 'handover:create', 'employees:create', 'employees:update', 'employees:archive', 'employees:restore', 'qualifications:manage', 'employees:absence:manage', 'employees:absence:approve']]
     );
     for (const permission of pRes.rows) {
       await pool.query(
@@ -447,6 +447,31 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
   });
 
   // 9. Kontrollgänge: Unveränderlichkeit
+  test('Offline-Sync weist andere Entität ohne deren Berechtigung ab, bevor ein Receipt entsteht', async () => {
+    const roleId = (await pool.query("INSERT INTO roles (name, description) VALUES ($1, 'Nur Wachbuch') RETURNING id", [`LogOnly_${Date.now()}`])).rows[0].id;
+    const logbookPermissionId = (await pool.query("SELECT id FROM permissions WHERE code='logbook:create'")).rows[0].id;
+    await pool.query('INSERT INTO role_permissions (role_id, permission_id) VALUES ($1,$2)', [roleId, logbookPermissionId]);
+    const userId = (await pool.query("INSERT INTO users (email,password_hash,first_name,last_name) VALUES ($1,'unused','Nur','Wachbuch') RETURNING id", [`log-only-${Date.now()}@secops.test`])).rows[0].id;
+    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [userId, roleId, testTenantA]);
+    const token = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    await pool.query("INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked) VALUES ($1,$2,$3,NOW()+interval '1 hour',false)", [userId,testTenantA,tokenHash]);
+
+    const mutationId = `forbidden-shift-${Date.now()}`;
+    const result = await request(app).post('/api/v1/sync/push').set(authHeaders(token)).send({
+      deviceId: 'limited-device',
+      mutations: [{ clientUuid: mutationId, entityType: 'shift', action: 'UPDATE', clientTimestamp: new Date().toISOString(), baseVersion: 1, payload: { id: 'not-used', status: 'Erledigt' } }]
+    });
+    expect(result.status).toBe(200);
+    expect(result.body.data[0]).toMatchObject({ status: 'REJECTED', clientUuid: mutationId });
+    const receipt = await pool.query('SELECT 1 FROM sync_idempotency_receipts WHERE tenant_id=$1 AND client_mutation_id=$2', [testTenantA, mutationId]);
+    expect(receipt.rowCount).toBe(0);
+    const conflict = await request(app).post('/api/v1/sync/conflicts/resolve').set(authHeaders(token)).send({
+      clientUuid: `forbidden-conflict-${Date.now()}`, entityType: 'shift', strategy: 'USE_SERVER', expectedVersion: 1
+    });
+    expect(conflict.status).toBe(403);
+  });
+
   test('9. Kontrollgänge: UPDATE und DELETE werden mit REJECTED abgewiesen', async () => {
     const pPayload = {
       deviceId: 'dev-01',
