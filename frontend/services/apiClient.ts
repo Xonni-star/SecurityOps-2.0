@@ -20,13 +20,13 @@ export interface RequestOptions extends RequestInit {
 }
 
 class ApiClient {
-  private token: string | null = null;
   private currentTenantId: string = 'tenant-frankfurt';
+  private csrfToken: string | null = null;
 
   constructor() {
     try {
       if (typeof localStorage !== 'undefined') {
-        this.token = localStorage.getItem('secops_access_token');
+        localStorage.removeItem('secops_access_token');
         const storedTenant = localStorage.getItem('secops_tenant_id');
         if (storedTenant) {
           this.currentTenantId = storedTenant;
@@ -37,18 +37,7 @@ class ApiClient {
     }
   }
 
-  setToken(token: string | null) {
-    this.token = token;
-    try {
-      if (typeof localStorage !== 'undefined') {
-        if (token) {
-          localStorage.setItem('secops_access_token', token);
-        } else {
-          localStorage.removeItem('secops_access_token');
-        }
-      }
-    } catch {}
-  }
+  setCsrfToken(token: string | null) { this.csrfToken = token; }
 
   setTenantId(tenantId: string) {
     this.currentTenantId = tenantId;
@@ -57,10 +46,6 @@ class ApiClient {
         localStorage.setItem('secops_tenant_id', tenantId);
       }
     } catch {}
-  }
-
-  getToken(): string | null {
-    return this.token;
   }
 
   getTenantId(): string {
@@ -74,21 +59,24 @@ class ApiClient {
       ...(options.headers as Record<string, string> || {})
     };
 
-    if (!options.skipAuth && this.token) {
-      headers['Authorization'] = `Bearer ${this.token}`;
-    }
+    const method = (options.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && this.csrfToken) headers['X-CSRF-Token'] = this.csrfToken;
 
     try {
       const response = await fetch(url, {
         ...options,
-        headers
+        headers,
+        credentials: 'include'
       });
 
       if (response.status === 401) {
-        console.warn('[API 401] Sitzung ungültig oder abgelaufen.');
+        this.csrfToken = null;
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('securityops:unauthorized'));
       }
 
       const envelope: ResponseEnvelope = await response.json();
+      const csrf = response.headers.get('x-csrf-token');
+      if (csrf) this.csrfToken = csrf;
       if (!response.ok || !envelope.success) {
         throw new ApiError(
           response.status,

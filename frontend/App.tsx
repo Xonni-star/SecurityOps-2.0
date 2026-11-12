@@ -101,6 +101,9 @@ export default function App(): React.ReactNode {
 
   useEffect(() => {
     void restoreSession();
+    const onUnauthorized = () => useSecurityStore.setState({ authUser: null, isAuthenticated: false, authError: 'Sitzung abgelaufen. Bitte erneut anmelden.' });
+    window.addEventListener('securityops:unauthorized', onUnauthorized);
+    return () => window.removeEventListener('securityops:unauthorized', onUnauthorized);
   }, [restoreSession]);
 
   useEffect(() => {

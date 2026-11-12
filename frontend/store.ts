@@ -410,7 +410,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   authUser: null,
-  isAuthenticated: !!apiClient.getToken(),
+  isAuthenticated: false,
   isAuthenticating: false,
   authError: null,
   isLoadingData: false,
@@ -424,11 +424,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         { email, password },
         { skipAuth: true }
       );
-      apiClient.setToken(data.accessToken);
+      apiClient.setCsrfToken(data.csrfToken);
       set({ authUser: data.user as AuthUser, isAuthenticated: true, isAuthenticating: false });
       await get().loadTenantData();
     } catch (error: any) {
-      apiClient.setToken(null);
+      apiClient.setCsrfToken(null);
       set({
         authUser: null,
         isAuthenticated: false,
@@ -445,16 +445,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     } catch {
       // Die lokale Sitzung wird in jedem Fall beendet.
     }
-    apiClient.setToken(null);
+    apiClient.setCsrfToken(null);
     set({ authUser: null, isAuthenticated: false, authError: null });
   },
 
   restoreSession: async () => {
-    if (!apiClient.getToken()) {
-      set({ isAuthenticated: false, authUser: null });
-      return;
-    }
-
     try {
       const me = await apiClient.get<any>('/auth/me');
       set({
@@ -471,7 +466,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       });
       await get().loadTenantData();
     } catch {
-      apiClient.setToken(null);
+      apiClient.setCsrfToken(null);
       set({ authUser: null, isAuthenticated: false });
     }
   },

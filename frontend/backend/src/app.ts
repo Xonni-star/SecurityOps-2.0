@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import cors, { CorsOptions } from 'cors';
 import helmet from 'helmet';
 import { env } from './config/env';
@@ -16,6 +17,23 @@ export const app = express();
 
 app.use(helmet());
 
+app.use((req, res, next) => {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
+  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(v => v.trim().split('=', 2)).filter(v => v.length === 2));
+  const origin = req.get('origin');
+  if (req.path === '/api/v1/auth/login') {
+    if (!origin || !env.ALLOWED_CORS_ORIGINS.includes(origin)) { res.status(403).json({ success: false, message: 'Origin nicht zugelassen.' }); return; }
+    return next();
+  }
+  // Unauthenticated requests proceed to auth middleware (401); browser sessions
+  // must pass Origin and CSRF validation before reaching any mutation handler.
+  if (!cookies.secops_session) return next();
+  if (!origin || !env.ALLOWED_CORS_ORIGINS.includes(origin)) { res.status(403).json({ success: false, message: 'Origin nicht zugelassen.' }); return; }
+  const cookieToken = cookies.secops_csrf; const headerToken = req.get('x-csrf-token');
+  if (!cookieToken || !headerToken || cookieToken.length !== headerToken.length || !crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken))) { res.status(403).json({ success: false, message: 'CSRF-Prüfung fehlgeschlagen.' }); return; }
+  next();
+});
+
 // CORS Whitelist-Prüfung ohne Wildcard
 const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
@@ -31,7 +49,7 @@ const corsOptions: CorsOptions = {
   // Muss alle tatsächlich registrierten API-Methoden enthalten.
   // PUT wird nirgends verwendet und deshalb bewusst nicht freigegeben.
   methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-CSRF-Token']
 };
 
 app.use(cors(corsOptions));

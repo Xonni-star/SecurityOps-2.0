@@ -1,7 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { env } from '../config/env';
 import { query } from '../config/database';
 
 export interface AuthenticatedUser {
@@ -10,6 +8,7 @@ export interface AuthenticatedUser {
   tenantId: string;
   role: string;
   permissions: string[];
+  sessionHash: string;
 }
 
 declare global {
@@ -21,64 +20,25 @@ declare global {
 }
 
 export async function authenticateJwt(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({
-      success: false,
-      message: 'Nicht autorisiert: Fehlender oder ungültiger Authorization Bearer Token'
-    });
-    return;
-  }
-
-  const token = authHeader.split(' ')[1];
-
+  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(v => v.trim().split('=', 2)).filter(v => v.length === 2));
+  const sessionId = cookies['secops_session'];
+  // The session format is exactly 32 random bytes encoded base64url. This also
+  // invalidates legacy JWTs still present in old session rows.
+  if (!sessionId || !/^[A-Za-z0-9_-]{43}$/.test(sessionId)) { res.status(401).json({ success: false, message: 'Nicht authentifiziert.' }); return; }
   try {
-    const payload = jwt.verify(token, env.JWT_SECRET) as any;
-
-    // Token-Hash zur Überprüfung in user_sessions (datenbankgestützter Widerruf)
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-
+    const tokenHash = crypto.createHash('sha256').update(sessionId).digest('hex');
     const sessionRes = await query(
-      `SELECT id, revoked, expires_at 
-       FROM user_sessions 
-       WHERE token_hash = $1 AND user_id = $2 AND tenant_id = $3`,
-      [tokenHash, payload.sub, payload.tenantId]
-    );
-
-    if (sessionRes.rows.length === 0 || sessionRes.rows[0].revoked) {
-      res.status(401).json({
-        success: false,
-        message: 'Sitzung ist ungültig oder wurde widerrufen.'
-      });
-      return;
-    }
-
-    if (new Date(sessionRes.rows[0].expires_at) < new Date()) {
-      res.status(401).json({
-        success: false,
-        message: 'Sitzung ist abgelaufen.'
-      });
-      return;
-    }
-
-    // SICHERHEITSPRINZIP:
-    // Der Mandantenkontext (tenantId) wird niemals aus einem vom Browser übermittelten
-    // X-Tenant-ID Header übernommen, sondern stammt ausnahmslos aus dem signierten JWT.
-    req.user = {
-      userId: payload.sub,
-      email: payload.email,
-      tenantId: payload.tenantId,
-      role: payload.role,
-      permissions: payload.permissions || []
-    };
-
+      `SELECT s.user_id, s.tenant_id, s.expires_at, u.email, u.is_active, r.name AS role_name, p.code
+       FROM user_sessions s JOIN users u ON u.id=s.user_id
+       JOIN user_roles ur ON ur.user_id=s.user_id AND ur.tenant_id=s.tenant_id
+       JOIN roles r ON r.id=ur.role_id LEFT JOIN role_permissions rp ON rp.role_id=r.id
+       LEFT JOIN permissions p ON p.id=rp.permission_id
+       WHERE s.token_hash=$1 AND s.revoked=false AND s.expires_at>CURRENT_TIMESTAMP`, [tokenHash]);
+    if (!sessionRes.rows.length || !sessionRes.rows[0].is_active) { res.status(401).json({ success:false, message:'Sitzung ungültig oder abgelaufen.' }); return; }
+    const row=sessionRes.rows[0];
+    req.user={ userId:row.user_id, email:row.email, tenantId:row.tenant_id, role:row.role_name, permissions:sessionRes.rows.map((x:any)=>x.code).filter(Boolean), sessionHash:tokenHash };
     next();
-  } catch (error) {
-    res.status(401).json({
-      success: false,
-      message: 'Sitzung ungültig oder abgelaufen.'
-    });
-  }
+  } catch { res.status(401).json({ success:false, message:'Sitzung ungültig oder abgelaufen.' }); }
 }
 
 /**

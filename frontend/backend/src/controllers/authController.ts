@@ -1,6 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
 import argon2 from 'argon2';
-import jwt, { SignOptions } from 'jsonwebtoken';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { query } from '../config/database';
@@ -150,31 +149,10 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     const sessionDurationMs = parseDurationToMs(env.JWT_EXPIRES_IN);
     const expiresAt = new Date(Date.now() + sessionDurationMs);
 
-    // env.JWT_EXPIRES_IN ist durch die Zod-Regel in config/env.ts auf
-    // <Zahl><s|m|h|d> beschränkt und entspricht damit dem von jsonwebtoken
-    // akzeptierten StringValue-Format. Der Cast überträgt diese Laufzeit-
-    // Garantie auf den Compiler, ohne "any" zu verwenden.
-    const signOptions: SignOptions = {
-      expiresIn: env.JWT_EXPIRES_IN as SignOptions['expiresIn'],
-      // Eindeutige Token-ID: verhindert identische JWTs (und damit identische
-      // token_hash-Werte) bei mehreren Logins innerhalb derselben Sekunde.
-      jwtid: crypto.randomUUID()
-    };
-
-    const token = jwt.sign(
-      {
-        sub: user.id,
-        email: user.email,
-        tenantId: tenant_id,
-        role: role_name,
-        permissions
-      },
-      env.JWT_SECRET,
-      signOptions
-    );
-
-    // 6. Sitzung in user_sessions persistieren
-    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    // Opaque, high-entropy session identifier; only its SHA-256 hash is persisted.
+    const sessionId = crypto.randomBytes(32).toString('base64url');
+    const csrfToken = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = crypto.createHash('sha256').update(sessionId).digest('hex');
 
     await query(
       `INSERT INTO user_sessions (user_id, tenant_id, token_hash, device_name, ip_address, expires_at, revoked)
@@ -182,12 +160,15 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       [user.id, tenant_id, tokenHash, req.headers['user-agent'] || 'Unbekannt', req.ip, expiresAt]
     );
 
+    const cookieOptions = { httpOnly: true, secure: env.NODE_ENV === 'production', sameSite: 'strict' as const, path: '/api/v1', maxAge: sessionDurationMs };
+    res.cookie('secops_session', sessionId, cookieOptions);
+    res.cookie('secops_csrf', csrfToken, { ...cookieOptions, httpOnly: false });
+    res.setHeader('X-CSRF-Token', csrfToken);
     res.json({
       success: true,
       message: 'Authentifizierung erfolgreich',
       data: {
-        accessToken: token,
-        tokenType: 'Bearer',
+        csrfToken,
         expiresAt: expiresAt.toISOString(),
         user: {
           id: user.id,
@@ -207,13 +188,9 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
 export async function logout(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const token = authHeader.split(' ')[1];
-      const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-      await query('UPDATE user_sessions SET revoked = true WHERE token_hash = $1', [tokenHash]);
-    }
-
+    if (req.user?.sessionHash) await query('UPDATE user_sessions SET revoked = true WHERE token_hash = $1', [req.user.sessionHash]);
+    res.clearCookie('secops_session', { path: '/api/v1', httpOnly: true, secure: env.NODE_ENV === 'production', sameSite: 'strict' });
+    res.clearCookie('secops_csrf', { path: '/api/v1', secure: env.NODE_ENV === 'production', sameSite: 'strict' });
     res.json({
       success: true,
       message: 'Erfolgreich abgemeldet. Sitzung wurde in der Datenbank widerrufen.'
@@ -224,8 +201,11 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
 }
 
 export async function getMe(req: Request, res: Response): Promise<void> {
+  const cookies = Object.fromEntries((req.headers.cookie || '').split(';').map(v => v.trim().split('=', 2)).filter(v => v.length === 2));
+  if (cookies.secops_csrf) res.setHeader('X-CSRF-Token', cookies.secops_csrf);
+  const { sessionHash: _sessionHash, ...publicUser } = req.user!;
   res.json({
     success: true,
-    data: req.user
+    data: publicUser
   });
 }

@@ -3,6 +3,7 @@ import argon2 from 'argon2';
 import crypto from 'crypto';
 import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
+import { authHeaders } from './testUtils';
 
 const SEED_PASSWORD = 'SecOpsVault2025SecurePassword!';
 const SEED_USER_EMAIL = 'a.schmidt@ffm-sec.de';
@@ -24,10 +25,14 @@ const keyNumber = `API-KEY-${Date.now()}`;
 async function login(email: string): Promise<string> {
   const response = await request(app)
     .post('/api/v1/auth/login')
+    .set('Origin', 'http://localhost:3000')
     .send({ email, password: SEED_PASSWORD });
 
   expect(response.status).toBe(200);
-  return response.body.data.accessToken as string;
+  const setCookies = response.headers['set-cookie'];
+  const cookie = (Array.isArray(setCookies) ? setCookies : [setCookies || '']).find((value) => value.startsWith('secops_session='));
+  const sessionId = cookie?.match(/^secops_session=([^;]+)/)?.[1];
+  return sessionId + '|' + response.body.data.csrfToken;
 }
 
 beforeAll(async () => {
@@ -94,7 +99,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const createResponse = await request(app)
       .post('/api/v1/customers')
-      .set('Authorization', `Bearer ${firstToken}`)
+      .set(authHeaders(firstToken))
       .send({
         clientNumber,
         companyName: 'API Persistenz GmbH',
@@ -113,7 +118,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const secondToken = await login(SEED_USER_EMAIL);
     const listResponse = await request(app)
       .get('/api/v1/customers')
-      .set('Authorization', `Bearer ${secondToken}`);
+      .set(authHeaders(secondToken));
 
     expect(listResponse.status).toBe(200);
     expect(listResponse.body.data).toEqual(
@@ -131,7 +136,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const listResponse = await request(app)
       .get('/api/v1/customers')
-      .set('Authorization', `Bearer ${bavariaToken}`);
+      .set(authHeaders(bavariaToken));
 
     expect(listResponse.status).toBe(200);
     const clientNumbers = (listResponse.body.data as Array<{ client_number: string }>).map(
@@ -142,7 +147,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
   test('Kundenänderung ist revisionsgeschützt und Archivierung erhält verknüpfte Daten', async () => {
     const token = await login(SEED_USER_EMAIL);
-    const create = await request(app).post('/api/v1/customers').set('Authorization', `Bearer ${token}`).send({
+    const create = await request(app).post('/api/v1/customers').set(authHeaders(token)).send({
       clientNumber: `${clientNumber}-ARCH`, companyName: 'Archiv Test GmbH', contactPerson: 'Test Person', email: 'archiv@test.de',
       phone: '+49 30 123', address: 'Testweg 2', contractStart: '2026-01-01', contractEnd: '2028-12-31'
     });
@@ -150,19 +155,19 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const id = create.body.data.id as string;
     archivedCustomerSiteCode = `ARCH-SITE-${Date.now()}`;
     await migrationPool.query(`INSERT INTO sites (tenant_id, client_id, site_code, name, address) VALUES ($1, $2, $3, 'Verknüpfter Standort', 'Teststraße 9')`, ['11111111-1111-1111-1111-111111111111', id, archivedCustomerSiteCode]);
-    const update = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${token}`).send({ companyName: 'Aktualisiert GmbH', revisionVersion: 1 });
+    const update = await request(app).patch(`/api/v1/customers/${id}`).set(authHeaders(token)).send({ companyName: 'Aktualisiert GmbH', revisionVersion: 1 });
     expect(update.status).toBe(200);
     expect(update.body.data.revision_version).toBe(2);
-    const stale = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${token}`).send({ companyName: 'Veraltet', revisionVersion: 1 });
+    const stale = await request(app).patch(`/api/v1/customers/${id}`).set(authHeaders(token)).send({ companyName: 'Veraltet', revisionVersion: 1 });
     expect(stale.status).toBe(409);
-    const foreign = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${await login(BAVARIA_USER_EMAIL)}`).send({ companyName: 'Fremd', revisionVersion: 2 });
+    const foreign = await request(app).patch(`/api/v1/customers/${id}`).set(authHeaders(await login(BAVARIA_USER_EMAIL))).send({ companyName: 'Fremd', revisionVersion: 2 });
     expect(foreign.status).toBe(404);
-    const archived = await request(app).post(`/api/v1/customers/${id}/archive`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 2 });
+    const archived = await request(app).post(`/api/v1/customers/${id}/archive`).set(authHeaders(token)).send({ revisionVersion: 2 });
     expect(archived.status).toBe(200);
     expect(archived.body.data.archived_at).toBeTruthy();
     const siteStillExists = await migrationPool.query('SELECT id FROM sites WHERE tenant_id=$1 AND client_id=$2 AND site_code=$3', ['11111111-1111-1111-1111-111111111111', id, archivedCustomerSiteCode]);
     expect(siteStillExists.rows).toHaveLength(1);
-    const visible = await request(app).get('/api/v1/customers').set('Authorization', `Bearer ${token}`);
+    const visible = await request(app).get('/api/v1/customers').set(authHeaders(token));
     expect(visible.body.data.some((row: any) => row.id === id)).toBe(false);
   });
 
@@ -170,7 +175,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const token = await login(SEED_USER_EMAIL);
     const mutationId = `client-offline-${Date.now()}`;
     const payload = { id: crypto.randomUUID(), clientNumber: `${clientNumber}-OFF`, companyName: 'Offline Kunde GmbH', contactPerson: 'Offline Test', email: 'offline@test.de', phone: '+49 40 123', address: 'Offlineweg 1', contractStart: '2026-01-01', contractEnd: '2028-12-31', slaLevel: 'Gold (24/7 Vor-Ort)' };
-    const send = () => request(app).post('/api/v1/customers/sync').set('Authorization', `Bearer ${token}`).send({ mutations: [{ clientUuid: mutationId, action: 'CREATE', baseVersion: 1, payload }] });
+    const send = () => request(app).post('/api/v1/customers/sync').set(authHeaders(token)).send({ mutations: [{ clientUuid: mutationId, action: 'CREATE', baseVersion: 1, payload }] });
     const first = await send();
     const second = await send();
     expect(first.status).toBe(200);
@@ -186,10 +191,10 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const sitesResponse = await request(app)
       .get('/api/v1/sites')
-      .set('Authorization', `Bearer ${token}`);
+      .set(authHeaders(token));
     const employeesResponse = await request(app)
       .get('/api/v1/employees')
-      .set('Authorization', `Bearer ${token}`);
+      .set(authHeaders(token));
 
     expect(sitesResponse.status).toBe(200);
     expect(Array.isArray(sitesResponse.body.data)).toBe(true);
@@ -202,13 +207,13 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const customersResponse = await request(app)
       .get('/api/v1/customers')
-      .set('Authorization', `Bearer ${token}`);
+      .set(authHeaders(token));
     expect(customersResponse.status).toBe(200);
     const clientId = customersResponse.body.data[0].id as string;
 
     const siteResponse = await request(app)
       .post('/api/v1/sites')
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({
         clientId,
         siteCode,
@@ -225,7 +230,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const employeeResponse = await request(app)
       .post('/api/v1/employees')
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({
         personnelNumber,
         firstName: 'API',
@@ -243,25 +248,25 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const updateResponse = await request(app)
       .patch(`/api/v1/employees/${createdEmployeeId}`)
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({ status: 'Urlaub', revisionVersion: employeeResponse.body.data.revision_version });
     expect(updateResponse.status).toBe(200);
     expect(updateResponse.body.data.revision_version).toBe(employeeResponse.body.data.revision_version + 1);
-    const staleUpdate = await request(app).patch(`/api/v1/employees/${createdEmployeeId}`).set('Authorization', `Bearer ${token}`).send({ status: 'Aktiv', revisionVersion: employeeResponse.body.data.revision_version });
+    const staleUpdate = await request(app).patch(`/api/v1/employees/${createdEmployeeId}`).set(authHeaders(token)).send({ status: 'Aktiv', revisionVersion: employeeResponse.body.data.revision_version });
     expect(staleUpdate.status).toBe(409);
 
     const secondToken = await login(SEED_USER_EMAIL);
 
     const sitesResponse = await request(app)
       .get('/api/v1/sites')
-      .set('Authorization', `Bearer ${secondToken}`);
+      .set(authHeaders(secondToken));
     expect(sitesResponse.body.data).toEqual(
       expect.arrayContaining([expect.objectContaining({ site_code: siteCode, name: 'API Testobjekt' })])
     );
 
     const employeesResponse = await request(app)
       .get('/api/v1/employees')
-      .set('Authorization', `Bearer ${secondToken}`);
+      .set(authHeaders(secondToken));
     expect(employeesResponse.body.data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ personnel_number: personnelNumber, status: 'Urlaub' })
@@ -272,22 +277,22 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
   test('5a. Qualifikationen, Abwesenheiten und Mitarbeiterarchiv sind persistent und revisionsgeschützt', async () => {
     if (!createdEmployeeId) throw new Error('Mitarbeiter aus Test 4 fehlt.');
     const token = await login(SEED_USER_EMAIL);
-    const qualification = await request(app).post(`/api/v1/employees/${createdEmployeeId}/qualifications`).set('Authorization', `Bearer ${token}`).send({ type: 'Sachkundeprüfung § 34a', certificateNumber: 'CERT-API-1', issueDate: '2026-01-01', expiryDate: '2027-01-01', verified: true, documentReference: 'DOC-TEST-1' });
+    const qualification = await request(app).post(`/api/v1/employees/${createdEmployeeId}/qualifications`).set(authHeaders(token)).send({ type: 'Sachkundeprüfung § 34a', certificateNumber: 'CERT-API-1', issueDate: '2026-01-01', expiryDate: '2027-01-01', verified: true, documentReference: 'DOC-TEST-1' });
     expect(qualification.status).toBe(201);
     expect(qualification.body.data.document_reference).toBe('DOC-TEST-1');
-    const absence = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences`).set('Authorization', `Bearer ${token}`).send({ type: 'Urlaub', startDate: '2026-12-01', endDate: '2026-12-05', notes: 'Regressionstest' });
+    const absence = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences`).set(authHeaders(token)).send({ type: 'Urlaub', startDate: '2026-12-01', endDate: '2026-12-05', notes: 'Regressionstest' });
     expect(absence.status).toBe(201);
-    const overlap = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences`).set('Authorization', `Bearer ${token}`).send({ type: 'Sonstige', startDate: '2026-12-02', endDate: '2026-12-03' });
+    const overlap = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences`).set(authHeaders(token)).send({ type: 'Sonstige', startDate: '2026-12-02', endDate: '2026-12-03' });
     expect(overlap.status).toBe(409);
-    const approved = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences/${absence.body.data.id}/review`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: absence.body.data.revision_version, decision: 'APPROVED' });
+    const approved = await request(app).post(`/api/v1/employees/${createdEmployeeId}/absences/${absence.body.data.id}/review`).set(authHeaders(token)).send({ revisionVersion: absence.body.data.revision_version, decision: 'APPROVED' });
     expect(approved.status).toBe(200);
-    const loaded = await request(app).get('/api/v1/employees').set('Authorization', `Bearer ${token}`);
+    const loaded = await request(app).get('/api/v1/employees').set(authHeaders(token));
     const employee = loaded.body.data.find((item: any) => item.id === createdEmployeeId);
     expect(employee.qualifications).toEqual(expect.arrayContaining([expect.objectContaining({ certificate_number: 'CERT-API-1' })]));
     expect(employee.absences).toEqual(expect.arrayContaining([expect.objectContaining({ status: 'APPROVED' })]));
-    const archive = await request(app).post(`/api/v1/employees/${createdEmployeeId}/archive`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: employee.revision_version });
+    const archive = await request(app).post(`/api/v1/employees/${createdEmployeeId}/archive`).set(authHeaders(token)).send({ revisionVersion: employee.revision_version });
     expect(archive.status).toBe(200);
-    const restore = await request(app).post(`/api/v1/employees/${createdEmployeeId}/restore`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: archive.body.data.revision_version });
+    const restore = await request(app).post(`/api/v1/employees/${createdEmployeeId}/restore`).set(authHeaders(token)).send({ revisionVersion: archive.body.data.revision_version });
     expect(restore.status).toBe(200);
   });
 
@@ -316,7 +321,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
         dateOfJoining: '2026-01-01'
       }
     };
-    const send = () => request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + token).send({
+    const send = () => request(app).post('/api/v1/employees/sync').set(authHeaders(token)).send({
       deviceId: 'employee-outbox-test',
       mutations: [mutation]
     });
@@ -334,10 +339,10 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const sitesResponse = await request(app)
       .get('/api/v1/sites')
-      .set('Authorization', `Bearer ${bavariaToken}`);
+      .set(authHeaders(bavariaToken));
     const employeesResponse = await request(app)
       .get('/api/v1/employees')
-      .set('Authorization', `Bearer ${bavariaToken}`);
+      .set(authHeaders(bavariaToken));
 
     expect(sitesResponse.status).toBe(200);
     expect(employeesResponse.status).toBe(200);
@@ -361,7 +366,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const shiftResponse = await request(app)
       .post('/api/v1/shifts')
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({
         siteId: createdSiteId,
         employeeId: createdEmployeeId,
@@ -377,7 +382,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const keyResponse = await request(app)
       .post('/api/v1/keys')
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({
         siteId: createdSiteId,
         keyNumber,
@@ -390,7 +395,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const taskResponse = await request(app)
       .post('/api/v1/tasks')
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({
         title: 'API Testaufgabe',
         assignedToName: 'Einsatzleitung',
@@ -405,7 +410,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const issueResponse = await request(app)
       .patch(`/api/v1/keys/${createdKeyId}`)
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({
         status: 'Ausgegeben',
         currentHolderId: createdEmployeeId,
@@ -416,13 +421,13 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const completeTaskResponse = await request(app)
       .patch(`/api/v1/tasks/${createdTaskId}`)
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({ status: 'Erledigt' });
     expect(completeTaskResponse.status).toBe(200);
 
     const closeShiftResponse = await request(app)
       .patch(`/api/v1/shifts/${createdShiftId}`)
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({ status: 'Abgeschlossen' });
     expect(closeShiftResponse.status).toBe(200);
 
@@ -430,7 +435,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const shiftsResponse = await request(app)
       .get('/api/v1/shifts')
-      .set('Authorization', `Bearer ${secondToken}`);
+      .set(authHeaders(secondToken));
     expect(shiftsResponse.body.data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: createdShiftId, status: 'Abgeschlossen', site_name: 'API Testobjekt' })
@@ -439,7 +444,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const keysResponse = await request(app)
       .get('/api/v1/keys')
-      .set('Authorization', `Bearer ${secondToken}`);
+      .set(authHeaders(secondToken));
     expect(keysResponse.body.data).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: createdKeyId, key_number: keyNumber, status: 'Ausgegeben' })
@@ -448,7 +453,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const tasksResponse = await request(app)
       .get('/api/v1/tasks')
-      .set('Authorization', `Bearer ${secondToken}`);
+      .set(authHeaders(secondToken));
     expect(tasksResponse.body.data).toEqual(
       expect.arrayContaining([expect.objectContaining({ id: createdTaskId, status: 'Erledigt' })])
     );
@@ -457,9 +462,9 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
   test('7. Mandant B sieht Schichten, Schlüssel und Aufgaben aus Mandant A nicht', async () => {
     const bavariaToken = await login(BAVARIA_USER_EMAIL);
 
-    const shiftsResponse = await request(app).get('/api/v1/shifts').set('Authorization', `Bearer ${bavariaToken}`);
-    const keysResponse = await request(app).get('/api/v1/keys').set('Authorization', `Bearer ${bavariaToken}`);
-    const tasksResponse = await request(app).get('/api/v1/tasks').set('Authorization', `Bearer ${bavariaToken}`);
+    const shiftsResponse = await request(app).get('/api/v1/shifts').set(authHeaders(bavariaToken));
+    const keysResponse = await request(app).get('/api/v1/keys').set(authHeaders(bavariaToken));
+    const tasksResponse = await request(app).get('/api/v1/tasks').set(authHeaders(bavariaToken));
 
     expect(shiftsResponse.status).toBe(200);
     expect(keysResponse.status).toBe(200);
@@ -473,21 +478,21 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
   test('Standorte werden revisionsgeschützt archiviert/wiederhergestellt; operative Beziehungen bleiben erhalten', async () => {
     const token = await login(SEED_USER_EMAIL);
     expect(createdSiteId).toBeTruthy();
-    const update = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set('Authorization', `Bearer ${token}`).send({ name: 'API Testobjekt aktualisiert', revisionVersion: 1 });
+    const update = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set(authHeaders(token)).send({ name: 'API Testobjekt aktualisiert', revisionVersion: 1 });
     expect(update.status).toBe(200);
     expect(update.body.data.revision_version).toBe(2);
-    const stale = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set('Authorization', `Bearer ${token}`).send({ name: 'Veraltet', revisionVersion: 1 });
+    const stale = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set(authHeaders(token)).send({ name: 'Veraltet', revisionVersion: 1 });
     expect(stale.status).toBe(409);
-    const foreign = await request(app).post(`/api/v1/sites/${createdSiteId}/archive`).set('Authorization', `Bearer ${await login(BAVARIA_USER_EMAIL)}`).send({ revisionVersion: 2 });
+    const foreign = await request(app).post(`/api/v1/sites/${createdSiteId}/archive`).set(authHeaders(await login(BAVARIA_USER_EMAIL))).send({ revisionVersion: 2 });
     expect(foreign.status).toBe(404);
-    const archive = await request(app).post(`/api/v1/sites/${createdSiteId}/archive`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 2 });
+    const archive = await request(app).post(`/api/v1/sites/${createdSiteId}/archive`).set(authHeaders(token)).send({ revisionVersion: 2 });
     expect(archive.status).toBe(200);
     expect(archive.body.data.revision_version).toBe(3);
-    const staleRestore = await request(app).post(`/api/v1/sites/${createdSiteId}/restore`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 2 });
+    const staleRestore = await request(app).post(`/api/v1/sites/${createdSiteId}/restore`).set(authHeaders(token)).send({ revisionVersion: 2 });
     expect(staleRestore.status).toBe(409);
     const rows = await migrationPool.query('SELECT (SELECT count(*) FROM shifts WHERE id=$1) AS shifts, (SELECT count(*) FROM keys WHERE id=$2) AS keys, (SELECT count(*) FROM tasks WHERE id=$3) AS tasks FROM sites WHERE id=$4', [createdShiftId, createdKeyId, createdTaskId, createdSiteId]);
     expect(rows.rows[0]).toMatchObject({ shifts: '1', keys: '1', tasks: '1' });
-    const restore = await request(app).post(`/api/v1/sites/${createdSiteId}/restore`).set('Authorization', `Bearer ${token}`).send({ revisionVersion: 3 });
+    const restore = await request(app).post(`/api/v1/sites/${createdSiteId}/restore`).set(authHeaders(token)).send({ revisionVersion: 3 });
     expect(restore.status).toBe(200);
     expect(restore.body.data.revision_version).toBe(4);
   });
@@ -497,7 +502,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const mutationId = `site-offline-${Date.now()}`;
     const id = crypto.randomUUID();
     const payload = { id, clientId: 'c1111111-1111-1111-1111-111111111111', siteCode: `OFF-${Date.now()}`, name: 'Offline Standort', address: 'Offlineweg 1', securityLevel: 'Mittel', requiredGuardsDay: 1, requiredGuardsNight: 1, alarmSystem: '', accessRules: '' };
-    const send = (p: any) => request(app).post('/api/v1/sites/sync').set('Authorization', `Bearer ${token}`).send({ mutations: [{ clientUuid: mutationId, action: 'CREATE', baseVersion: 1, payload: p }] });
+    const send = (p: any) => request(app).post('/api/v1/sites/sync').set(authHeaders(token)).send({ mutations: [{ clientUuid: mutationId, action: 'CREATE', baseVersion: 1, payload: p }] });
     const first = await send(payload); const replay = await send(payload); const altered = await send({ ...payload, name: 'Manipuliert' });
     expect(first.status).toBe(200); expect(first.body.data[0].status).toBe('SYNCED'); expect(replay.body.data).toEqual(first.body.data); expect(altered.body.data[0].status).toBe('REJECTED');
     await migrationPool.query('DELETE FROM sites WHERE id=$1', [id]);
@@ -510,7 +515,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
   test('Standortänderungen ohne sites:update-Berechtigung werden abgewiesen', async () => {
     const token = await login(SITE_RESTRICTED_USER_EMAIL);
-    const response = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set('Authorization', `Bearer ${token}`).send({ name: 'Nicht erlaubt', revisionVersion: 4 });
+    const response = await request(app).patch(`/api/v1/sites/${createdSiteId}`).set(authHeaders(token)).send({ name: 'Nicht erlaubt', revisionVersion: 4 });
     expect(response.status).toBe(403);
   });
 
@@ -519,7 +524,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const title = `Manueller Regressionseintrag ${Date.now()}`;
     const create = await request(app)
       .post('/api/v1/logbook')
-      .set('Authorization', `Bearer ${token}`)
+      .set(authHeaders(token))
       .send({
         siteId: 'b1111111-1111-1111-1111-111111111111',
         guardId: 'e1111111-1111-1111-1111-111111111111',
@@ -532,7 +537,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(create.status).toBe(201);
     expect(create.body.data.title).toBe(title);
 
-    const list = await request(app).get('/api/v1/logbook').set('Authorization', `Bearer ${token}`);
+    const list = await request(app).get('/api/v1/logbook').set(authHeaders(token));
     expect(list.status).toBe(200);
     expect(list.body.data).toEqual(expect.arrayContaining([expect.objectContaining({ title })]));
   });

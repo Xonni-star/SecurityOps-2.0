@@ -1,10 +1,9 @@
 import argon2 from 'argon2';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import request from 'supertest';
 import { app } from '../app';
 import { pool, migrationPool, withTenantTransaction, withSystemTransaction } from '../config/database';
-import { cleanupTestData } from './testUtils';
+import { cleanupTestData, authHeaders } from './testUtils';
 import { env } from '../config/env';
 
 describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Tests', () => {
@@ -12,6 +11,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
   let testTenantB: string;
   let testUserAId: string;
   let testUserMultiTenantId: string;
+  let testAdminUserId: string;
   let testRoleEinsatzId: string;
   let testRoleAdminId: string;
   let testValidTokenA: string;
@@ -96,33 +96,21 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     });
 
     // 6. Gültigen, widerrufenen und abgelaufenen Token anlegen
-    testValidTokenA = jwt.sign(
-      { sub: testUserAId, email: 'test.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['customers:read'] },
-      env.JWT_SECRET,
-      { expiresIn: '1h', jwtid: 'valid-token-a' }
-    );
+    testValidTokenA = crypto.randomBytes(32).toString('base64url');
     const validHash = crypto.createHash('sha256').update(testValidTokenA).digest('hex');
     await pool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
     `, [testUserAId, testTenantA, validHash]);
 
-    testRevokedTokenA = jwt.sign(
-      { sub: testUserAId, email: 'test.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['customers:read'] },
-      env.JWT_SECRET,
-      { expiresIn: '1h', jwtid: 'revoked-token-a' }
-    );
+    testRevokedTokenA = crypto.randomBytes(32).toString('base64url');
     const revokedHash = crypto.createHash('sha256').update(testRevokedTokenA).digest('hex');
     await pool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', true);
     `, [testUserAId, testTenantA, revokedHash]);
 
-    testExpiredTokenA = jwt.sign(
-      { sub: testUserAId, email: 'test.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['customers:read'] },
-      env.JWT_SECRET,
-      { expiresIn: '-10m', jwtid: 'expired-token-a' }
-    );
+    testExpiredTokenA = crypto.randomBytes(32).toString('base64url');
     const expiredHash = crypto.createHash('sha256').update(testExpiredTokenA).digest('hex');
     await pool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
@@ -132,7 +120,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
 
   afterAll(async () => {
     // Administrative Bereinigung inkl. Append-Only-Trigger (nur Testdatenbank).
-    await cleanupTestData([testTenantA, testTenantB], [testUserAId, testUserMultiTenantId]);
+    await cleanupTestData([testTenantA, testTenantB], [testUserAId, testUserMultiTenantId, testAdminUserId]);
     await pool.end();
     await migrationPool.end();
   });
@@ -233,6 +221,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
 
     const res = await request(app)
       .post('/api/v1/auth/login')
+      .set('Origin', 'http://localhost:3000')
       .send({
         email: multiUserEmail,
         password: 'TestSecurePassword2025!'
@@ -250,6 +239,7 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
 
     const res = await request(app)
       .post('/api/v1/auth/login')
+      .set('Origin', 'http://localhost:3000')
       .send({
         email: multiUserEmail,
         password: 'TestSecurePassword2025!',
@@ -370,39 +360,40 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
   test('12. Widerrufene Sitzung wird mit HTTP 401 abgefangen', async () => {
     const res = await request(app)
       .get('/api/v1/customers')
-      .set('Authorization', `Bearer ${testRevokedTokenA}`);
+      .set(authHeaders(testRevokedTokenA));
     expect(res.status).toBe(401);
   });
 
   test('13. Fehlende Berechtigung liefert HTTP 403 (kein Admin-Bypass)', async () => {
-    // Admin-Token OHNE 'customers:read'
-    const adminToken = jwt.sign(
-      { sub: testUserAId, email: 'admin@secops.local', tenantId: testTenantA, role: 'Systemadministrator', permissions: [] },
-      env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
+    // Separate identity with no assigned permission; payload claims are irrelevant.
+    testAdminUserId = (await pool.query(
+      "INSERT INTO users (email,password_hash,first_name,last_name) VALUES ($1,'unused','No','Permissions') RETURNING id",
+      [`admin.no-permissions.${Date.now()}@secops.local`]
+    )).rows[0].id;
+    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [testAdminUserId, testRoleAdminId, testTenantA]);
+    const adminToken = crypto.randomBytes(32).toString('base64url');
     const hash = crypto.createHash('sha256').update(adminToken).digest('hex');
     await pool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
-    `, [testUserAId, testTenantA, hash]);
+    `, [testAdminUserId, testTenantA, hash]);
 
     const res = await request(app)
       .get('/api/v1/customers')
-      .set('Authorization', `Bearer ${adminToken}`);
+      .set(authHeaders(adminToken));
     expect(res.status).toBe(403);
 
     const logbookRes = await request(app)
       .post('/api/v1/logbook')
-      .set('Authorization', `Bearer ${adminToken}`)
+      .set(authHeaders(adminToken))
       .send({});
     expect(logbookRes.status).toBe(403);
   });
 
   test('14. Kundenänderung und Archivierung verlangen weiterhin Schreibberechtigung und Authentifizierung', async () => {
     const id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
-    const update = await request(app).patch(`/api/v1/customers/${id}`).set('Authorization', `Bearer ${testValidTokenA}`).send({ companyName: 'Nicht erlaubt', revisionVersion: 1 });
-    const archive = await request(app).post(`/api/v1/customers/${id}/archive`).set('Authorization', `Bearer ${testValidTokenA}`).send({ revisionVersion: 1 });
+    const update = await request(app).patch(`/api/v1/customers/${id}`).set(authHeaders(testValidTokenA)).send({ companyName: 'Nicht erlaubt', revisionVersion: 1 });
+    const archive = await request(app).post(`/api/v1/customers/${id}/archive`).set(authHeaders(testValidTokenA)).send({ revisionVersion: 1 });
     expect(update.status).toBe(403);
     expect(archive.status).toBe(403);
     const unauthenticated = await request(app).patch(`/api/v1/customers/${id}`).send({ companyName: 'Nicht erlaubt', revisionVersion: 1 });

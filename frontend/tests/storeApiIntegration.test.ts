@@ -6,8 +6,7 @@ vi.mock('../services/apiClient', () => {
     post: vi.fn(),
     patch: vi.fn(),
     delete: vi.fn(),
-    setToken: vi.fn(),
-    getToken: vi.fn(() => 'test-token'),
+    setCsrfToken: vi.fn(),
     getTenantId: vi.fn(() => 'tenant-frankfurt'),
     setTenantId: vi.fn()
   };
@@ -31,7 +30,8 @@ const mockedApi = apiClient as unknown as {
   get: ReturnType<typeof vi.fn>;
   post: ReturnType<typeof vi.fn>;
   patch: ReturnType<typeof vi.fn>;
-  setToken: ReturnType<typeof vi.fn>;
+  setCsrfToken: ReturnType<typeof vi.fn>;
+  post: ReturnType<typeof vi.fn>;
 };
 
 const customerRow = {
@@ -409,9 +409,9 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(useSecurityStore.getState().clients[0].companyName).toBe('Offline GmbH');
   });
 
-  test('4. Login setzt Token und lädt Mandantendaten aus PostgreSQL', async () => {
+  test('4. Login übernimmt CSRF-Token und lädt Mandantendaten aus der Sitzung', async () => {
     mockedApi.post.mockResolvedValueOnce({
-      accessToken: 'jwt-test-token',
+      csrfToken: 'csrf-test-token',
       user: {
         id: 'user-1',
         email: 'a.schmidt@ffm-sec.de',
@@ -426,7 +426,7 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
 
     await useSecurityStore.getState().login('a.schmidt@ffm-sec.de', 'secret');
 
-    expect(mockedApi.setToken).toHaveBeenCalledWith('jwt-test-token');
+    expect(mockedApi.setCsrfToken).toHaveBeenCalledWith('csrf-test-token');
     const state = useSecurityStore.getState();
     expect(state.isAuthenticated).toBe(true);
     expect(state.authUser?.email).toBe('a.schmidt@ffm-sec.de');

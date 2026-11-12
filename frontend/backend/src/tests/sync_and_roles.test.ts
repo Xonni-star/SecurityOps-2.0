@@ -1,15 +1,15 @@
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import request from 'supertest';
 import { app } from '../app';
 import { pool, migrationPool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
-import { cleanupTestData } from './testUtils';
+import { cleanupTestData, authHeaders } from './testUtils';
 import { env } from '../config/env';
 
 describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Konfliktauflösung', () => {
   let testTenantA: string;
   let testTenantB: string;
   let testUserAId: string;
+  let restrictedUserId: string;
   let testRoleEinsatzId: string;
   let testTokenA: string;
   let siteAId: string;
@@ -33,11 +33,14 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     `, [`SyncRole_${Date.now()}`]);
     testRoleEinsatzId = rRes.rows[0].id;
 
-    const pRes = await pool.query("SELECT id FROM permissions WHERE code = 'logbook:create' LIMIT 1");
-    if (pRes.rows.length > 0) {
+    const pRes = await pool.query(
+      "SELECT id FROM permissions WHERE code = ANY($1::text[])",
+      [['logbook:create', 'employees:create', 'employees:update', 'employees:archive', 'employees:restore', 'qualifications:manage', 'employees:absence:manage', 'employees:absence:approve']]
+    );
+    for (const permission of pRes.rows) {
       await pool.query(
         'INSERT INTO role_permissions (role_id, permission_id) VALUES ($1, $2) ON CONFLICT DO NOTHING;',
-        [testRoleEinsatzId, pRes.rows[0].id]
+        [testRoleEinsatzId, permission.id]
       );
     }
 
@@ -52,11 +55,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       [testUserAId, testRoleEinsatzId, testTenantA]
     );
 
-    testTokenA = jwt.sign(
-      { sub: testUserAId, email: 'sync.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['logbook:create','employees:create','employees:update','employees:archive','employees:restore','qualifications:manage','employees:absence:manage','employees:absence:approve'] },
-      env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
+    testTokenA = crypto.randomBytes(32).toString('base64url');
     const tokenHash = crypto.createHash('sha256').update(testTokenA).digest('hex');
     await pool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
@@ -104,71 +103,73 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     });
     const updateId = 'emp-update-' + Date.now();
     const updatePayload = mutation(updateId, 'UPDATE', 1, { id: guardAId, firstName: 'OfflineAktualisiert' });
-    const first = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA).send(updatePayload);
+    const first = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA)).send(updatePayload);
     expect(first.status).toBe(200);
     expect(first.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2, serverId: guardAId });
-    const repeat = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA).send(updatePayload);
+    const repeat = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA)).send(updatePayload);
     expect(repeat.body.data[0]).toEqual(first.body.data[0]);
-    const changedReuse = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const changedReuse = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation(updateId, 'UPDATE', 1, { id: guardAId, firstName: 'Veränderter Inhalt' }));
     expect(changedReuse.body.data[0].status).toBe('REJECTED');
 
-    const stale = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const stale = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('emp-stale-' + Date.now(), 'UPDATE', 1, { id: guardAId, firstName: 'Veraltet' }));
     expect(stale.body.data[0]).toMatchObject({ status: 'CONFLICT', serverVersion: 2 });
 
-    const qualification = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const qualification = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('qual-null-' + Date.now(), 'QUALIFICATION_UPDATE', 1, { id: qualificationId, qualificationId, expiryDate: null }));
     expect(qualification.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2, serverId: qualificationId });
     const expiry = await withTenantTransaction(testTenantA, tx => tx.query('SELECT expiry_date FROM employee_qualifications WHERE id=$1 AND tenant_id=$2', [qualificationId, testTenantA]));
     expect(expiry.rows[0].expiry_date).toBeNull();
 
     const newEmployeeId = crypto.randomUUID();
-    const createdEmployee = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const createdEmployee = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('emp-create-' + Date.now(), 'CREATE', 1, { id: newEmployeeId, personnelNumber: 'MA-OFFLINE-CREATE',
         firstName: 'Neu', lastName: 'Offline', email: 'new.offline@secops.test', phone: '+49 30 111', role: 'Wachkraft',
         status: 'Aktiv', weeklyHours: 40, hourlyRate: 20, dateOfJoining: '2025-01-01' }));
     expect(createdEmployee.body.data[0]).toMatchObject({ status: 'SYNCED', serverId: newEmployeeId, serverVersion: 1 });
-    const archived = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const archived = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('emp-delete-' + Date.now(), 'DELETE', 1, { id: newEmployeeId }));
     expect(archived.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2 });
-    const restored = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const restored = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('emp-restore-' + Date.now(), 'RESTORE', 2, { id: newEmployeeId }));
     expect(restored.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 3 });
 
     const createdQualificationId = crypto.randomUUID();
-    const createdQualification = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const createdQualification = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('qual-create-' + Date.now(), 'QUALIFICATION_CREATE', 1, { id: createdQualificationId, employeeId: guardAId,
         type: 'Erste Hilfe', certificateNumber: 'EH-1', issueDate: '2024-01-01', expiryDate: '2027-01-01', verified: true, documentReference: null }));
     expect(createdQualification.body.data[0]).toMatchObject({ status: 'SYNCED', serverId: createdQualificationId });
 
     const createdAbsenceId = crypto.randomUUID();
-    const createdAbsence = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const createdAbsence = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('absence-create-' + Date.now(), 'ABSENCE_CREATE', 1, { id: createdAbsenceId, employeeId: guardAId,
         type: 'Urlaub', startDate: '2028-02-01', endDate: '2028-02-03', notes: 'offline test' }));
     expect(createdAbsence.body.data[0]).toMatchObject({ status: 'SYNCED', serverId: createdAbsenceId });
-    const reviewedAbsence = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const reviewedAbsence = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('absence-review-' + Date.now(), 'ABSENCE_REVIEW', 1, { id: createdAbsenceId, absenceId: createdAbsenceId, decision: 'APPROVED' }));
     expect(reviewedAbsence.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2 });
 
-    const crossTenant = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+    const crossTenant = await request(app).post('/api/v1/employees/sync').set(authHeaders(testTokenA))
       .send(mutation('emp-foreign-' + Date.now(), 'UPDATE', 1, { id: foreignEmployeeId, firstName: 'Fremdzugriff' }));
     expect(crossTenant.body.data[0].status).toBe('REJECTED');
     const foreignState = await withTenantTransaction(testTenantB, tx => tx.query('SELECT first_name FROM employees WHERE id=$1', [foreignEmployeeId]));
     expect(foreignState.rows[0].first_name).toBe('Fremd');
 
-    const restrictedToken = jwt.sign({ sub: testUserAId, email: 'restricted@secops.local', tenantId: testTenantA,
-      role: 'Leser', permissions: ['logbook:create'] }, env.JWT_SECRET, { expiresIn: '1h' });
+    const restrictedRoleId = (await pool.query("INSERT INTO roles (name,description) VALUES ($1,'restricted sync role') RETURNING id", [`RestrictedSync_${Date.now()}`])).rows[0].id;
+    restrictedUserId = (await pool.query("INSERT INTO users (email,password_hash,first_name,last_name) VALUES ($1,'unused','Restricted','Sync') RETURNING id", [`restricted.${Date.now()}@secops.local`])).rows[0].id;
+    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [restrictedUserId, restrictedRoleId, testTenantA]);
+    const restrictedToken = crypto.randomBytes(32).toString('base64url');
     await pool.query("INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked) VALUES ($1,$2,$3,NOW()+interval '1 hour',false)",
-      [testUserAId, testTenantA, crypto.createHash('sha256').update(restrictedToken).digest('hex')]);
-    const denied = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + restrictedToken)
+      [restrictedUserId, testTenantA, crypto.createHash('sha256').update(restrictedToken).digest('hex')]);
+    const denied = await request(app).post('/api/v1/employees/sync').set(authHeaders(restrictedToken))
       .send(mutation('emp-denied-' + Date.now(), 'UPDATE', 2, { id: guardAId, firstName: 'NichtErlaubt' }));
     expect(denied.body.data[0]).toMatchObject({ status: 'REJECTED', message: expect.stringContaining('employees:update') });
   });
 
   afterAll(async () => {
     // Administrative Bereinigung inkl. Append-Only-Trigger (nur Testdatenbank).
-    await cleanupTestData([testTenantA, testTenantB], [testUserAId]);
+    await cleanupTestData([testTenantA, testTenantB], [testUserAId, restrictedUserId]);
     await pool.end();
     await migrationPool.end();
   });
@@ -190,11 +191,11 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res1 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    const res1 = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(payload);
     expect(res1.status).toBe(200);
     expect(res1.body.data[0].status).toBe('SYNCED');
 
-    const res2 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    const res2 = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(payload);
     expect(res2.status).toBe(200);
     expect(res2.body.data[0].status).toBe('SYNCED');
 
@@ -234,7 +235,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(corrPayload);
+    const res = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(corrPayload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('SYNCED');
 
@@ -266,10 +267,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res1 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    const res1 = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(payload);
     expect(res1.body.data[0].status).toBe('SYNCED');
 
-    const res2 = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    const res2 = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(payload);
     expect(res2.body.data[0].status).toBe('SYNCED');
 
     const revCount = await withTenantTransaction(testTenantA, async (tx) => {
@@ -303,7 +304,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(conflictPayload);
+    const res = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(conflictPayload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('CONFLICT');
     expect(res.body.data[0].serverVersion).toBe(2);
@@ -334,7 +335,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
+    const res = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(delPayload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('SYNCED');
 
@@ -369,7 +370,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(payload);
+    const res = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(payload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('CONFLICT');
   });
@@ -398,7 +399,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
         }
       ]
     };
-    const resUp = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(upPayload);
+    const resUp = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(upPayload);
     expect(resUp.body.data[0].status).toBe('SYNCED');
     expect(resUp.body.data[0].serverVersion).toBe(2);
 
@@ -415,7 +416,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
         }
       ]
     };
-    const resDel = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(delPayload);
+    const resDel = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(delPayload);
     expect(resDel.body.data[0].status).toBe('SYNCED');
   });
 
@@ -439,7 +440,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(keyPayload);
+    const res = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(keyPayload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('SYNCED');
     expect(res.body.data[0].serverVersion).toBe(2);
@@ -461,7 +462,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(pPayload);
+    const res = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(pPayload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('REJECTED');
   });
@@ -482,7 +483,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       ]
     };
 
-    const res = await request(app).post('/api/v1/sync/push').set('Authorization', `Bearer ${testTokenA}`).send(hPayload);
+    const res = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send(hPayload);
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('REJECTED');
   });
@@ -495,7 +496,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
     const res = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: `res-loc-${Date.now()}`,
         entityType: 'task',
@@ -527,7 +528,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
     const res = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: `res-loc-fail-${Date.now()}`,
         entityType: 'task',
@@ -549,7 +550,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
     const res = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: `res-srv-${Date.now()}`,
         entityType: 'task',
@@ -588,7 +589,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     // 2. Normaler /sync/push scheitert mit CONFLICT und speichert Quittung in sync_idempotency_receipts
     const pushRes = await request(app)
       .post('/api/v1/sync/push')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         deviceId: 'dev-01',
         mutations: [
@@ -612,7 +613,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     // Mit der neuen Tabelle sync_conflict_resolution_receipts gelingt die Auflösung sauber!
     const resolveRes = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: outboxUuid,
         entityType: 'task',
@@ -630,7 +631,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     // Muss idempotent denselben Zustand liefern, OHNE zweiten Audit-Log!
     const repeatRes = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: outboxUuid,
         entityType: 'task',
@@ -664,7 +665,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     // 1. Erste Konfliktauflösung
     const res1 = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: stableConflictUuid,
         entityType: 'guardbook',
@@ -678,7 +679,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     // 2. Zweiter identischer Aufruf
     const res2 = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: stableConflictUuid,
         entityType: 'guardbook',
@@ -711,7 +712,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     // Erstausführung
     await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: conflictUuid,
         entityType: 'guardbook',
@@ -723,7 +724,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     // Manipulierter zweiter Aufruf mit geänderter Korrektur aber identischer UUID
     const resTamper = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${testTokenA}`)
+      .set(authHeaders(testTokenA))
       .send({
         clientUuid: conflictUuid,
         entityType: 'guardbook',
@@ -742,12 +743,9 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       return (await tx.query("INSERT INTO tasks (tenant_id, title, assigned_to_name, due_date, status) VALUES ($1, 'Task A geheim', 'Leitung A', CURRENT_DATE, 'Offen') RETURNING id", [testTenantA])).rows[0].id;
     });
 
-    const tokenB = jwt.sign(
-      { sub: testUserAId, email: 'user.b@secops.local', tenantId: testTenantB, role: 'Einsatzleitung', permissions: ['logbook:create'] },
-      env.JWT_SECRET,
-      { expiresIn: '1h' }
-    );
+    const tokenB = crypto.randomBytes(32).toString('base64url');
     const tokenHashB = crypto.createHash('sha256').update(tokenB).digest('hex');
+    await pool.query('INSERT INTO user_roles (user_id, role_id, tenant_id) VALUES ($1, $2, $3)', [testUserAId, testRoleEinsatzId, testTenantB]);
     await pool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
@@ -755,7 +753,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
     const resB = await request(app)
       .post('/api/v1/sync/conflicts/resolve')
-      .set('Authorization', `Bearer ${tokenB}`)
+      .set(authHeaders(tokenB))
       .send({
         clientUuid: `hack-conflict-${Date.now()}`,
         entityType: 'task',
@@ -790,8 +788,8 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     };
 
     const [res1, res2] = await Promise.all([
-      request(app).post('/api/v1/sync/conflicts/resolve').set('Authorization', `Bearer ${testTokenA}`).send(payload),
-      request(app).post('/api/v1/sync/conflicts/resolve').set('Authorization', `Bearer ${testTokenA}`).send(payload)
+      request(app).post('/api/v1/sync/conflicts/resolve').set(authHeaders(testTokenA)).send(payload),
+      request(app).post('/api/v1/sync/conflicts/resolve').set(authHeaders(testTokenA)).send(payload)
     ]);
 
     expect(res1.status).toBe(200);
