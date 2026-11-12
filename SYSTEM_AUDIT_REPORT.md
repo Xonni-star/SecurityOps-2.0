@@ -182,3 +182,17 @@ Dieser Abschnitt aktualisiert ausschließlich den Veröffentlichungsstatus; die 
 - PR #1 (`35d4cdb1b98f6f0219ec8e6dc88b6683c95f9fee`) und PR #2 (`3c9f68ed0d81edcd2db923b3e4e2c909e8baae12`) sind beide **MERGED**; PR #2 wurde am 2026-11-12 12:18:52 UTC gemergt. Damit sind die Migration-009-Wiederholungstests und der aktualisierte historische Audit-Nachtrag auf `main`.
 - Für den exakten `main`-Merge-Commit `7341ff21ed410c751d4019c434a01e9e9e8f3df8` ist GitHub CI erfolgreich: https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43216766220. Der CD-Release-Lauf ist ebenfalls erfolgreich: https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43217031499. Beide Läufe wurden für denselben SHA verifiziert.
 - Diese erfolgreichen Pipelines belegen die ausgeführten CI-/CD-Jobs, nicht vollständige Produktabnahme oder Produktionsreife. Die offenen Risiken aus SEC-01/04/05 und die nicht fertiggestellten Module/Workflows bleiben Gegenstand weiterer Arbeit.
+
+## 13. Nachfolgende Bestandsprüfung und Fehlerausgaben (2026-11-12)
+
+### Repository- und Veröffentlichungsstand
+
+- Der auf GitHub tatsächlich aktuelle `main`-Stand wurde erneut geprüft: `772de9db6fe902f26425312b3d565ec52c88dc42`. PR #1, #2 und #3 sind **MERGED**. CI `43219748384` und CD `43220015734` sind für diesen exakten SHA erfolgreich. Damit ist der frühere §12-Main-Snapshot `7341ff2` historisch und nicht mehr der neueste Stand.
+- Die Migrationen, insbesondere 009, und der cookie-basierte Authentifizierungsstand bleiben in den gemergten Änderungen enthalten. Die Codebasis ist weiter nicht vollständig abgenommen; die in SEC-01/04/05 und den Modulstatusangaben benannten Lücken gelten weiterhin.
+
+### Umgesetzte Sicherheitsverbesserung im aktuellen Arbeitszweig
+
+- Der zentrale API-Error-Handler gibt für unerwartete 5xx-Ausnahmen keine Exception-Nachricht, Stacktrace oder beliebige `errors`-Felder mehr an Clients aus. Für interne Logs werden nur Pfad, Methode, Statuscode und Fehlername protokolliert, nicht Exceptiontext/Stack. Geprüfte 4xx-Fehlermeldungen und Zod-Validierungsfehler bleiben erhalten.
+- Der öffentliche Health-Endpunkt liefert bei fehlgeschlagener DB-Readiness eine generische Antwort ohne Treiber-/Verbindungsfehlerdetails.
+- Regressionstests: Error-Handler-Jest 2/2 bestanden; Backend-TypeScript-Build bestanden. Ein Health-Endpunkt-Integrationstest wurde ergänzt, ist lokal mangels freigegebener DB-URL in der Host-Testausführung noch nicht gelaufen; für den Pull Request ist die PostgreSQL-16-CI-Ausführung maßgeblich und wird hier erst nach Abschluss berichtet.
+- Diese gezielte Änderung behebt nicht die umfassendere Log-Redaktion sämtlicher DB-Pool-/Rollback-Fehler oder die fehlenden Sicherheits- und Browser-/Offline-Abnahmen. **Keine Produktionsfreigabe.**
