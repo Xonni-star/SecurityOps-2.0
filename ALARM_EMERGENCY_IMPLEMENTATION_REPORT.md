@@ -26,9 +26,11 @@ Alle folgenden Prüfungen liefen lokal; die datenbankgebundenen Prüfungen nutzt
 | `npm --prefix frontend/backend run build` | erfolgreich |
 | `npm --prefix frontend run build` | erfolgreich |
 | Migration, RLS-/API-Integration gegen isoliertes PostgreSQL | in der vollständigen Backend-Testsuite bestanden |
+| Produktions-Compose-Konfiguration | `docker compose ... config --no-interpolate --quiet` erfolgreich |
+| Backend- und Frontend-Container-Images | lokale Docker-Builds erfolgreich |
 | `git diff --check` | ohne Beanstandungen |
 
-Der Frontend-Build gibt bestehende Vite-Konfigurations- und Bundlegrößen-Warnungen aus, endet aber erfolgreich. Ein Dockerfile oder Compose-Manifest für die Anwendung ist im Repository nicht vorhanden; daher wurde kein Container-Image der Anwendung gebaut oder ausgeführt.
+Der Frontend-Build gibt bestehende Vite-Konfigurations- und Bundlegrößen-Warnungen aus, endet aber erfolgreich. Die Docker-Prüfung validierte die Produktions-Compose-Konfiguration und baute beide Images; es wurden keine Images gestartet und keine Bereitstellung vorgenommen.
 
 ## Einschränkungen und Freigabestatus
 
