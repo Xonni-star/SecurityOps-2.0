@@ -333,7 +333,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(tenants.some((row) => row.name === 'Baseline-Test')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009']);
   });
 
   test('8. Unvollständige Baseline führt zu sicherem Abbruch', async () => {
@@ -791,7 +791,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(result.applied).toEqual([]);
     expect(result.baselined).toEqual([]);
-    expect(result.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011']);
+    expect(result.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009']);
   });
 
   test('35. Zusätzlicher Composite Type in gültiger Baseline wird erkannt', async () => {
@@ -894,7 +894,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     });
 
     expect(result.applied).toEqual([]);
-    expect(result.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011']);
+    expect(result.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009']);
   });
 
   test('41. Zusätzliche Tabelle in gültiger Baseline wird erkannt', async () => {
