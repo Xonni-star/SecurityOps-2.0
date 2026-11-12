@@ -53,7 +53,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     );
 
     testTokenA = jwt.sign(
-      { sub: testUserAId, email: 'sync.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['logbook:create'] },
+      { sub: testUserAId, email: 'sync.user@secops.local', tenantId: testTenantA, role: 'Einsatzleitung', permissions: ['logbook:create','employees:create','employees:update','employees:archive','employees:restore','qualifications:manage','employees:absence:manage','employees:absence:approve'] },
       env.JWT_SECRET,
       { expiresIn: '1h' }
     );
@@ -87,6 +87,83 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
         VALUES ($1, $2, 'KEY-SYNC-01', 'Hauptschlüssel Depot', 1) ON CONFLICT DO NOTHING;
       `, [testTenantA, siteAId]);
     });
+  });
+
+  test('Mitarbeiter-Sync wahrt Payload-IDs, Revisionen, Idempotenz, Null-Daten und Mandantengrenzen', async () => {
+    const foreignEmployeeId = await withTenantTransaction(testTenantB, async tx => {
+      const row = await tx.query("INSERT INTO employees (tenant_id,personnel_number,first_name,last_name,email,phone,role,date_of_joining) VALUES ($1,'MA-FOREIGN','Fremd','Mandant','foreign@secops.test','030','Wache','2024-01-01') RETURNING id", [testTenantB]);
+      return row.rows[0].id as string;
+    });
+    const qualificationId = await withTenantTransaction(testTenantA, async tx => {
+      const row = await tx.query("INSERT INTO employee_qualifications (tenant_id,employee_id,qualification_type,certificate_number,issue_date,expiry_date,verified,status) VALUES ($1,$2,'Sachkunde','Q-NULL','2024-01-01','2027-01-01',true,'VALID') RETURNING id", [testTenantA, guardAId]);
+      return row.rows[0].id as string;
+    });
+    const mutation = (clientUuid: string, action: string, baseVersion: number, payload: object) => ({
+      deviceId: 'employee-regression-device', mutations: [{ clientUuid, entityType: 'employee', action,
+        clientTimestamp: new Date().toISOString(), baseVersion, payload }]
+    });
+    const updateId = 'emp-update-' + Date.now();
+    const updatePayload = mutation(updateId, 'UPDATE', 1, { id: guardAId, firstName: 'OfflineAktualisiert' });
+    const first = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA).send(updatePayload);
+    expect(first.status).toBe(200);
+    expect(first.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2, serverId: guardAId });
+    const repeat = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA).send(updatePayload);
+    expect(repeat.body.data[0]).toEqual(first.body.data[0]);
+    const changedReuse = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation(updateId, 'UPDATE', 1, { id: guardAId, firstName: 'Veränderter Inhalt' }));
+    expect(changedReuse.body.data[0].status).toBe('REJECTED');
+
+    const stale = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('emp-stale-' + Date.now(), 'UPDATE', 1, { id: guardAId, firstName: 'Veraltet' }));
+    expect(stale.body.data[0]).toMatchObject({ status: 'CONFLICT', serverVersion: 2 });
+
+    const qualification = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('qual-null-' + Date.now(), 'QUALIFICATION_UPDATE', 1, { id: qualificationId, qualificationId, expiryDate: null }));
+    expect(qualification.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2, serverId: qualificationId });
+    const expiry = await withTenantTransaction(testTenantA, tx => tx.query('SELECT expiry_date FROM employee_qualifications WHERE id=$1 AND tenant_id=$2', [qualificationId, testTenantA]));
+    expect(expiry.rows[0].expiry_date).toBeNull();
+
+    const newEmployeeId = crypto.randomUUID();
+    const createdEmployee = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('emp-create-' + Date.now(), 'CREATE', 1, { id: newEmployeeId, personnelNumber: 'MA-OFFLINE-CREATE',
+        firstName: 'Neu', lastName: 'Offline', email: 'new.offline@secops.test', phone: '+49 30 111', role: 'Wachkraft',
+        status: 'Aktiv', weeklyHours: 40, hourlyRate: 20, dateOfJoining: '2025-01-01' }));
+    expect(createdEmployee.body.data[0]).toMatchObject({ status: 'SYNCED', serverId: newEmployeeId, serverVersion: 1 });
+    const archived = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('emp-delete-' + Date.now(), 'DELETE', 1, { id: newEmployeeId }));
+    expect(archived.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2 });
+    const restored = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('emp-restore-' + Date.now(), 'RESTORE', 2, { id: newEmployeeId }));
+    expect(restored.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 3 });
+
+    const createdQualificationId = crypto.randomUUID();
+    const createdQualification = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('qual-create-' + Date.now(), 'QUALIFICATION_CREATE', 1, { id: createdQualificationId, employeeId: guardAId,
+        type: 'Erste Hilfe', certificateNumber: 'EH-1', issueDate: '2024-01-01', expiryDate: '2027-01-01', verified: true, documentReference: null }));
+    expect(createdQualification.body.data[0]).toMatchObject({ status: 'SYNCED', serverId: createdQualificationId });
+
+    const createdAbsenceId = crypto.randomUUID();
+    const createdAbsence = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('absence-create-' + Date.now(), 'ABSENCE_CREATE', 1, { id: createdAbsenceId, employeeId: guardAId,
+        type: 'Urlaub', startDate: '2028-02-01', endDate: '2028-02-03', notes: 'offline test' }));
+    expect(createdAbsence.body.data[0]).toMatchObject({ status: 'SYNCED', serverId: createdAbsenceId });
+    const reviewedAbsence = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('absence-review-' + Date.now(), 'ABSENCE_REVIEW', 1, { id: createdAbsenceId, absenceId: createdAbsenceId, decision: 'APPROVED' }));
+    expect(reviewedAbsence.body.data[0]).toMatchObject({ status: 'SYNCED', serverVersion: 2 });
+
+    const crossTenant = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + testTokenA)
+      .send(mutation('emp-foreign-' + Date.now(), 'UPDATE', 1, { id: foreignEmployeeId, firstName: 'Fremdzugriff' }));
+    expect(crossTenant.body.data[0].status).toBe('REJECTED');
+    const foreignState = await withTenantTransaction(testTenantB, tx => tx.query('SELECT first_name FROM employees WHERE id=$1', [foreignEmployeeId]));
+    expect(foreignState.rows[0].first_name).toBe('Fremd');
+
+    const restrictedToken = jwt.sign({ sub: testUserAId, email: 'restricted@secops.local', tenantId: testTenantA,
+      role: 'Leser', permissions: ['logbook:create'] }, env.JWT_SECRET, { expiresIn: '1h' });
+    await pool.query("INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked) VALUES ($1,$2,$3,NOW()+interval '1 hour',false)",
+      [testUserAId, testTenantA, crypto.createHash('sha256').update(restrictedToken).digest('hex')]);
+    const denied = await request(app).post('/api/v1/employees/sync').set('Authorization', 'Bearer ' + restrictedToken)
+      .send(mutation('emp-denied-' + Date.now(), 'UPDATE', 2, { id: guardAId, firstName: 'NichtErlaubt' }));
+    expect(denied.body.data[0]).toMatchObject({ status: 'REJECTED', message: expect.stringContaining('employees:update') });
   });
 
   afterAll(async () => {

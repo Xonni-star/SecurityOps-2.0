@@ -246,6 +246,64 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(markSynced).toHaveBeenCalledWith(queued.id);
   });
 
+  test('Mitarbeiter- und Qualifikations-Updates behalten IDs, Revisionen und NULL-Werte in der Outbox', async () => {
+    const enqueue = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
+    const readPending = vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([]);
+    const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined as any);
+    vi.spyOn(offlineVault, 'getDeviceId').mockReturnValue('employee-device');
+    useSecurityStore.setState({
+      isOnline: false,
+      currentTenantId: 'tenant-frankfurt',
+      currentUserId: 'user-offline',
+      employees: [{
+        id: employeeRow.id, tenantId: 'tenant-frankfurt', revisionVersion: 4, synced: true,
+        firstName: 'Erika', lastName: 'Muster', personnelNumber: 'MA-API-1', email: 'erika@test.de',
+        phone: '+49 171 123', role: 'Wachdienstmitarbeiter', status: 'Aktiv', weeklyHours: 40,
+        hourlyRate: 19.5, dateOfJoining: '2024-01-01', assignedSiteIds: [], archivedAt: null,
+        qualifications: [{ id: '55555555-5555-5555-5555-555555555555', type: 'Sachkunde',
+          expiryDate: '2027-01-01', issueDate: '2024-01-01', certificateNumber: 'S-1',
+          verified: true, status: 'GÜLTIG', revisionVersion: 7 }], absences: []
+      } as any]
+    });
+
+    await useSecurityStore.getState().updateEmployee(employeeRow.id, { firstName: 'Erika Neu' });
+    await useSecurityStore.getState().updateQualification(employeeRow.id,
+      '55555555-5555-5555-5555-555555555555', { expiryDate: null });
+
+    const queued = useSecurityStore.getState().syncQueue;
+    expect(queued).toHaveLength(2);
+    expect(queued.find(item => item.action === 'UPDATE')).toMatchObject({
+      entityType: 'employee', baseVersion: 4,
+      payload: { id: employeeRow.id, firstName: 'Erika Neu' }
+    });
+    expect(queued.find(item => item.action === 'QUALIFICATION_UPDATE')).toMatchObject({
+      entityType: 'employee', baseVersion: 7,
+      payload: { id: '55555555-5555-5555-5555-555555555555', qualificationId: '55555555-5555-5555-5555-555555555555', expiryDate: null }
+    });
+    expect(enqueue).toHaveBeenCalledTimes(2);
+
+    const asOutbox = (item: (typeof queued)[number]) => ({
+      id: item.id, tenantId: item.tenantId, entityType: item.entityType, action: item.action,
+      payload: item.payload, occurredAt: item.createdAt, baseVersion: item.baseVersion ?? 1,
+      retryCount: 0, status: 'PENDING'
+    });
+    readPending.mockResolvedValueOnce(queued.map(asOutbox) as any);
+    mockedApi.post.mockResolvedValueOnce(queued.map(item => ({ clientUuid: item.id, status: 'SYNCED', serverVersion: (item.baseVersion || 1) + 1 })));
+    useSecurityStore.setState({ isOnline: true });
+    const result = await useSecurityStore.getState().triggerManualSync();
+    expect(result).toMatchObject({ success: 2, failed: 0, conflicts: 0 });
+    expect(mockedApi.post).toHaveBeenCalledWith('/employees/sync', expect.objectContaining({
+      deviceId: 'employee-device',
+      mutations: expect.arrayContaining([
+        expect.objectContaining({ entityType: 'employee', action: 'UPDATE', baseVersion: 4,
+          payload: { id: employeeRow.id, firstName: 'Erika Neu' } }),
+        expect.objectContaining({ entityType: 'employee', action: 'QUALIFICATION_UPDATE', baseVersion: 7,
+          payload: expect.objectContaining({ qualificationId: '55555555-5555-5555-5555-555555555555', expiryDate: null }) })
+      ])
+    }));
+    expect(markSynced).toHaveBeenCalledTimes(2);
+  });
+
   test('Regelbasierte Automatisierungsregeln bleiben tenantbezogen steuerbar', () => {
     useSecurityStore.setState({ currentTenantId: 'tenant-frankfurt', automations: [] });
     useSecurityStore.getState().addAutomationRule({
