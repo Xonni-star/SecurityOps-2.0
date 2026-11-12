@@ -20,9 +20,15 @@ Migration `012_document_management.sql` führt Kategorien, Ordner, Dokumente, Ve
 
 Audit-Ereignisse sind für die Anwendungsrolle nur les- und anlegbar. Ein Trigger weist Updates und Deletes zurück. Es gibt keinen API-Endpunkt zum physischen Löschen von Dokumenten oder Versionen.
 
+## Dienstanweisungen (SOP)
+
+Migration `013_sop_instructions.sql` ergänzt tenantgebundene Dienstanweisungen, unveränderliche Versionen und Workflowereignisse sowie Ziel- und Mitarbeiterzuweisungen. Alle SOP-Tabellen erzwingen RLS. Versions- und Auditdatensätze sind für die Anwendungsrolle nicht änder- oder löschbar; bestätigte Zuweisungen sind append-only. Objekt- und Kundenziele werden anhand zukünftiger Schichteinsätze zu aktiven Mitarbeitern aufgelöst.
+
+Die API erzwingt die Berechtigungen `sop:*` und den Ablauf Entwurf → Prüfung → Freigabe → Veröffentlichung. Ersteller dürfen nicht selbst freigeben; Prüfer und Freigebende müssen ebenfalls unterschiedliche Benutzer sein. Bestätigungen werden dem authentifizierten Konto und einer konkreten SOP-Version zugeordnet. Der SOP-Datensatz kann tenantgebunden auf ein vorhandenes DMS-Dokument verweisen; Dateien werden nicht dupliziert. Offline-Bestätigungen werden im Browser lokal vorgemerkt und erst nach serverseitiger Bestätigung als abgeschlossen behandelt. Erinnerungen werden beim Abruf berechnet; es gibt keinen zeitgesteuerten Scheduler oder automatische Eskalationszustellung.
+
 ## REST-API
 
-Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Das vollständige Request-/Response-Verzeichnis sowie Rechte stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md).
+Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md) und [SOP_API.md](./SOP_API.md).
 
 ## Betrieb
 
@@ -30,6 +36,6 @@ Die Standard-Dateigröße beträgt 10 MiB und ist über `DMS_MAX_FILE_SIZE_BYTES
 
 Es ist kein Virenscanner in der vorhandenen Deployment-Architektur enthalten. Die Scanner-Schnittstelle meldet deshalb `not_scanned`; Uploads werden nicht fälschlich als virengeprüft gekennzeichnet.
 
-## Nicht verfügbare Beziehungen
+## DMS-Beziehungen
 
-Das aktuelle Backend besitzt keine persistierten SOP-, Alarm-/Notfallplan- oder separaten Ereignis-/Dienstanweisungstabellen. Das DMS verknüpft nur vorhandene, tenantgebundene Backend-Entitäten; nicht vorhandene Beziehungen werden nicht durch frei eingegebene IDs vorgetäuscht. Für SOP- und Alarmverknüpfungen müssen zuerst deren serverseitige Fachmodelle/API ergänzt werden.
+Die DMS-Beziehungstabelle akzeptiert nur vorhandene, tenantgebundene Backend-Entitäten; SOPs sind kein polymorpher Beziehungstyp. Stattdessen verweist eine Dienstanweisung über eine tenantgebundene Fremdschlüsselspalte auf ein vorhandenes DMS-Dokument. Alarm-/Notfallplan-Datensätze besitzen weiterhin keine serverseitige Fach-API.

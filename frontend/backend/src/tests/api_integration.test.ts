@@ -13,6 +13,11 @@ const SITE_RESTRICTED_USER_EMAIL = 'api.site-restricted@secops.local';
 const DMS_RESTRICTED_USER_EMAIL = 'api.dms-restricted@secops.local';
 const DMS_RESTRICTED_ROLE = 'DMS API restricted test';
 const TENANT_BAVARIA_ID = '22222222-2222-2222-2222-222222222222';
+const TENANT_FFM_ID = '11111111-1111-1111-1111-111111111111';
+const SOP_AUTHOR_EMAIL = `sop-author-${Date.now()}@example.test`;
+const SOP_REVIEWER_EMAIL = `sop-reviewer-${Date.now()}@example.test`;
+const SOP_APPROVER_EMAIL = `sop-approver-${Date.now()}@example.test`;
+const SOP_EMPLOYEE_EMAIL = `sop-employee-${Date.now()}@example.test`;
 const clientNumber = `API-TEST-${Date.now()}`;
 const siteCode = `API-SITE-${Date.now()}`;
 const personnelNumber = `API-MA-${Date.now()}`;
@@ -25,6 +30,8 @@ let archivedCustomerSiteCode: string | undefined;
 let createdTaskId: string | undefined;
 let createdDmsDocumentId: string | undefined;
 let createdDmsFolderId: string | undefined;
+let createdSopId: string | undefined;
+let createdSopEmployeeId: string | undefined;
 const keyNumber = `API-KEY-${Date.now()}`;
 
 async function login(email: string): Promise<string> {
@@ -99,9 +106,64 @@ beforeAll(async () => {
     `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)`,
     [dmsRestricted.rows[0].id, dmsRole.rows[0].id, '11111111-1111-1111-1111-111111111111']
   );
+
+  const authorRole = await migrationPool.query("SELECT id FROM roles WHERE name='Personalverwaltung' LIMIT 1");
+  const reviewerRole = await migrationPool.query("SELECT id FROM roles WHERE name='Qualitätsmanagement' LIMIT 1");
+  const employeeRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter' LIMIT 1");
+  if (!authorRole.rows.length || !reviewerRole.rows.length || !employeeRole.rows.length) {
+    throw new Error('SOP integration test requires Personalverwaltung, Qualitätsmanagement and Wachdienstmitarbeiter roles.');
+  }
+  const sopAuthor = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Author','+49 30 100') RETURNING id`,
+    [SOP_AUTHOR_EMAIL,passwordHash]
+  );
+  const sopReviewer = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Reviewer','+49 30 101') RETURNING id`,
+    [SOP_REVIEWER_EMAIL,passwordHash]
+  );
+  const sopApprover = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Approver','+49 30 103') RETURNING id`,
+    [SOP_APPROVER_EMAIL,passwordHash]
+  );
+  const sopEmployee = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'SOP','Employee','+49 30 102') RETURNING id`,
+    [SOP_EMPLOYEE_EMAIL,passwordHash]
+  );
+  await migrationPool.query(
+    `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES
+      ($1,$2,$4),($3,$5,$4),($6,$5,$4),($7,$8,$4)`,
+    [sopAuthor.rows[0].id,authorRole.rows[0].id,sopReviewer.rows[0].id,TENANT_FFM_ID,
+      reviewerRole.rows[0].id,sopApprover.rows[0].id,sopEmployee.rows[0].id,employeeRole.rows[0].id]
+  );
+  const sopEmployeeRow = await migrationPool.query(
+    `INSERT INTO employees (tenant_id,personnel_number,first_name,last_name,email,phone,role,status,date_of_joining)
+     VALUES ($1,$2,'SOP','Employee',$3,'+49 30 102','Wachdienstmitarbeiter','Aktiv',CURRENT_DATE)
+     RETURNING id`,
+    [TENANT_FFM_ID,`SOP-INT-${Date.now()}`,SOP_EMPLOYEE_EMAIL]
+  );
+  createdSopEmployeeId = sopEmployeeRow.rows[0].id;
 });
 
 afterAll(async () => {
+  if (createdSopId) {
+    const cleanup = await migrationPool.connect();
+    try {
+      await cleanup.query('SET session_replication_role = replica');
+      await cleanup.query('DELETE FROM sop_assignments WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_assignment_targets WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_events WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('UPDATE sop_instructions SET current_version_id=NULL,draft_version_id=NULL WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_versions WHERE tenant_id=$1 AND sop_id=$2', [TENANT_FFM_ID,createdSopId]);
+      await cleanup.query('DELETE FROM sop_instructions WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopId]);
+    } finally {
+      await cleanup.query('SET session_replication_role = origin');
+      cleanup.release();
+    }
+  }
   if (createdDmsDocumentId) {
     const cleanup = await migrationPool.connect();
     try {
@@ -144,6 +206,16 @@ afterAll(async () => {
   await migrationPool.query('DELETE FROM users WHERE email = $1', [DMS_RESTRICTED_USER_EMAIL]);
   await migrationPool.query('DELETE FROM role_permissions WHERE role_id IN (SELECT id FROM roles WHERE name=$1)', [DMS_RESTRICTED_ROLE]);
   await migrationPool.query('DELETE FROM roles WHERE name=$1', [DMS_RESTRICTED_ROLE]);
+  await migrationPool.query(
+    'DELETE FROM user_sessions WHERE user_id IN (SELECT id FROM users WHERE email = ANY($1::text[]))',
+    [[SOP_AUTHOR_EMAIL,SOP_REVIEWER_EMAIL,SOP_APPROVER_EMAIL,SOP_EMPLOYEE_EMAIL]]
+  );
+  await migrationPool.query(
+    'DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = ANY($1::text[]))',
+    [[SOP_AUTHOR_EMAIL,SOP_REVIEWER_EMAIL,SOP_APPROVER_EMAIL,SOP_EMPLOYEE_EMAIL]]
+  );
+  await migrationPool.query('DELETE FROM employees WHERE id=$1', [createdSopEmployeeId ?? null]);
+  await migrationPool.query('DELETE FROM users WHERE email = ANY($1::text[])', [[SOP_AUTHOR_EMAIL,SOP_REVIEWER_EMAIL,SOP_APPROVER_EMAIL,SOP_EMPLOYEE_EMAIL]]);
   await pool.end();
   await migrationPool.end();
 });
@@ -694,6 +766,135 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(audit.body.data.map((item: any) => item.action)).toEqual(
       expect.arrayContaining(['created', 'uploaded', 'downloaded', 'version_created', 'version_restored', 'archived', 'restored'])
     );
+  });
+
+  test('SOP-Workflow veröffentlicht nur geprüfte Versionen und verlangt Kenntnisnahme je Version', async () => {
+    const authorToken = await login(SOP_AUTHOR_EMAIL);
+    const reviewerToken = await login(SOP_REVIEWER_EMAIL);
+    const approverToken = await login(SOP_APPROVER_EMAIL);
+    const employeeToken = await login(SOP_EMPLOYEE_EMAIL);
+    const todayResult = await migrationPool.query('SELECT CURRENT_DATE::text AS today');
+    const today = todayResult.rows[0].today;
+    const sopNumber = `SOP-API-${Date.now()}`;
+
+    const invalidDates = await request(app).post('/api/v1/sops').set(authHeaders(authorToken)).send({
+      sopNumber, title: 'Ungültige Frist', content: 'Test',
+      effectiveFrom: '2027-01-02', effectiveUntil: '2027-01-01'
+    });
+    expect(invalidDates.status).toBe(400);
+
+    const created = await request(app).post('/api/v1/sops').set(authHeaders(authorToken)).send({
+      sopNumber, title: 'SOP API Integration', description: 'Versionierte Dienstanweisung',
+      category: 'Allgemeine Dienstanweisung', content: 'Version 1 – Ausgangsanweisung',
+      mandatoryAcknowledgment: true, effectiveFrom: today
+    });
+    expect(created.status).toBe(201);
+    createdSopId = created.body.data.id;
+    expect(created.body.data.description).toBe('Versionierte Dienstanweisung');
+
+    const beforeApproval = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    expect(beforeApproval.status).toBe(200);
+    expect(beforeApproval.body.data).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: createdSopId })
+    ]));
+
+    const submitted = await request(app).post(`/api/v1/sops/${createdSopId}/submit`)
+      .set(authHeaders(authorToken)).send({});
+    expect(submitted.status).toBe(201);
+    const reviewed = await request(app).post(`/api/v1/sops/${createdSopId}/review`)
+      .set(authHeaders(reviewerToken)).send({ decision: 'reviewed', comment: 'Prüfung abgeschlossen.' });
+    expect(reviewed.status).toBe(200);
+    const selfApproved = await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(reviewerToken)).send({});
+    expect(selfApproved.status).toBe(403);
+    const approved = await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(approverToken)).send({});
+    expect(approved.status).toBe(200);
+    const published = await request(app).post(`/api/v1/sops/${createdSopId}/publish`)
+      .set(authHeaders(approverToken)).send({});
+    expect(published.status).toBe(200);
+
+    const assigned = await request(app).post(`/api/v1/sops/${createdSopId}/assignments`)
+      .set(authHeaders(authorToken)).send({
+        targets: [{ type: 'employee', id: createdSopEmployeeId }],
+        dueAt: new Date(Date.now() + 5 * 86400000).toISOString()
+      });
+    expect(assigned.status).toBe(201);
+    const currentFirstVersion = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    const firstInstruction = currentFirstVersion.body.data.find((item: any) => item.id === createdSopId);
+    expect(firstInstruction).toMatchObject({
+      version: 1,
+      content: 'Version 1 – Ausgangsanweisung',
+      current_user_acknowledgment: 'unacknowledged'
+    });
+    expect(firstInstruction.assignment_id).toBeTruthy();
+
+    const acknowledgement = await request(app).post(
+      `/api/v1/sops/assignments/${firstInstruction.assignment_id}/acknowledge`
+    ).set(authHeaders(employeeToken)).send({
+      confirmed: true, clientMutationId: `sop-ack-${Date.now()}`, capturedAt: new Date().toISOString()
+    });
+    expect(acknowledgement.status).toBe(200);
+    expect(acknowledgement.body.data.acknowledged_at).toBeTruthy();
+    expect(acknowledgement.body.data.server_received_at).toBeTruthy();
+
+    const draftVersion = await request(app).post(`/api/v1/sops/${createdSopId}/versions`)
+      .set(authHeaders(authorToken)).send({
+        content: 'Version 2 – aktualisierte Anweisung', changeReason: 'Arbeitsablauf wurde aktualisiert.'
+      });
+    expect(draftVersion.status).toBe(201);
+    const submittedSecond = await request(app).post(`/api/v1/sops/${createdSopId}/submit`)
+      .set(authHeaders(authorToken)).send({});
+    expect(submittedSecond.status).toBe(201);
+    expect(submittedSecond.body.data.version).toBe(2);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/review`)
+      .set(authHeaders(reviewerToken)).send({ decision: 'reviewed', comment: 'Version 2 geprüft.' })).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(reviewerToken)).send({})).status).toBe(403);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/publish`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+
+    const currentSecondVersion = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    const secondInstruction = currentSecondVersion.body.data.find((item: any) => item.id === createdSopId);
+    expect(secondInstruction).toMatchObject({
+      version: 2,
+      content: 'Version 2 – aktualisierte Anweisung',
+      current_user_acknowledgment: 'unacknowledged'
+    });
+    expect(secondInstruction.assignment_id).not.toBe(firstInstruction.assignment_id);
+
+    const report = await request(app).get('/api/v1/sops/reports').set(authHeaders(authorToken));
+    expect(report.status).toBe(200);
+    expect(report.body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ assignment_id: firstInstruction.assignment_id, status: 'superseded', acknowledged_at: expect.any(String) }),
+      expect.objectContaining({ assignment_id: secondInstruction.assignment_id, status: 'pending', acknowledged_at: null })
+    ]));
+    expect((await request(app).get('/api/v1/sops/reports').set(authHeaders(employeeToken))).status).toBe(403);
+
+    const tomorrow = new Date(`${today}T00:00:00.000Z`);
+    tomorrow.setUTCDate(tomorrow.getUTCDate() + 1);
+    const futureVersion = await request(app).post(`/api/v1/sops/${createdSopId}/versions`)
+      .set(authHeaders(authorToken)).send({
+        content: 'Noch nicht wirksame Version', changeReason: 'Gültigkeitsbeginn ist morgen.',
+        effectiveFrom: tomorrow.toISOString().slice(0, 10)
+      });
+    expect(futureVersion.status).toBe(201);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/submit`)
+      .set(authHeaders(authorToken)).send({})).status).toBe(201);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/review`)
+      .set(authHeaders(reviewerToken)).send({ decision: 'reviewed', comment: 'Zukünftige Version geprüft.' })).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(reviewerToken)).send({})).status).toBe(403);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/approve`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+    expect((await request(app).post(`/api/v1/sops/${createdSopId}/publish`)
+      .set(authHeaders(approverToken)).send({})).status).toBe(200);
+    const beforeEffectiveDate = await request(app).get('/api/v1/sops').set(authHeaders(employeeToken));
+    expect(beforeEffectiveDate.body.data).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: createdSopId })
+    ]));
   });
 
   test('Öffentlicher Health-Endpunkt gibt keine Datenbankfehlerdetails preis', async () => {

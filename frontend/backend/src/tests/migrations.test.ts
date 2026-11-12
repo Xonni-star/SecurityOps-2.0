@@ -111,14 +111,45 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013']);
     expect(result.baselined).toEqual([]);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013']);
     expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
     expect(await tableExists(db, 'sync_conflict_resolution_receipts')).toBe(true);
     expect(await tableExists(db, 'documents')).toBe(true);
+    const sopSecurity = await queryInDatabase<{
+      relname: string;
+      row_security: boolean;
+      force_row_security: boolean;
+    }>(
+      db,
+      `SELECT c.relname, c.relrowsecurity AS row_security, c.relforcerowsecurity AS force_row_security
+       FROM pg_class c
+       JOIN pg_namespace n ON n.oid=c.relnamespace
+       WHERE n.nspname='public'
+         AND c.relname IN ('sop_instructions','sop_versions','sop_events','sop_assignment_targets','sop_assignments')
+       ORDER BY c.relname`
+    );
+    expect(sopSecurity).toHaveLength(5);
+    expect(sopSecurity.every((row) => row.row_security && row.force_row_security)).toBe(true);
+    const immutablePrivileges = await queryInDatabase<{
+      table_name: string;
+      can_update: boolean;
+      can_delete: boolean;
+    }>(
+      db,
+      `SELECT table_name,
+         has_table_privilege('secops_app_user', format('public.%I', table_name), 'UPDATE') AS can_update,
+         has_table_privilege('secops_app_user', format('public.%I', table_name), 'DELETE') AS can_delete
+       FROM unnest(ARRAY['sop_versions','sop_events']) AS t(table_name)
+       ORDER BY table_name`
+    );
+    expect(immutablePrivileges).toEqual([
+      { table_name: 'sop_events', can_update: false, can_delete: false },
+      { table_name: 'sop_versions', can_update: false, can_delete: false }
+    ]);
 
     const dmsSecurity = await queryInDatabase<{
       row_security: boolean;
@@ -216,7 +247,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(second.applied).toEqual([]);
     expect(second.baselined).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013']);
 
     const after = await historyRows(db);
     expect(after).toEqual(before);
@@ -331,7 +362,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(await tableExists(db, 'migration_marker_006')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013']);
   });
 
   test('4. Fehlerhafte Migration wird nicht registriert und zurückgerollt', async () => {
@@ -392,12 +423,16 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const dmsMigrationPath = path.join(dir, '012_document_management.sql');
     const dmsMigration = fs.readFileSync(dmsMigrationPath, 'utf8');
     fs.unlinkSync(dmsMigrationPath);
+    const sopMigrationPath = path.join(dir, '013_sop_instructions.sql');
+    const sopMigration = fs.readFileSync(sopMigrationPath, 'utf8');
+    fs.unlinkSync(sopMigrationPath);
     const employeeMigrationPath = path.join(dir, '007_employee_lifecycle.sql');
     const employeeMigration = fs.readFileSync(employeeMigrationPath, 'utf8');
     fs.unlinkSync(employeeMigrationPath);
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
     fs.writeFileSync(employeeMigrationPath, employeeMigration);
     fs.writeFileSync(dmsMigrationPath, dmsMigration);
+    fs.writeFileSync(sopMigrationPath, sopMigration);
 
     await queryInDatabase(
       db,
@@ -412,14 +447,14 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['005', '006', '007', '009', '012']);
+    expect(result.applied).toEqual(['005', '006', '007', '009', '012', '013']);
     expect(result.baselined).toEqual(['001', '002', '003', '004']);
 
     const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
     expect(tenants.some((row) => row.name === 'Baseline-Test')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '012']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '012', '013']);
   });
 
   test('8. Unvollständige Baseline führt zu sicherem Abbruch', async () => {
@@ -459,6 +494,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const dir = makeMigrationsDir();
     fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
     fs.rmSync(path.join(dir, '012_document_management.sql'), { force: true });
+    fs.rmSync(path.join(dir, '013_sop_instructions.sql'), { force: true });
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
     return { db, dir };
   }
@@ -656,9 +692,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013']);
     expect(result.baselined).toEqual([]);
-    expect((await historyRows(db))).toHaveLength(10);
+    expect((await historyRows(db))).toHaveLength(11);
   });
 
   test('26. Fremde Tabelle verhindert die Einstufung als leere Datenbank', async () => {
@@ -1057,7 +1093,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012']);
+    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013']);
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1065,7 +1101,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013']);
   });
 
   test('47. Fremdes Objekt bei Migration oberhalb 004 wird erkannt', async () => {
@@ -1078,7 +1114,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(11);
+    expect(await historyRows(db)).toHaveLength(12);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {

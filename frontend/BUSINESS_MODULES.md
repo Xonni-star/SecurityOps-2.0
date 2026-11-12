@@ -9,7 +9,7 @@
 | **Dienstplanung** | Vollständig | Soll/Ist-Vergleich, Qualifikationsprüfung, ArbZG-Konflikterkennung | Mitarbeiter, Objekte, Wachbuch |
 | **Digitales Wachbuch** | Vollständig | Revisionssichere Protokollierung, Rundgänge, Schichtwechsel, lückenlose Historie | Vorfälle, Aufgaben, Objekte |
 | **Vorfallmanagement** | Vollständig | Workflow: Erfassung -> Bewertung -> Zuweisung -> Maßnahme -> Eskalation -> Abschluss | Aufgaben, DMS, Benachrichtigungen |
-| **Qualitätsmanagement & SOP** | Vollständig | Dienstanweisungen mit digitaler Quittierungsmatrix nach DIN 77200 | Mitarbeiter, Objekte, DMS |
+| **Qualitätsmanagement & SOP** | Implementiert, nicht deployed | Versionierte Dienstanweisungen mit Prüfung/Freigabe, Zuweisungen und digitaler Kenntnisnahme; Erinnerungen und JSON-Berichte. Offline-Vormerkungen werden erst nach Serverbestätigung abgeschlossen; kein Hintergrundscheduler/CSV-/PDF-Export. | Mitarbeiter, Objekte, DMS |
 | **Alarmmanagement** | Vollständig | BMA/EMA Eskalationsketten, Notfall-Ansprechpartner, Evakuierungspläne | Objekte, Notfall-SOPs |
 | **Schlüsselverwaltung** | Vollständig | Generalschlüssel-Depot, Ausgabe-/Rücknahmeprotokolle, automatische Verzugserkennung | Mitarbeiter, Objekte, Aufgaben |
 | **Aufgaben & Maßnahmen** | Vollständig | Modulübergreifende Aufgaben-Pipeline (generiert aus Vorfällen, Schlüsselverzug, Audit-Mängeln) | Vorfälle, Schlüssel, QM |

@@ -3,8 +3,8 @@
 Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
 
 > **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.**
-> Das DMS ist lokal implementiert und verifiziert, aber nicht deployed. SOPs, Alarme/Notfallpläne, Übergaben und Streifenkontrollen sind noch offen.
-> Verbindliche, tagesaktuelle Übersicht: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md).
+> DMS und SOP/Dienstanweisungen sind im Repository implementiert, aber nicht deployed. Alarme/Notfallpläne, Übergaben und Streifenkontrollen sind weiterhin offen.
+> Historischer Gesamtstatus: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md); aktuelle SOP-Umsetzung: [SOP_IMPLEMENTATION_REPORT.md](./SOP_IMPLEMENTATION_REPORT.md).
 
 ---
 
@@ -84,7 +84,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Aufgaben | CRUD fertig | — |
 | Wachbuch | teilweise | Lesen persistiert; Schreiben über Outbox/Sync |
 | Dokumente | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte PostgreSQL-Verwaltung, private Dateispeicherung, Versionen, Kategorien, Ordner, Audit und REST-API; Einschränkungen siehe [DMS-Bericht](./DMS_IMPLEMENTATION_REPORT.md) |
-| SOPs | offen | Keine Tabelle, kein Endpunkt |
+| SOPs | implementiert, nicht deployed | Versionierter Prüf-/Freigabe-Workflow, Zuweisungen, Bestätigungen, JSON-Berichte; Einschränkungen siehe [SOP-API](./frontend/SOP_API.md) und [Implementierungsbericht](./SOP_IMPLEMENTATION_REPORT.md) |
 | Alarme/Notfallpläne | offen | Keine Tabelle, kein Endpunkt |
 | Übergaben | offen | Nur lokales Mobile-Modul |
 | Streifenkontrollen | offen | Nur lokales Mobile-Modul |
