@@ -66,8 +66,10 @@ app.get('/api/v1/health', async (req, res) => {
       database: dbRes.rows[0].healthy ? 'PostgreSQL 16+ Connected (RLS Active)' : 'DB Unhealthy',
       timestamp: new Date().toISOString()
     });
-  } catch (err: any) {
-    res.status(500).json({ status: 'DOWN', database: 'Disconnected', error: err.message });
+  } catch {
+    // Health endpoints are public; never expose driver or connection details.
+    console.error('[HEALTH CHECK] Database readiness query failed');
+    res.status(500).json({ status: 'DOWN', database: 'Disconnected', timestamp: new Date().toISOString() });
   }
 });
 

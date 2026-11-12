@@ -11,17 +11,21 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
     return;
   }
 
+  const statusCode = Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode <= 599
+    ? err.statusCode
+    : 500;
+
+  // Keep diagnostics out of client responses and avoid logging exception text
+  // or stacks, which can contain SQL, credentials, or personal data.
   console.error('[API ERROR]', {
     path: req.path,
     method: req.method,
-    error: err.message,
-    stack: err.stack
+    statusCode,
+    errorName: typeof err?.name === 'string' ? err.name : 'Error'
   });
 
-  const statusCode = err.statusCode || 500;
   res.status(statusCode).json({
     success: false,
-    message: err.message || 'Interner Serverfehler',
-    errors: err.errors || undefined
+    message: statusCode >= 500 ? 'Interner Serverfehler' : (err.message || 'Anfrage fehlgeschlagen')
   });
 }

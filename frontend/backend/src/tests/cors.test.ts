@@ -33,7 +33,7 @@ describe('SecurityOps 2.0 - CORS Whitelist & Header Security Tests', () => {
 
     // Express CORS wirft Fehler bei unbekanntem Origin
     expect(res.status).toBe(500);
-    expect(res.body.message).toContain('CORS blockiert');
+    expect(res.body.message).toBe('Interner Serverfehler');
   });
 
   test('3. Anfrage ohne Origin (z. B. Same-Origin oder interner Healthcheck) wird zugelassen', async () => {
@@ -101,6 +101,6 @@ describe('SecurityOps 2.0 - CORS Whitelist & Header Security Tests', () => {
 
     expect(res.status).toBe(500);
     expect(res.headers['access-control-allow-origin']).toBeUndefined();
-    expect(res.body.message).toContain('CORS blockiert');
+    expect(res.body.message).toBe('Interner Serverfehler');
   });
 });
