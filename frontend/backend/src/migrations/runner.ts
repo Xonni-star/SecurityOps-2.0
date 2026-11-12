@@ -1835,8 +1835,8 @@ if (require.main === module) {
       );
       process.exit(0);
     })
-    .catch((error) => {
-      console.error('[MIGRATION FAILED]', error instanceof Error ? error.message : error);
+    .catch(() => {
+      console.error('[MIGRATION FAILED] Migration process aborted; exception details were suppressed.');
       process.exit(1);
     });
 }

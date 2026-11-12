@@ -13,8 +13,8 @@ async function bootstrap() {
       console.log(`[CORS WHITELIST] Erlaubte Origins: ${env.ALLOWED_CORS_ORIGINS.join(', ')}`);
       console.log(`[API V1 HEALTH] http://localhost:${env.PORT}/api/v1/health`);
     });
-  } catch (err) {
-    console.error('[FATAL SERVER START ERROR]', err);
+  } catch {
+    console.error('[FATAL SERVER START ERROR] Startup aborted; exception details were suppressed.');
     process.exit(1);
   }
 }

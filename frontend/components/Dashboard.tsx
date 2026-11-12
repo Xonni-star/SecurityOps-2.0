@@ -15,16 +15,7 @@ import {
 } from 'lucide-react';
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, BarChart, Bar } from 'recharts';
 import { useSecurityStore } from '../store';
-
-const activityData = [
-  { time: '00:00', patrols: 12, incidents: 0 },
-  { time: '04:00', patrols: 18, incidents: 1 },
-  { time: '08:00', patrols: 34, incidents: 2 },
-  { time: '12:00', patrols: 42, incidents: 1 },
-  { time: '16:00', patrols: 38, incidents: 3 },
-  { time: '20:00', patrols: 28, incidents: 0 },
-  { time: '23:59', patrols: 22, incidents: 1 }
-];
+import { buildActivitySeries, buildScheduledHoursBySite } from '../dashboardMetrics';
 
 export const Dashboard: React.FC = () => {
   const {
@@ -46,18 +37,20 @@ export const Dashboard: React.FC = () => {
   const shifts = getTenantShifts();
   const guardBook = getTenantGuardBook();
   const keys = getTenantKeys();
+  const now = new Date();
+  const todayKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const todayShifts = shifts.filter((shift) => shift.date === todayKey);
 
   const activeEmployees = employees.filter((e) => e.status === 'Aktiv').length;
   const sickEmployees = employees.filter((e) => e.status === 'Krank').length;
-  const openShifts = shifts.filter((s) => s.status === 'Offen').length;
   const criticalIncidents = guardBook.filter((g) => g.priority === 'Kritisch' && !g.resolved);
   const issuedKeys = keys.filter((k) => k.status === 'Ausgegeben').length;
+  const keyLossReports = keys.filter((k) => k.status === 'Verlustmeldung').length;
 
-  const siteHoursData = sites.map((s) => ({
-    name: s.name.split(' ')[0],
-    soll: (s.requiredGuardsDay + s.requiredGuardsNight) * 12,
-    ist: (s.requiredGuardsDay + s.requiredGuardsNight) * 12
-  }));
+  const activityData = buildActivitySeries(guardBook, now);
+  const siteHoursData = buildScheduledHoursBySite(shifts, sites, now);
+  const totalPlannedHours = siteHoursData.reduce((sum, site) => sum + site.plannedHours, 0);
+  const staffedShiftsToday = todayShifts.filter((shift) => shift.status !== 'Offen').length;
 
   const expiringQualifications = employees.flatMap((emp) =>
     emp.qualifications
@@ -122,7 +115,7 @@ export const Dashboard: React.FC = () => {
           <div className="mt-2 text-[11px] text-slate-400 flex items-center gap-1">
             <span className="text-amber-400 font-medium">{sickEmployees} Krank</span>
             <span>•</span>
-            <span className="text-emerald-400">Einsatzbereitschaft 95%</span>
+            <span>{expiringQualifications.length} Qualifikationshinweise</span>
           </div>
         </div>
 
@@ -138,8 +131,8 @@ export const Dashboard: React.FC = () => {
             <span className="text-2xl font-bold text-white">{sites.length}</span>
             <span className="text-xs text-slate-400">Standorte ({clients.length} Mandanten)</span>
           </div>
-          <div className="mt-2 text-[11px] text-emerald-400">
-            DIN 77200 Zertifiziert
+          <div className={`mt-2 text-[11px] ${tenant.din77200Certified ? 'text-emerald-400' : 'text-slate-400'}`}>
+            {tenant.din77200Certified ? 'DIN 77200 Zertifizierung hinterlegt' : 'Keine DIN 77200 Zertifizierung hinterlegt'}
           </div>
         </div>
 
@@ -152,15 +145,15 @@ export const Dashboard: React.FC = () => {
             </div>
           </div>
           <div className="mt-3 flex items-baseline gap-2">
-            <span className="text-2xl font-bold text-white">{shifts.length - openShifts} / {shifts.length}</span>
-            {openShifts > 0 ? (
-              <span className="text-xs text-rose-400 font-semibold">{openShifts} Offen!</span>
+            <span className="text-2xl font-bold text-white">{staffedShiftsToday} / {todayShifts.length}</span>
+            {todayShifts.some((shift) => shift.status === 'Offen') ? (
+              <span className="text-xs text-rose-400 font-semibold">{todayShifts.filter((shift) => shift.status === 'Offen').length} Offen</span>
             ) : (
-              <span className="text-xs text-emerald-400 font-semibold">Vollständig</span>
+              <span className="text-xs text-emerald-400 font-semibold">Keine offenen Schichten</span>
             )}
           </div>
           <div className="mt-2 text-[11px] text-slate-400">
-            ArbZG-Ruhezeiten geprüft
+            Anzeige geplanter Schichten; keine Rechtskonformitätsprüfung
           </div>
         </div>
 
@@ -176,8 +169,8 @@ export const Dashboard: React.FC = () => {
             <span className="text-2xl font-bold text-white">{issuedKeys}</span>
             <span className="text-xs text-slate-400">von {keys.length} Medien</span>
           </div>
-          <div className="mt-2 text-[11px] text-emerald-400">
-            0 Verlustmeldungen
+          <div className={`mt-2 text-[11px] ${keyLossReports > 0 ? 'text-rose-400' : 'text-slate-400'}`}>
+            {keyLossReports} Verlustmeldungen
           </div>
         </div>
       </div>
@@ -214,11 +207,10 @@ export const Dashboard: React.FC = () => {
             <div>
               <h3 className="text-sm font-bold text-slate-200 flex items-center gap-2">
                 <TrendingUp className="w-4 h-4 text-blue-400" />
-                Kontrollgang-Aktivität & Meldungsfrequenz (24h)
+                Wachbuchaktivität (letzte 24h)
               </h3>
-              <p className="text-xs text-slate-500">Elektronische Kontrollpunkt-Scans im Verhältnis zu Vorkommnissen</p>
+              <p className="text-xs text-slate-500">Erfasste Kontrollgänge und meldepflichtige Ereignisse aus den Mandantendaten</p>
             </div>
-            <span className="text-xs text-slate-400 font-mono">100% Soll</span>
           </div>
 
           <div className="h-64 w-full">
@@ -248,27 +240,25 @@ export const Dashboard: React.FC = () => {
         <div className="p-5 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-sm flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between mb-2">
-              <h3 className="text-sm font-bold text-slate-200">Soll/Ist Stunden (Mandant)</h3>
-              <span className="text-[11px] text-emerald-400 font-mono font-bold">DIN 77200</span>
+              <h3 className="text-sm font-bold text-slate-200">Geplante Schichtstunden heute</h3>
             </div>
-            <p className="text-xs text-slate-500 mb-4">Vertragliche Bewachungsstunden nach Objekten</p>
+            <p className="text-xs text-slate-500 mb-4">Summe der heute hinterlegten Schichtzeiten je Objekt</p>
 
             <div className="h-48 w-full">
-              <ResponsiveContainer width="100%" height="100%">
+              {siteHoursData.length === 0 ? <p className="pt-12 text-center text-xs text-slate-500">Keine Schichten für heute hinterlegt.</p> : <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={siteHoursData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
                   <XAxis dataKey="name" stroke="#475569" fontSize={10} tickLine={false} />
                   <YAxis stroke="#475569" fontSize={10} tickLine={false} />
                   <Tooltip contentStyle={{ backgroundColor: '#0f172a', borderColor: '#1e293b', borderRadius: '8px', fontSize: '11px' }} />
-                  <Bar dataKey="soll" name="Soll-Std." fill="#334155" radius={[4, 4, 0, 0]} />
-                  <Bar dataKey="ist" name="Ist-Std." fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="plannedHours" name="Geplante Std." fill="#3b82f6" radius={[4, 4, 0, 0]} />
                 </BarChart>
-              </ResponsiveContainer>
+              </ResponsiveContainer>}
             </div>
           </div>
 
           <div className="pt-3 border-t border-slate-800 flex justify-between text-xs text-slate-400">
-            <span>Mandanten-Erfüllung:</span>
-            <span className="font-semibold text-slate-200">100% Planerfüllung</span>
+            <span>Geplante Stunden:</span>
+            <span className="font-semibold text-slate-200">{totalPlannedHours.toLocaleString('de-DE')} Std.</span>
           </div>
         </div>
       </div>

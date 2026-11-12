@@ -182,3 +182,15 @@ Dieser Abschnitt aktualisiert ausschließlich den Veröffentlichungsstatus; die 
 - PR #1 (`35d4cdb1b98f6f0219ec8e6dc88b6683c95f9fee`) und PR #2 (`3c9f68ed0d81edcd2db923b3e4e2c909e8baae12`) sind beide **MERGED**; PR #2 wurde am 2026-11-12 12:18:52 UTC gemergt. Damit sind die Migration-009-Wiederholungstests und der aktualisierte historische Audit-Nachtrag auf `main`.
 - Für den exakten `main`-Merge-Commit `7341ff21ed410c751d4019c434a01e9e9e8f3df8` ist GitHub CI erfolgreich: https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43216766220. Der CD-Release-Lauf ist ebenfalls erfolgreich: https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43217031499. Beide Läufe wurden für denselben SHA verifiziert.
 - Diese erfolgreichen Pipelines belegen die ausgeführten CI-/CD-Jobs, nicht vollständige Produktabnahme oder Produktionsreife. Die offenen Risiken aus SEC-01/04/05 und die nicht fertiggestellten Module/Workflows bleiben Gegenstand weiterer Arbeit.
+
+## 13. Aktueller GitHub- und Verifikationsstand (2026-11-12)
+
+Der aktuelle Stand wurde live auf GitHub und lokal auf `origin/main` abgefragt. Er ersetzt die historischen Main-Snapshots in §12.
+
+- `main`: **`f0e92c95b3372fea545f9c106d249c064ec3112b`**. PR #4 mit Fehlerredaktion wurde am 2026-11-12 gemergt, danach durch PR #5 (`Revert "security: redact internal API error details"`) zurückgenommen. Fehlerredaktion im Express-Error-Handler und Health-Endpunkt ist daher **nicht** im aktuellen `main` enthalten.
+- Für den exakten aktuellen `main`-SHA sind GitHub CI `43222598903` und CD `43222863736` beide **success**. Diese prüfen den Stand nach dem Revert, nicht den Fehlerredaktions-Fix.
+- CI für PR #4 `43221432183` scheiterte im Backend: **151/153 Jest-Tests bestanden**; zwei CORS-Tests erwarteten den früheren CORS-Fehlertext statt der für 5xx vorgesehenen generischen Meldung. Der Health-Endpunkt-Integrationstest und die Error-Handler-Tests bestanden. Frontend-, Root- und Docker-Jobs waren erfolgreich.
+- Die betroffenen CORS-Assertions wurden auf dem bisherigen Feature-Branch in `ec3b263` auf die generische 5xx-Meldung angepasst. Das ist keine neue PR gegen den aktuellen `main` und lokal nicht mit PostgreSQL verifiziert.
+- Lokale Baseline auf `main`: Frontend Vitest **24/24 bestanden**, Frontend-Produktionsbuild und Backend-TypeScript-Build bestanden. Backend-Jest/PostgreSQL, Docker-Builds, Dependency-Scan und Browser-E2E wurden dabei nicht lokal ausgeführt.
+
+**Nächster sicherer Schritt:** den Fehlerredaktions-Fix auf einem neuen Branch vom aktuellen `main` erneut als zusammenhängende Änderung mit passenden CORS-Assertions einreichen und den vollständigen PostgreSQL-16-CI-Lauf abwarten. Gesamtprojektabnahme, Offline-/Datenschutzabnahme und Produktionsreife bleiben offen; keine produktive Freigabe wird behauptet.

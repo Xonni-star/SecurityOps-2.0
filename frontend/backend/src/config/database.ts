@@ -9,8 +9,8 @@ export const pool = new Pool({
   connectionTimeoutMillis: 5000
 });
 
-pool.on('error', (err) => {
-  console.error('[POSTGRES POOL FEHLER]', err);
+pool.on('error', () => {
+  console.error('[POSTGRES POOL FEHLER] Idle database client reported an error.');
 });
 
 // 2. Privilegierter Pool AUSSCHLIESSLICH für Migrationen (secops_admin)
@@ -20,8 +20,8 @@ export const migrationPool = new Pool({
   connectionTimeoutMillis: 5000
 });
 
-migrationPool.on('error', (err) => {
-  console.error('[POSTGRES MIGRATION POOL FEHLER]', err);
+migrationPool.on('error', () => {
+  console.error('[POSTGRES MIGRATION POOL FEHLER] Idle migration client reported an error.');
 });
 
 /**
@@ -77,8 +77,8 @@ export async function withTenantTransaction<T>(
   } catch (error) {
     try {
       await client.query('ROLLBACK');
-    } catch (rbErr) {
-      console.error('[POSTGRES ROLLBACK FEHLER]', rbErr);
+    } catch {
+      console.error('[POSTGRES ROLLBACK FEHLER] Transaction rollback failed.');
     }
     throw error;
   } finally {
@@ -109,8 +109,8 @@ export async function withSystemTransaction<T>(
   } catch (error) {
     try {
       await client.query('ROLLBACK');
-    } catch (rbErr) {
-      console.error('[POSTGRES ROLLBACK FEHLER]', rbErr);
+    } catch {
+      console.error('[POSTGRES ROLLBACK FEHLER] System transaction rollback failed.');
     }
     throw error;
   } finally {
