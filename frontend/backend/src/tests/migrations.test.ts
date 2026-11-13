@@ -913,7 +913,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
   test('7. Bestehende Datenbank mit 001–005 wird als Baseline übernommen', async () => {
     const db = await createTestDatabase();
-    const dir = makeMigrationsDir({}, ['030_service_planning.sql']);
+    const dir = makeMigrationsDir();
     const alarmMigrationPath = path.join(dir,'015_alarm_emergency_management.sql');
     const alarmMigration = fs.readFileSync(alarmMigrationPath,'utf8');
     fs.unlinkSync(alarmMigrationPath);
