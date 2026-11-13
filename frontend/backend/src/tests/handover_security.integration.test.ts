@@ -161,7 +161,6 @@ beforeAll(async () => {
   await createEmployee('Mapping Target');
   await createEmployee('Duplicate Target');
   await createEmployee('Self-link Target');
-  await createEmployee('Other outgoing', userIds.otherOutgoing);
 
   tokens = {
     identityAdmin: await login(emails.identityAdmin),
@@ -284,12 +283,12 @@ describe('Handover authorization and persistence regressions (PostgreSQL/API)', 
     expect(afterAuthorizedAudit.rows[0].count).toBe(beforeAudit.rows[0].count + 1);
   });
 
-  test('a different authorized actor cannot reuse another participant’s confirmation mutation ID', async () => {
+  test('a different authorized account cannot replay a confirmation after participant remapping', async () => {
     const handoverId = await createHandover();
     await migrationPool.query(
-      `INSERT INTO handover_participants (tenant_id,handover_id,employee_id,participant_role)
-       VALUES ($1,$2,$3,'handover')`,
-      [tenantId, handoverId, employeeIds[5]]
+      `UPDATE employees SET account_user_id=$1
+       WHERE tenant_id=$2 AND id=$3`,
+      [userIds.otherOutgoing, tenantId, employeeIds[0]]
     );
     const clientMutationId = `foreign-${randomUUID()}`;
     const capturedAt = new Date().toISOString();
