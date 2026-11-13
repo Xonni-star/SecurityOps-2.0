@@ -3,7 +3,14 @@
 // Behandelt transaction.onerror und transaction.onabort als echte Fehler. Keine verschluckten Fehler!
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
+
+function patrolMutationOrder(mutation: OutboxMutation): number {
+  if (mutation.entityType !== 'patrol') return 0;
+  if (mutation.payload?.recordType === 'round_start') return 0;
+  if (mutation.payload?.recordType === 'round_complete') return 2;
+  return 1;
+}
 
 export interface OutboxMutation {
   id: string; // Eindeutige client_mutation_id (UUID v4)
@@ -79,7 +86,21 @@ interface StoredPatrolCheckpointCache {
   tenantId: string;
   userId: string;
   checkpoints: Array<Record<string, unknown>>;
+  routes?: Array<Record<string, unknown>>;
   cachedAt: string;
+}
+
+export interface StoredPatrolRound {
+  cacheKey: string;
+  tenantId: string;
+  userId: string;
+  roundId: string;
+  siteId: string;
+  routeId: string | null;
+  routeVersion: number | null;
+  startedAt: string;
+  status: 'in_progress' | 'completion_pending';
+  serverSynced: boolean;
 }
 
 export class IndexedDbService {
@@ -169,6 +190,11 @@ export class IndexedDbService {
           const checkpointCache = db.createObjectStore('patrolCheckpointCache', { keyPath: 'cacheKey' });
           checkpointCache.createIndex('tenantUser', ['tenantId', 'userId'], { unique: true });
         }
+
+        if (!db.objectStoreNames.contains('patrolRounds')) {
+          const patrolRounds = db.createObjectStore('patrolRounds', { keyPath: 'cacheKey' });
+          patrolRounds.createIndex('tenantUser', ['tenantId', 'userId'], { unique: false });
+        }
       };
 
       request.onsuccess = (event) => {
@@ -246,7 +272,9 @@ export class IndexedDbService {
       req.onsuccess = () => {
         const records = (req.result as OutboxMutation[]) || [];
         // Nur Einträge des jeweiligen Mandanten zurückliefern, die PENDING oder FAILED sind
-        resolve(records.filter((r) => r.tenantId === tenantId && (r.status === 'PENDING' || r.status === 'FAILED')));
+        resolve(records
+          .filter((r) => r.tenantId === tenantId && (r.status === 'PENDING' || r.status === 'FAILED'))
+          .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || patrolMutationOrder(a) - patrolMutationOrder(b)));
       };
 
       req.onerror = () => {
@@ -511,7 +539,8 @@ export class IndexedDbService {
   async savePatrolCheckpointCache(
     tenantId: string,
     userId: string,
-    checkpoints: Array<Record<string, unknown>>
+    checkpoints: Array<Record<string, unknown>>,
+    routes: Array<Record<string, unknown>> = []
   ): Promise<void> {
     const db = await this.init();
     const cache: StoredPatrolCheckpointCache = {
@@ -519,6 +548,7 @@ export class IndexedDbService {
       tenantId,
       userId,
       checkpoints,
+      routes,
       cachedAt: new Date().toISOString()
     };
     return new Promise((resolve, reject) => {
@@ -537,6 +567,58 @@ export class IndexedDbService {
         .objectStore('patrolCheckpointCache').get(`${tenantId}:${userId}`);
       request.onsuccess = () => resolve((request.result as StoredPatrolCheckpointCache) ?? null);
       request.onerror = () => reject(request.error || new Error('Lesen des Kontrollpunkt-Offline-Caches fehlgeschlagen'));
+    });
+  }
+
+  async savePatrolRound(round: Omit<StoredPatrolRound, 'cacheKey'>): Promise<void> {
+    const db = await this.init();
+    const stored: StoredPatrolRound = {
+      ...round,
+      cacheKey: `${round.tenantId}:${round.userId}:${round.roundId}`
+    };
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('patrolRounds', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Speichern des Offline-Kontrollgangs fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Offline-Kontrollgang-Transaktion abgebrochen'));
+      tx.objectStore('patrolRounds').put(stored);
+    });
+  }
+
+  async getPatrolRounds(tenantId: string, userId: string): Promise<StoredPatrolRound[]> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('patrolRounds', 'readonly');
+      const request = tx.objectStore('patrolRounds').index('tenantUser').getAll([tenantId, userId]);
+      request.onsuccess = () => resolve((request.result as StoredPatrolRound[]) || []);
+      request.onerror = () => reject(request.error || new Error('Lesen der Offline-Kontrollgänge fehlgeschlagen'));
+    });
+  }
+
+  async deletePatrolRound(tenantId: string, userId: string, roundId: string): Promise<void> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('patrolRounds', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Entfernen des Offline-Kontrollgangs fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Offline-Kontrollgang-Transaktion abgebrochen'));
+      tx.objectStore('patrolRounds').delete(`${tenantId}:${userId}:${roundId}`);
+    });
+  }
+
+  async markPatrolRoundSynced(tenantId: string, userId: string, roundId: string): Promise<void> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('patrolRounds', 'readwrite');
+      const store = tx.objectStore('patrolRounds');
+      const request = store.get(`${tenantId}:${userId}:${roundId}`);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Aktualisieren des Offline-Kontrollgangs fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Offline-Kontrollgang-Transaktion abgebrochen'));
+      request.onsuccess = () => {
+        if (!request.result) return;
+        store.put({ ...request.result, serverSynced: true });
+      };
     });
   }
 

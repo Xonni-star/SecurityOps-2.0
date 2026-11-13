@@ -25,13 +25,27 @@ const listQuerySchema = listQueryBaseSchema.superRefine((query, ctx) => {
   }
 });
 
-const checkpointSchema = z.object({
+const checkpointBaseSchema = z.object({
   siteId: uuid,
   code: z.string().trim().min(1).max(50),
   name: z.string().trim().min(1).max(150),
   locationDetails: z.string().trim().max(2000).default(''),
+  buildingName: z.string().trim().max(150).nullable().optional(),
+  areaName: z.string().trim().max(150).nullable().optional(),
+  latitude: z.number().min(-90).max(90).nullable().optional(),
+  longitude: z.number().min(-180).max(180).nullable().optional(),
   requiredIntervalMinutes: z.number().int().min(1).max(1440).default(60)
 }).strict();
+const checkpointCoordinatesSchema = <T extends z.ZodTypeAny>(schema: T) => schema.superRefine((checkpoint: {
+  latitude?: number | null;
+  longitude?: number | null;
+}, ctx: z.RefinementCtx) => {
+  if ((checkpoint.latitude == null) !== (checkpoint.longitude == null)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['latitude'], message: 'Breiten- und Längengrad müssen gemeinsam angegeben werden.' });
+  }
+});
+const checkpointSchema = checkpointCoordinatesSchema(checkpointBaseSchema);
+const checkpointUpdateSchema = checkpointCoordinatesSchema(checkpointBaseSchema.omit({ siteId: true }));
 
 const routeBaseSchema = z.object({
   siteId: uuid,
@@ -69,10 +83,16 @@ const exceptionSchema = z.object({
 }).strict();
 
 const roundSchema = z.object({
+  roundId: uuid.optional(),
   siteId: uuid,
   routeId: uuid.optional(),
+  routeVersion: z.number().int().positive().optional(),
   startedAt: dateTime,
   clientMutationId: z.string().min(8).max(64).regex(/^[A-Za-z0-9_-]+$/)
+}).strict();
+const roundCompletionSchema = z.object({
+  roundId: uuid,
+  completedAt: dateTime
 }).strict();
 
 function statusError(statusCode: number, message: string): Error & { statusCode: number } {
@@ -302,6 +322,7 @@ export async function listCheckpoints(req: Request, res: Response, next: NextFun
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const result = await db.query(
         `SELECT c.id,c.site_id,s.name AS site_name,c.code,c.name,c.location_details,
+                c.building_name,c.area_name,c.latitude,c.longitude,
                 c.token_version,c.required_interval_minutes,c.active,c.created_at,c.updated_at,c.archived_at
            FROM patrol_checkpoints c JOIN sites s ON s.id=c.site_id AND s.tenant_id=c.tenant_id
           WHERE c.tenant_id=$1 AND ($2::uuid IS NULL OR c.site_id=$2)
@@ -321,10 +342,14 @@ export async function createCheckpoint(req: Request, res: Response, next: NextFu
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const result = await db.query(
         `INSERT INTO patrol_checkpoints
-          (tenant_id,site_id,code,name,location_details,token_hash,required_interval_minutes,created_by_user_id)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-         RETURNING id,site_id,code,name,location_details,token_version,required_interval_minutes,active,created_at`,
-        [req.user!.tenantId, input.siteId, input.code, input.name, input.locationDetails, hashToken(token), input.requiredIntervalMinutes, req.user!.userId]
+          (tenant_id,site_id,code,name,location_details,building_name,area_name,latitude,longitude,
+           token_hash,required_interval_minutes,created_by_user_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         RETURNING id,site_id,code,name,location_details,building_name,area_name,latitude,longitude,
+                   token_version,required_interval_minutes,active,created_at`,
+        [req.user!.tenantId, input.siteId, input.code, input.name, input.locationDetails,
+          input.buildingName ?? null, input.areaName ?? null, input.latitude ?? null, input.longitude ?? null,
+          hashToken(token), input.requiredIntervalMinutes, req.user!.userId]
       );
       const point = result.rows[0];
       await writeEvent(db, req.user!.tenantId, input.siteId, req.user!.userId, 'checkpoint', point.id, 'created', {
@@ -333,6 +358,52 @@ export async function createCheckpoint(req: Request, res: Response, next: NextFu
       return { ...point, scanPayload: `secops:patrol:v1:${point.site_id}:${point.id}:${token}` };
     });
     res.status(201).json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function updateCheckpoint(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const checkpointId = uuid.parse(req.params.id);
+    const input = checkpointUpdateSchema.parse(req.body);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const result = await db.query(
+        `UPDATE patrol_checkpoints
+            SET code=$1,name=$2,location_details=$3,building_name=$4,area_name=$5,
+                latitude=$6,longitude=$7,required_interval_minutes=$8,updated_at=CURRENT_TIMESTAMP
+          WHERE id=$9 AND tenant_id=$10 AND archived_at IS NULL
+          RETURNING id,site_id,code,name,location_details,building_name,area_name,latitude,longitude,
+                    token_version,required_interval_minutes,active`,
+        [input.code, input.name, input.locationDetails, input.buildingName ?? null, input.areaName ?? null,
+          input.latitude ?? null, input.longitude ?? null, input.requiredIntervalMinutes,
+          checkpointId, req.user!.tenantId]
+      );
+      if (!result.rows.length) throw statusError(404, 'Nicht archivierter Kontrollpunkt nicht gefunden.');
+      await writeEvent(db, req.user!.tenantId, result.rows[0].site_id, req.user!.userId, 'checkpoint', checkpointId, 'updated', {
+        code: input.code, buildingName: input.buildingName ?? null, areaName: input.areaName ?? null
+      });
+      return result.rows[0];
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function setCheckpointActive(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const checkpointId = uuid.parse(req.params.id);
+    const { active } = z.object({ active: z.boolean() }).strict().parse(req.body);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const result = await db.query(
+        `UPDATE patrol_checkpoints SET active=$1,updated_at=CURRENT_TIMESTAMP
+          WHERE id=$2 AND tenant_id=$3 AND archived_at IS NULL
+          RETURNING id,site_id,active`,
+        [active, checkpointId, req.user!.tenantId]
+      );
+      if (!result.rows.length) throw statusError(404, 'Nicht archivierter Kontrollpunkt nicht gefunden.');
+      await writeEvent(db, req.user!.tenantId, result.rows[0].site_id, req.user!.userId, 'checkpoint', checkpointId,
+        active ? 'activated' : 'deactivated');
+      return { id: checkpointId, active };
+    });
+    res.json({ success: true, data });
   } catch (error) { next(error); }
 }
 
@@ -365,7 +436,7 @@ export async function archiveCheckpoint(req: Request, res: Response, next: NextF
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const result = await db.query(
         `UPDATE patrol_checkpoints SET active=false,archived_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
-          WHERE id=$1 AND tenant_id=$2 AND active=true RETURNING id,site_id`,
+          WHERE id=$1 AND tenant_id=$2 AND archived_at IS NULL RETURNING id,site_id`,
         [checkpointId, req.user!.tenantId]
       );
       if (!result.rows.length) throw statusError(404, 'Aktiver Kontrollpunkt nicht gefunden.');
@@ -484,6 +555,24 @@ export async function createRouteVersion(req: Request, res: Response, next: Next
   } catch (error) { next(error); }
 }
 
+export async function archiveRoute(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const routeId = uuid.parse(req.params.id);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const result = await db.query(
+        `UPDATE patrol_routes SET active=false,archived_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+          WHERE id=$1 AND tenant_id=$2 AND archived_at IS NULL
+          RETURNING id,site_id`,
+        [routeId, req.user!.tenantId]
+      );
+      if (!result.rows.length) throw statusError(404, 'Nicht archivierte Route nicht gefunden.');
+      await writeEvent(db, req.user!.tenantId, result.rows[0].site_id, req.user!.userId, 'route', routeId, 'archived');
+      return { id: routeId, archived: true };
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
 export async function listScans(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const filters = listQuerySchema.parse(req.query);
@@ -568,82 +657,203 @@ export async function createException(req: Request, res: Response, next: NextFun
 export async function startRound(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const input = roundSchema.parse(req.body);
-    const data = await withTenantTransaction(req.user!.tenantId, async db => {
-      const assignment = await db.query(
-        `SELECT e.id FROM employees e
-          WHERE e.tenant_id=$1 AND e.account_user_id=$2 AND e.archived_at IS NULL
-            AND EXISTS (
-              SELECT 1 FROM employee_site_assignments esa
-               WHERE esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=$3
-            )
-          LIMIT 1`,
-        [req.user!.tenantId, req.user!.userId, input.siteId]
-      );
-      if (!assignment.rows.length) {
-        throw statusError(403, 'Für dieses Konto ist keine aktive Mitarbeiterzuordnung zu diesem Objekt hinterlegt.');
-      }
-      await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
-        `${req.user!.tenantId}:patrol:round:${input.clientMutationId}`
-      ]);
-      const prior = await db.query(
-        `SELECT id,route_id,route_version,site_id,started_at,payload_hash,guard_user_id FROM patrol_rounds
-          WHERE tenant_id=$1 AND client_mutation_id=$2`,
-        [req.user!.tenantId, input.clientMutationId]
-      );
-      const payloadHash = computePayloadHash(input);
-      if (prior.rows.length) {
-        if (prior.rows[0].guard_user_id !== req.user!.userId) {
-          throw statusError(409, 'Mutations-ID ist bereits einem anderen Benutzer zugeordnet.');
-        }
-        if (prior.rows[0].payload_hash !== payloadHash) {
-          throw statusError(409, 'Mutations-ID wurde mit abweichendem Kontrollgang wiederverwendet.');
-        }
-        return { ...prior.rows[0], idempotent: true };
-      }
-      let routeId: string | null = null;
-      let routeVersion: number | null = null;
-      if (input.routeId) {
-        const route = await db.query(
-          `SELECT id,site_id,current_version FROM patrol_routes
-            WHERE id=$1 AND tenant_id=$2 AND active=true AND archived_at IS NULL`,
-          [input.routeId, req.user!.tenantId]
-        );
-        if (!route.rows.length || route.rows[0].site_id !== input.siteId) throw statusError(404, 'Aktive Route nicht gefunden oder Objekt stimmt nicht überein.');
-        routeId = route.rows[0].id;
-        routeVersion = Number(route.rows[0].current_version);
-      }
-      const inserted = await db.query(
-        `INSERT INTO patrol_rounds
-          (tenant_id,site_id,route_id,route_version,guard_user_id,client_mutation_id,payload_hash,client_captured_at,started_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id,status,started_at`,
-        [req.user!.tenantId, input.siteId, routeId, routeVersion, req.user!.userId,
-          input.clientMutationId, payloadHash, input.startedAt]
-      );
-      await writeEvent(db, req.user!.tenantId, input.siteId, req.user!.userId, 'round', inserted.rows[0].id, 'started', {
-        routeId, routeVersion
-      });
-      return { ...inserted.rows[0], routeId, routeVersion, idempotent: false };
-    });
+    const { clientMutationId, ...roundPayload } = input;
+    const data = await withTenantTransaction(req.user!.tenantId, db =>
+      recordPatrolRoundStart(
+        db, req.user!.tenantId, req.user!.userId, clientMutationId, roundPayload,
+        computePayloadHash({ recordType: 'round_start', ...roundPayload })
+      )
+    );
     res.status(data.idempotent ? 200 : 201).json({ success: true, data });
   } catch (error) { next(error); }
+}
+
+export async function recordPatrolRoundStart(
+  db: PoolClient,
+  tenantId: string,
+  userId: string,
+  clientMutationId: string,
+  payload: Record<string, unknown>,
+  payloadHash = computePayloadHash(payload)
+): Promise<{
+  id: string;
+  site_id: string;
+  route_id: string | null;
+  route_version: number | null;
+  status: string;
+  started_at: string;
+  idempotent: boolean;
+}> {
+  const parsed = roundSchema.omit({ clientMutationId: true }).safeParse(payload);
+  if (!parsed.success) throw statusError(400, 'Kontrollgangsstart ist unvollständig oder ungültig.');
+  const input = parsed.data;
+  const startedAt = Date.parse(input.startedAt);
+  if (startedAt > Date.now() + 5 * 60 * 1000) throw statusError(400, 'Startzeit liegt unzulässig in der Zukunft.');
+
+  const assignment = await db.query(
+    `SELECT e.id FROM employees e
+      WHERE e.tenant_id=$1 AND e.account_user_id=$2 AND e.archived_at IS NULL
+        AND EXISTS (
+          SELECT 1 FROM employee_site_assignments esa
+           WHERE esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=$3
+        )
+      LIMIT 1`,
+    [tenantId, userId, input.siteId]
+  );
+  if (!assignment.rows.length) {
+    throw statusError(403, 'Für dieses Konto ist keine aktive Mitarbeiterzuordnung zu diesem Objekt hinterlegt.');
+  }
+
+  await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+    `${tenantId}:patrol:round:${clientMutationId}`
+  ]);
+  const prior = await db.query(
+    `SELECT id,route_id,route_version,site_id,started_at,payload_hash,guard_user_id,status
+       FROM patrol_rounds WHERE tenant_id=$1 AND client_mutation_id=$2`,
+    [tenantId, clientMutationId]
+  );
+  if (prior.rows.length) {
+    if (prior.rows[0].guard_user_id !== userId) {
+      throw statusError(409, 'Mutations-ID ist bereits einem anderen Benutzer zugeordnet.');
+    }
+    if (prior.rows[0].payload_hash !== payloadHash) {
+      throw statusError(409, 'Mutations-ID wurde mit abweichendem Kontrollgang wiederverwendet.');
+    }
+    return {
+      id: prior.rows[0].id,
+      site_id: prior.rows[0].site_id,
+      route_id: prior.rows[0].route_id,
+      route_version: prior.rows[0].route_version,
+      started_at: prior.rows[0].started_at,
+      status: prior.rows[0].status,
+      idempotent: true
+    };
+  }
+
+  let routeId: string | null = null;
+  let routeVersion: number | null = null;
+  if (input.routeId) {
+    const route = await db.query(
+      `SELECT id,site_id,current_version FROM patrol_routes
+        WHERE id=$1 AND tenant_id=$2 AND active=true AND archived_at IS NULL`,
+      [input.routeId, tenantId]
+    );
+    if (!route.rows.length || route.rows[0].site_id !== input.siteId) {
+      throw statusError(404, 'Aktive Route nicht gefunden oder Objekt stimmt nicht überein.');
+    }
+    routeId = route.rows[0].id;
+    routeVersion = input.routeVersion ?? Number(route.rows[0].current_version);
+    const versionExists = await db.query(
+      'SELECT 1 FROM patrol_route_versions WHERE tenant_id=$1 AND route_id=$2 AND version=$3',
+      [tenantId, routeId, routeVersion]
+    );
+    if (!versionExists.rows.length) throw statusError(409, 'Die zwischengespeicherte Routenversion ist nicht mehr verfügbar.');
+  } else if (input.routeVersion !== undefined) {
+    throw statusError(400, 'Eine Routenversion erfordert eine Routen-ID.');
+  }
+
+  const roundId = input.roundId || crypto.randomUUID();
+  const collision = await db.query('SELECT 1 FROM patrol_rounds WHERE tenant_id=$1 AND id=$2', [tenantId, roundId]);
+  if (collision.rows.length) throw statusError(409, 'Kontrollgangs-ID ist bereits vergeben.');
+  const inserted = await db.query(
+    `INSERT INTO patrol_rounds
+      (id,tenant_id,site_id,route_id,route_version,guard_user_id,client_mutation_id,payload_hash,client_captured_at,started_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+     RETURNING id,site_id,route_id,route_version,status,started_at`,
+    [roundId, tenantId, input.siteId, routeId, routeVersion, userId, clientMutationId, payloadHash, input.startedAt]
+  );
+  const round = inserted.rows[0];
+  await writeEvent(db, tenantId, input.siteId, userId, 'round', round.id, 'started', {
+    routeId, routeVersion, clientCapturedAt: input.startedAt
+  });
+  return { ...round, idempotent: false };
 }
 
 export async function completeRound(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const roundId = uuid.parse(req.params.id);
+    const body = z.object({
+      clientMutationId: z.string().min(8).max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
+      completedAt: dateTime.optional()
+    }).strict().parse(req.body);
+    const completedAt = body.completedAt || new Date().toISOString();
+    const clientMutationId = body.clientMutationId || crypto.randomUUID();
+    const payload = { roundId, completedAt };
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
-      const result = await db.query(
-        `UPDATE patrol_rounds SET status='completed',completed_at=CURRENT_TIMESTAMP
-          WHERE id=$1 AND tenant_id=$2 AND guard_user_id=$3 AND status='in_progress'
-          RETURNING id,site_id,completed_at`,
-        [roundId, req.user!.tenantId, req.user!.userId]
+      return recordPatrolRoundCompletion(
+        db, req.user!.tenantId, req.user!.userId, clientMutationId, payload,
+        computePayloadHash({ recordType: 'round_complete', ...payload })
       );
-      if (!result.rows.length) throw statusError(409, 'Kontrollgang ist nicht aktiv oder gehört nicht zu diesem Konto.');
-      await writeEvent(db, req.user!.tenantId, result.rows[0].site_id, req.user!.userId, 'round', roundId, 'completed');
-      return { ...result.rows[0], status: 'completed' };
     });
     res.json({ success: true, data });
   } catch (error) { next(error); }
+}
+
+export async function recordPatrolRoundCompletion(
+  db: PoolClient,
+  tenantId: string,
+  userId: string,
+  clientMutationId: string,
+  payload: Record<string, unknown>,
+  payloadHash = computePayloadHash(payload)
+): Promise<{ id: string; site_id: string; completed_at: string; status: 'completed'; idempotent: boolean }> {
+  const parsed = roundCompletionSchema.safeParse(payload);
+  if (!parsed.success) throw statusError(400, 'Kontrollgangsabschluss ist unvollständig oder ungültig.');
+  const input = parsed.data;
+  const completedTime = Date.parse(input.completedAt);
+  if (completedTime > Date.now() + 5 * 60 * 1000) throw statusError(400, 'Abschlusszeit liegt unzulässig in der Zukunft.');
+
+  await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+    `${tenantId}:patrol:round-complete:${clientMutationId}`
+  ]);
+  const prior = await db.query(
+    `SELECT id,site_id,guard_user_id,completion_payload_hash,completed_at
+       FROM patrol_rounds
+      WHERE tenant_id=$1 AND completion_client_mutation_id=$2`,
+    [tenantId, clientMutationId]
+  );
+  if (prior.rows.length) {
+    if (prior.rows[0].guard_user_id !== userId) {
+      throw statusError(409, 'Abschlussmutation ist bereits einem anderen Benutzer zugeordnet.');
+    }
+    if (prior.rows[0].id !== input.roundId || prior.rows[0].completion_payload_hash !== payloadHash) {
+      throw statusError(409, 'Abschlussmutations-ID wurde mit abweichendem Inhalt wiederverwendet.');
+    }
+    return {
+      id: prior.rows[0].id,
+      site_id: prior.rows[0].site_id,
+      completed_at: prior.rows[0].completed_at,
+      status: 'completed',
+      idempotent: true
+    };
+  }
+
+  const round = await db.query(
+    `SELECT id,site_id,status,guard_user_id FROM patrol_rounds
+      WHERE id=$1 AND tenant_id=$2 FOR UPDATE`,
+    [input.roundId, tenantId]
+  );
+  if (!round.rows.length || round.rows[0].guard_user_id !== userId) {
+    throw statusError(404, 'Kontrollgang nicht gefunden oder gehört nicht zu diesem Konto.');
+  }
+  if (round.rows[0].status !== 'in_progress') {
+    throw statusError(409, 'Kontrollgang ist nicht mehr aktiv.');
+  }
+  const result = await db.query(
+    `UPDATE patrol_rounds
+        SET status='completed',completed_at=$1,completion_client_captured_at=$1,
+            completion_server_received_at=CURRENT_TIMESTAMP,completion_client_mutation_id=$2,
+            completion_payload_hash=$3
+      WHERE id=$4 AND tenant_id=$5 AND guard_user_id=$6 AND status='in_progress'
+      RETURNING id,site_id,completed_at`,
+    [input.completedAt, clientMutationId, payloadHash, input.roundId, tenantId, userId]
+  );
+  if (!result.rows.length) throw statusError(409, 'Kontrollgang wurde parallel abgeschlossen.');
+  await writeEvent(db, tenantId, round.rows[0].site_id, userId, 'round', input.roundId, 'completed', {
+    clientCapturedAt: input.completedAt,
+    clientMutationId
+  });
+  return { ...result.rows[0], status: 'completed', idempotent: false };
 }
 
 export async function getDashboard(req: Request, res: Response, next: NextFunction): Promise<void> {

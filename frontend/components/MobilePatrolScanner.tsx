@@ -4,8 +4,8 @@ import {
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
 import { Checkpoint, PatrolScanEvent, Site } from '../types';
-import { apiClient } from '../services/apiClient';
-import { offlineVault } from '../services/indexedDbService';
+import { ApiError, apiClient } from '../services/apiClient';
+import { offlineVault, StoredPatrolRound } from '../services/indexedDbService';
 
 const PATROL_SCAN_DUPLICATE_WINDOW_MS = 2 * 60 * 1000;
 
@@ -24,16 +24,20 @@ interface PatrolQrPayload {
 
 interface PatrolRoute {
   id: string;
+  siteId: string;
   name: string;
   currentVersion: number;
+  checkpoints: Array<{ checkpointId: string; code: string; name: string; sequence: number; plannedOffsetMinutes: number }>;
 }
 
 interface PatrolRound {
   id: string;
   site_id?: string;
   route_id?: string | null;
+  route_version?: number | null;
   status: 'in_progress' | 'completed' | 'abandoned';
   started_at: string;
+  localStatus?: 'in_progress' | 'completion_pending';
 }
 
 interface BarcodeDetectorInstance {
@@ -83,14 +87,78 @@ function mapCheckpoint(row: Record<string, unknown>): PatrolCheckpoint {
   };
 }
 
+function mapRoute(row: Record<string, unknown>): PatrolRoute {
+  const checkpoints = Array.isArray(row.checkpoints) ? row.checkpoints : [];
+  return {
+    id: String(row.id),
+    siteId: String(row.site_id ?? row.siteId),
+    name: String(row.name),
+    currentVersion: Number(row.current_version ?? row.currentVersion ?? 1),
+    checkpoints: checkpoints.map((item: any, index) => ({
+      checkpointId: String(item.checkpointId ?? item.checkpoint_id),
+      code: String(item.code ?? ''),
+      name: String(item.name ?? ''),
+      sequence: Number(item.sequence ?? index + 1),
+      plannedOffsetMinutes: Number(item.plannedOffsetMinutes ?? item.planned_offset_minutes ?? 0)
+    }))
+  };
+}
+
+function mapStoredRound(round: StoredPatrolRound): PatrolRound {
+  return {
+    id: round.roundId,
+    site_id: round.siteId,
+    route_id: round.routeId,
+    route_version: round.routeVersion,
+    status: 'in_progress',
+    started_at: round.startedAt,
+    localStatus: round.status
+  };
+}
+
+function mapQueuedScan(
+  mutation: { id: string; occurredAt: string; payload: Record<string, any> },
+  checkpoints: PatrolCheckpoint[],
+  userId: string,
+  userName: string,
+  tenantId: string
+): PatrolScanEvent {
+  const checkpoint = checkpoints.find(point => point.id === mutation.payload.checkpointId);
+  return {
+    id: mutation.id,
+    tenantId,
+    siteId: String(mutation.payload.siteId),
+    siteName: checkpoint?.siteName ?? '',
+    checkpointId: String(mutation.payload.checkpointId),
+    checkpointCode: checkpoint?.code ?? 'Offline',
+    checkpointName: checkpoint?.name ?? 'Offline erfasster Kontrollpunkt',
+    guardId: userId,
+    guardName: userName,
+    scannedAt: String(mutation.payload.scannedAt ?? mutation.occurredAt),
+    method: mutation.payload.method,
+    verifiedTag: 'pending_server_verification',
+    checkpointTokenVersion: mutation.payload.checkpointTokenVersion,
+    roundId: mutation.payload.roundId,
+    notes: mutation.payload.notes,
+    offlineCaptured: true
+  };
+}
+
 export const MobilePatrolScanner: React.FC = () => {
   const {
     getTenantSites, getTenantPatrolScans, addPatrolScan,
-    currentUserId, currentUserName, currentTenantId, authUser, isOnline
+    currentUserId, currentUserName, currentTenantId, authUser, isOnline, triggerManualSync
   } = useSecurityStore();
   const sites = getTenantSites();
-  const scans = getTenantPatrolScans();
+  const storedScans = getTenantPatrolScans();
   const userId = authUser?.id || currentUserId;
+  const [queuedScans, setQueuedScans] = useState<PatrolScanEvent[]>([]);
+  const scans = [
+    ...storedScans,
+    ...queuedScans.filter(queued => !storedScans.some(scan =>
+      scan.checkpointId === queued.checkpointId && scan.scannedAt === queued.scannedAt
+    ))
+  ];
   const [siteId, setSiteId] = useState(sites[0]?.id || '');
   const [checkpoints, setCheckpoints] = useState<PatrolCheckpoint[]>([]);
   const [routes, setRoutes] = useState<PatrolRoute[]>([]);
@@ -110,6 +178,13 @@ export const MobilePatrolScanner: React.FC = () => {
 
   const activeSite = sites.find(site => site.id === siteId);
   const checkpointRows = checkpoints.filter(point => point.siteId === siteId && point.active);
+  const activeRoute = activeRound?.route_id ? routes.find(route => route.id === activeRound.route_id) : undefined;
+  const activeRoundScans = scans.filter(scan => scan.roundId === activeRound?.id);
+  const routeProgress = (activeRoute?.checkpoints ?? []).map(point => {
+    const scan = activeRoundScans.find(item => item.checkpointId === point.checkpointId);
+    const dueAt = Date.parse(activeRound?.started_at || '') + point.plannedOffsetMinutes * 60_000;
+    return { ...point, scan, late: !scan && Number.isFinite(dueAt) && Date.now() > dueAt };
+  });
 
   useEffect(() => {
     if (!siteId && sites.length) setSiteId(sites[0].id);
@@ -117,57 +192,147 @@ export const MobilePatrolScanner: React.FC = () => {
 
   useEffect(() => {
     let active = true;
-    setActiveRound(null);
-    setRoutes([]);
     setLoadingCheckpoints(true);
-    const loadCheckpoints = async () => {
+    const loadPatrolData = async () => {
+      let cached: Awaited<ReturnType<typeof offlineVault.getPatrolCheckpointCache>> = null;
+      let localRounds: StoredPatrolRound[] = [];
+      let patrolOutbox: Awaited<ReturnType<typeof offlineVault.getOutbox>> = [];
+      try {
+        if (isOnline) await triggerManualSync();
+        [cached, localRounds, patrolOutbox] = await Promise.all([
+          offlineVault.getPatrolCheckpointCache(currentTenantId, userId),
+          offlineVault.getPatrolRounds(currentTenantId, userId),
+          offlineVault.getOutbox(currentTenantId, 'patrol')
+        ]);
+      } catch (error) {
+        if (active) setErrorMessage(error instanceof Error ? error.message : 'Offline-Kontrollgangsdaten konnten nicht wiederhergestellt werden.');
+      }
+
+      if (!active) return;
+      const cachedCheckpoints = cached?.checkpoints.map(mapCheckpoint) ?? [];
+      const cachedRoutes = (cached?.routes ?? []).map(mapRoute);
+      setCheckpoints(cachedCheckpoints);
+      setRoutes(cachedRoutes);
+      setSelectedRouteId(previous => cachedRoutes.some(route => route.id === previous && route.siteId === siteId) ? previous : '');
+      const pendingCompletions = new Set(
+        patrolOutbox
+          .filter(item => item.payload?.recordType === 'round_complete')
+          .map(item => String(item.payload.roundId))
+      );
+      const queuedScansForSite = patrolOutbox
+        .filter(item => item.payload?.recordType === 'scan' && item.payload.siteId === siteId)
+        .map(item => mapQueuedScan(item, cachedCheckpoints, userId, currentUserName, currentTenantId));
+      setQueuedScans(queuedScansForSite);
+      const cachedRound = localRounds.find(round => round.siteId === siteId && !pendingCompletions.has(round.roundId));
+      const queuedStart = patrolOutbox.find(item =>
+        item.payload?.recordType === 'round_start' &&
+        item.payload.siteId === siteId &&
+        !pendingCompletions.has(String(item.payload.roundId))
+      );
+      const restoredRound = cachedRound
+        ? mapStoredRound(cachedRound)
+        : queuedStart
+          ? {
+              id: String(queuedStart.payload.roundId),
+              site_id: siteId,
+              route_id: queuedStart.payload.routeId ?? null,
+              route_version: queuedStart.payload.routeVersion ?? null,
+              status: 'in_progress' as const,
+              started_at: String(queuedStart.payload.startedAt ?? queuedStart.occurredAt),
+              localStatus: 'in_progress' as const
+            }
+          : null;
+      setActiveRound(restoredRound);
+
+      if (!isOnline) {
+        setErrorMessage(cachedCheckpoints.some(point => point.siteId === siteId)
+          ? 'Offline: gespeicherte Routen und Kontrollpunkte werden verwendet. Scans und Rundgangsereignisse werden beim Synchronisieren geprüft.'
+          : 'Offline und keine gespeicherten Kontrollpunktdaten für dieses Objekt vorhanden.');
+        setLoadingCheckpoints(false);
+        return;
+      }
+
       try {
         const fresh = await apiClient.get<Record<string, unknown>[]>(`/patrol/checkpoints?siteId=${encodeURIComponent(siteId)}`);
         const freshRoutes = await apiClient.get<Record<string, unknown>[]>(`/patrol/routes?siteId=${encodeURIComponent(siteId)}`);
         const freshRounds = await apiClient.get<PatrolRound[]>(
           `/patrol/rounds?siteId=${encodeURIComponent(siteId)}&status=in_progress&limit=1`
         );
+        const freshScans = await apiClient.get<Record<string, unknown>[]>(
+          `/patrol/scans?siteId=${encodeURIComponent(siteId)}&limit=100`
+        );
         const mapped = fresh.map(mapCheckpoint);
         if (!active) return;
-        setCheckpoints(previous => [...previous.filter(point => point.siteId !== siteId), ...mapped]);
-        const mappedRoutes = freshRoutes.map(row => ({
-          id: String(row.id),
-          name: String(row.name),
-          currentVersion: Number(row.current_version ?? row.currentVersion ?? 1)
-        }));
+        const mappedRoutes = freshRoutes.map(mapRoute);
+        const mergedCheckpoints = [...cachedCheckpoints.filter(point => point.siteId !== siteId), ...mapped];
+        const mergedRoutes = [...cachedRoutes.filter(route => route.siteId !== siteId), ...mappedRoutes];
+        setCheckpoints(mergedCheckpoints);
         setRoutes(mappedRoutes);
         setSelectedRouteId(previous => mappedRoutes.some(route => route.id === previous) ? previous : '');
-        setActiveRound(freshRounds[0] || null);
+        const serverScans = freshScans.map(row => ({
+          id: String(row.id),
+          tenantId: currentTenantId,
+          siteId: String(row.site_id),
+          siteName: String(row.site_name ?? ''),
+          checkpointId: String(row.checkpoint_id),
+          checkpointCode: String(row.checkpoint_code),
+          checkpointName: String(row.checkpoint_name),
+          guardId: String(row.guard_id),
+          guardName: currentUserName,
+          scannedAt: String(row.client_captured_at ?? row.scanned_at),
+          method: row.method as PatrolScanEvent['method'],
+          verifiedTag: String(row.verification_status),
+          roundId: row.round_id ? String(row.round_id) : undefined,
+          notes: row.notes ? String(row.notes) : undefined,
+          offlineCaptured: false
+        }));
+        const locallyCompleting = freshRounds.some(round => pendingCompletions.has(round.id));
+        if (restoredRound?.localStatus === 'in_progress') setActiveRound(restoredRound);
+        else if (!locallyCompleting && freshRounds[0]) {
+          const serverRound = freshRounds[0];
+          setActiveRound(serverRound);
+          await offlineVault.savePatrolRound({
+            tenantId: currentTenantId,
+            userId,
+            roundId: serverRound.id,
+            siteId: String(serverRound.site_id ?? siteId),
+            routeId: serverRound.route_id ?? null,
+            routeVersion: serverRound.route_version ?? null,
+            startedAt: serverRound.started_at,
+            status: 'in_progress',
+            serverSynced: true
+          });
+        } else setActiveRound(null);
+        setQueuedScans(queuedScansForSite);
         await offlineVault.savePatrolCheckpointCache(currentTenantId, userId, [
-          ...checkpoints.filter(point => point.siteId !== siteId),
+          ...cachedCheckpoints.filter(point => point.siteId !== siteId),
           ...mapped
+        ] as unknown as Array<Record<string, unknown>>, [
+          ...cachedRoutes.filter(route => route.siteId !== siteId),
+          ...mappedRoutes
         ] as unknown as Array<Record<string, unknown>>);
+        setQueuedScans(previous => {
+          const known = new Set(previous.map(scan => `${scan.checkpointId}:${scan.scannedAt}`));
+          return [
+            ...previous,
+            ...serverScans.filter(scan => !known.has(`${scan.checkpointId}:${scan.scannedAt}`))
+          ];
+        });
         setErrorMessage(null);
       } catch (error) {
-        try {
-          const cached = await offlineVault.getPatrolCheckpointCache(currentTenantId, userId);
-          if (!active) return;
-          if (cached) {
-            const mapped = cached.checkpoints.map(mapCheckpoint);
-            setCheckpoints(mapped);
-            if (mapped.some(point => point.siteId === siteId)) {
-              setErrorMessage('Backend offline: gespeicherte Kontrollpunktdaten werden verwendet. Verifikation erfolgt beim Synchronisieren.');
-              return;
-            }
-          }
-        } catch (cacheError) {
-          if (active) setErrorMessage(cacheError instanceof Error ? cacheError.message : 'Kontrollpunktcache konnte nicht gelesen werden.');
-          return;
-        }
-        if (active) setErrorMessage(error instanceof Error ? error.message : 'Kontrollpunkte konnten nicht geladen werden.');
+        if (active) setErrorMessage(
+          cachedCheckpoints.some(point => point.siteId === siteId)
+            ? `Backend nicht erreichbar; gespeicherte Routendaten bleiben verfügbar. ${error instanceof Error ? error.message : ''}`
+            : error instanceof Error ? error.message : 'Kontrollpunkte konnten nicht geladen werden.'
+        );
       } finally {
         if (active) setLoadingCheckpoints(false);
       }
     };
-    if (siteId) void loadCheckpoints();
+    if (siteId) void loadPatrolData();
     else setLoadingCheckpoints(false);
     return () => { active = false; };
-  }, [siteId, currentTenantId, userId]);
+  }, [siteId, currentTenantId, userId, isOnline, triggerManualSync, currentUserName]);
 
   const stopCamera = () => {
     cameraStream.current?.getTracks().forEach(track => track.stop());
@@ -333,27 +498,145 @@ export const MobilePatrolScanner: React.FC = () => {
   };
 
   const startRound = async () => {
-    if (!isOnline || !siteId) return;
+    if (!siteId) return;
+    const route = routes.find(item => item.id === selectedRouteId && item.siteId === siteId);
+    if (selectedRouteId && !route) {
+      setErrorMessage('Die ausgewählte Route ist für dieses Objekt nicht mehr im lokalen Cache verfügbar.');
+      return;
+    }
+    const roundId = crypto.randomUUID();
+    const clientMutationId = crypto.randomUUID();
+    const startedAt = new Date().toISOString();
+    const roundPayload = {
+      roundId,
+      siteId,
+      routeId: route?.id,
+      routeVersion: route?.currentVersion,
+      startedAt
+    };
+    let localCacheWarning: string | null = null;
+    let queuedOffline = !isOnline;
     try {
-      const round = await apiClient.post<PatrolRound>('/patrol/rounds', {
-        siteId,
-        routeId: selectedRouteId || undefined,
-        startedAt: new Date().toISOString(),
-        clientMutationId: crypto.randomUUID()
-      });
+      let round: PatrolRound;
+      if (isOnline) {
+        try {
+          round = await apiClient.post<PatrolRound>('/patrol/rounds', {
+            ...roundPayload,
+            clientMutationId
+          });
+        } catch (error) {
+          if (!(error instanceof ApiError) || !error.isNetworkError) throw error;
+          queuedOffline = true;
+        }
+      }
+
+      if (queuedOffline) {
+        await useSecurityStore.getState().enqueueOfflineAction({
+          id: clientMutationId,
+          tenantId: currentTenantId,
+          entityType: 'patrol',
+          action: 'CREATE',
+          payload: { recordType: 'round_start', ...roundPayload },
+          baseVersion: 1
+        });
+        round = {
+          id: roundId,
+          site_id: siteId,
+          route_id: route?.id ?? null,
+          route_version: route?.currentVersion ?? null,
+          status: 'in_progress',
+          started_at: startedAt,
+          localStatus: 'in_progress'
+        };
+      }
+      try {
+        await offlineVault.savePatrolRound({
+          tenantId: currentTenantId,
+          userId,
+          roundId: round.id,
+          siteId,
+          routeId: route?.id ?? null,
+          routeVersion: route?.currentVersion ?? null,
+          startedAt,
+          status: 'in_progress',
+          serverSynced: !queuedOffline
+        });
+      } catch {
+        localCacheWarning = queuedOffline
+          ? 'Kontrollgang wurde in der Outbox gesichert; der lokale Wiederherstellungscache ist nicht verfügbar.'
+          : 'Kontrollgang wurde serverseitig gestartet, aber der lokale Wiederherstellungscache konnte nicht geschrieben werden.';
+      }
       setActiveRound(round);
-      setErrorMessage(null);
+      setErrorMessage(localCacheWarning);
+      setScanSuccessMessage(!queuedOffline
+        ? 'Kontrollgang gestartet und serverseitig gespeichert.'
+        : 'Kontrollgang offline gestartet und lokal für die Synchronisierung vorgemerkt.');
+      if (queuedOffline && isOnline) void triggerManualSync();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Kontrollgang konnte nicht gestartet werden.');
     }
   };
 
   const completeRound = async () => {
-    if (!activeRound || !isOnline) return;
+    if (!activeRound) return;
+    const completedAt = new Date().toISOString();
+    const clientMutationId = crypto.randomUUID();
+    let localCacheWarning: string | null = null;
+    let queuedOffline = !isOnline;
     try {
-      await apiClient.post(`/patrol/rounds/${activeRound.id}/complete`, {});
+      if (isOnline) {
+        try {
+          await apiClient.post(`/patrol/rounds/${activeRound.id}/complete`, {
+            clientMutationId,
+            completedAt
+          });
+        } catch (error) {
+          if (!(error instanceof ApiError) || !error.isNetworkError) throw error;
+          queuedOffline = true;
+        }
+      }
+
+      if (queuedOffline) {
+        await useSecurityStore.getState().enqueueOfflineAction({
+          id: clientMutationId,
+          tenantId: currentTenantId,
+          entityType: 'patrol',
+          action: 'UPDATE',
+          payload: {
+            recordType: 'round_complete',
+            roundId: activeRound.id,
+            completedAt
+          },
+          baseVersion: 1
+        });
+        try {
+          await offlineVault.savePatrolRound({
+            tenantId: currentTenantId,
+            userId,
+            roundId: activeRound.id,
+            siteId: activeRound.site_id || siteId,
+            routeId: activeRound.route_id ?? null,
+            routeVersion: activeRound.route_version ?? null,
+            startedAt: activeRound.started_at,
+            status: 'completion_pending',
+            serverSynced: activeRound.localStatus !== 'in_progress'
+          });
+        } catch {
+          localCacheWarning = 'Kontrollgangsabschluss wurde in der Outbox gesichert; der lokale Cache konnte nicht aktualisiert werden.';
+        }
+      } else {
+        try {
+          await offlineVault.deletePatrolRound(currentTenantId, userId, activeRound.id);
+        } catch {
+          localCacheWarning = 'Kontrollgang wurde serverseitig abgeschlossen, aber der lokale Wiederherstellungscache konnte nicht entfernt werden.';
+        }
+      }
       setActiveRound(null);
-      setErrorMessage(null);
+      setErrorMessage(localCacheWarning);
+      setScanSuccessMessage(!queuedOffline
+        ? 'Kontrollgang abgeschlossen und serverseitig gespeichert.'
+        : 'Kontrollgang offline abgeschlossen; Abschluss und Scans bleiben in der Outbox.');
+      if (queuedOffline && isOnline) void triggerManualSync();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Kontrollgang konnte nicht abgeschlossen werden.');
     }
@@ -408,14 +691,36 @@ export const MobilePatrolScanner: React.FC = () => {
             <option value="">Ohne festgelegte Route</option>
             {routes.map(route => <option key={route.id} value={route.id}>{route.name} · Version {route.currentVersion}</option>)}
           </select>
-          {activeRound && <p className="mt-2 text-[11px] text-emerald-300">Aktiver Kontrollgang · {activeRound.id.slice(0, 8)}</p>}
+          {activeRound && <p className="mt-2 text-[11px] text-emerald-300">
+            Aktiver Kontrollgang · {activeRound.id.slice(0, 8)}
+            {activeRound.localStatus === 'in_progress' && !isOnline ? ' · lokal gespeichert, Sync ausstehend' : ''}
+          </p>}
         </div>
         {activeRound
-          ? <button onClick={() => void completeRound()} disabled={!isOnline}
-              className="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white disabled:opacity-50">Kontrollgang abschließen</button>
-          : <button onClick={() => void startRound()} disabled={!isOnline || !siteId}
+          ? <button onClick={() => void completeRound()}
+              className="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white">Kontrollgang abschließen</button>
+          : <button onClick={() => void startRound()} disabled={!siteId}
               className="rounded-lg bg-blue-700 px-4 py-2 font-semibold text-white disabled:opacity-50">Kontrollgang starten</button>}
       </div>
+
+      {activeRound && routeProgress.length > 0 && (
+        <section aria-label="Kontrollgang-Fortschritt" className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <h3 className="font-bold text-slate-100">Routenfortschritt</h3>
+            <span className="text-slate-400">{activeRoundScans.length}/{routeProgress.length} Kontrollpunkte</span>
+          </div>
+          <ul className="space-y-2">
+            {routeProgress.map(point => (
+              <li key={point.checkpointId} className="flex items-center justify-between gap-3 rounded-lg bg-slate-800/60 p-2">
+                <span className="text-slate-200">{point.sequence}. {point.code} · {point.name}</span>
+                <span className={point.scan ? 'text-emerald-300' : point.late ? 'text-amber-300' : 'text-slate-400'}>
+                  {point.scan ? 'Erledigt' : point.late ? 'Verspätet' : 'Offen'}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {(cameraActive || nfcActive) && (
         <div className="rounded-2xl border border-blue-500/40 bg-slate-950 p-3">

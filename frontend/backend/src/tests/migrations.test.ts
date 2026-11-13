@@ -112,11 +112,11 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
     expect(result.baselined).toEqual([]);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
     expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
     expect(await tableExists(db, 'sync_conflict_resolution_receipts')).toBe(true);
     expect(await tableExists(db, 'documents')).toBe(true);
@@ -160,6 +160,42 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(identityColumns).toEqual([
       { table_name: 'employees', column_name: 'account_user_id' },
       { table_name: 'handover_confirmations', column_name: 'payload_hash' }
+    ]);
+    const roundCompletionColumns = await queryInDatabase<{ column_name: string }>(
+      db,
+      `SELECT column_name FROM information_schema.columns
+        WHERE table_schema='public' AND table_name='patrol_rounds'
+          AND column_name = ANY($1::text[])
+        ORDER BY column_name`,
+      [[
+        'completion_client_captured_at',
+        'completion_server_received_at',
+        'completion_client_mutation_id',
+        'completion_payload_hash'
+      ]]
+    );
+    expect(roundCompletionColumns.map(row => row.column_name)).toEqual([
+      'completion_client_captured_at',
+      'completion_client_mutation_id',
+      'completion_payload_hash',
+      'completion_server_received_at'
+    ]);
+    const patrolCoordinateConstraints = await queryInDatabase<{ conname: string }>(
+      db,
+      `SELECT conname FROM pg_constraint
+        WHERE conrelid='public.patrol_checkpoints'::regclass
+          AND conname = ANY($1::text[])
+        ORDER BY conname`,
+      [[
+        'ck_patrol_checkpoint_coordinates_pair',
+        'ck_patrol_checkpoint_latitude',
+        'ck_patrol_checkpoint_longitude'
+      ]]
+    );
+    expect(patrolCoordinateConstraints.map(row => row.conname)).toEqual([
+      'ck_patrol_checkpoint_coordinates_pair',
+      'ck_patrol_checkpoint_latitude',
+      'ck_patrol_checkpoint_longitude'
     ]);
     for (const table of [
       'alarm_types', 'emergency_contacts', 'emergency_plan_versions', 'alarm_event_assignments',
@@ -656,7 +692,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(second.applied).toEqual([]);
     expect(second.baselined).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
 
     const after = await historyRows(db);
     expect(after).toEqual(before);
@@ -771,7 +807,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(await tableExists(db, 'migration_marker_006')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
   });
 
   test('4. Fehlerhafte Migration wird nicht registriert und zurückgerollt', async () => {
@@ -853,6 +889,12 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const patrolMigrationPath = path.join(dir, '020_patrol_management.sql');
     const patrolMigration = fs.readFileSync(patrolMigrationPath, 'utf8');
     fs.unlinkSync(patrolMigrationPath);
+    const patrolOfflineMigrationPath = path.join(dir, '021_patrol_offline_round_completion.sql');
+    const patrolOfflineMigration = fs.readFileSync(patrolOfflineMigrationPath, 'utf8');
+    fs.unlinkSync(patrolOfflineMigrationPath);
+    const patrolLifecycleMigrationPath = path.join(dir, '022_patrol_checkpoint_location_and_lifecycle.sql');
+    const patrolLifecycleMigration = fs.readFileSync(patrolLifecycleMigrationPath, 'utf8');
+    fs.unlinkSync(patrolLifecycleMigrationPath);
     const employeeMigrationPath = path.join(dir, '007_employee_lifecycle.sql');
     const employeeMigration = fs.readFileSync(employeeMigrationPath, 'utf8');
     fs.unlinkSync(employeeMigrationPath);
@@ -866,6 +908,8 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     fs.writeFileSync(alarmMigrationPath, alarmMigration);
     fs.writeFileSync(alarmLifecycleMigrationPath, alarmLifecycleMigration);
     fs.writeFileSync(patrolMigrationPath, patrolMigration);
+    fs.writeFileSync(patrolOfflineMigrationPath, patrolOfflineMigration);
+    fs.writeFileSync(patrolLifecycleMigrationPath, patrolLifecycleMigration);
 
     await queryInDatabase(
       db,
@@ -880,14 +924,14 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['005', '006', '007', '009', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(result.applied).toEqual(['005', '006', '007', '009', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
     expect(result.baselined).toEqual(['001', '002', '003', '004']);
 
     const tenants = await queryInDatabase<{ name: string }>(db, 'SELECT name FROM tenants');
     expect(tenants.some((row) => row.name === 'Baseline-Test')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
   });
 
   test('8. Unvollständige Baseline führt zu sicherem Abbruch', async () => {
@@ -931,7 +975,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       '017_handover_management.sql',
       '018_handover_confirmation_identity.sql',
       '019_employee_account_link_permission.sql',
-      '020_patrol_management.sql'
+      '020_patrol_management.sql',
+      '021_patrol_offline_round_completion.sql',
+      '022_patrol_checkpoint_location_and_lifecycle.sql'
     ]);
     fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
     fs.rmSync(path.join(dir, '012_document_management.sql'), { force: true });
@@ -1133,9 +1179,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
     expect(result.baselined).toEqual([]);
-    expect((await historyRows(db))).toHaveLength(18);
+    expect((await historyRows(db))).toHaveLength(20);
   });
 
   test('26. Fremde Tabelle verhindert die Einstufung als leere Datenbank', async () => {
@@ -1534,7 +1580,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1542,7 +1588,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022']);
   });
 
   test('47. Fremdes Objekt bei Migration oberhalb 004 wird erkannt', async () => {
@@ -1555,7 +1601,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(19);
+    expect(await historyRows(db)).toHaveLength(21);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {

@@ -212,11 +212,14 @@ app.post('/api/v1/alarms/sync', authenticateJwt, alarmWorkflowController.syncAla
 app.get('/api/v1/patrol/dashboard', authenticateJwt, requirePermission('patrol:read'), patrolController.getDashboard);
 app.get('/api/v1/patrol/checkpoints', authenticateJwt, requirePermission('patrol:read'), patrolController.listCheckpoints);
 app.post('/api/v1/patrol/checkpoints', authenticateJwt, requirePermission('patrol:manage'), patrolController.createCheckpoint);
+app.patch('/api/v1/patrol/checkpoints/:id', authenticateJwt, requirePermission('patrol:manage'), patrolController.updateCheckpoint);
+app.patch('/api/v1/patrol/checkpoints/:id/status', authenticateJwt, requirePermission('patrol:manage'), patrolController.setCheckpointActive);
 app.post('/api/v1/patrol/checkpoints/:id/rotate-token', authenticateJwt, requirePermission('patrol:manage'), patrolController.rotateCheckpointToken);
 app.post('/api/v1/patrol/checkpoints/:id/archive', authenticateJwt, requirePermission('patrol:manage'), patrolController.archiveCheckpoint);
 app.get('/api/v1/patrol/routes', authenticateJwt, requirePermission('patrol:read'), patrolController.listRoutes);
 app.post('/api/v1/patrol/routes', authenticateJwt, requirePermission('patrol:manage'), patrolController.createRoute);
 app.post('/api/v1/patrol/routes/:id/versions', authenticateJwt, requirePermission('patrol:manage'), patrolController.createRouteVersion);
+app.post('/api/v1/patrol/routes/:id/archive', authenticateJwt, requirePermission('patrol:manage'), patrolController.archiveRoute);
 app.get('/api/v1/patrol/rounds', authenticateJwt, requirePermission('patrol:read'), patrolController.listRounds);
 app.get('/api/v1/patrol/scans', authenticateJwt, requirePermission('patrol:read'), patrolController.listScans);
 app.get('/api/v1/patrol/exceptions', authenticateJwt, requirePermission('patrol:read'), patrolController.listExceptions);

@@ -34,7 +34,13 @@ Die Übergabe-API verwendet `handovers:*`-RBAC und den Statusfluss `pending_hand
 
 ## REST-API
 
-Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md), [SOP_API.md](./SOP_API.md) und [HANDOVERS_API.md](./HANDOVERS_API.md).
+Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md), [SOP_API.md](./SOP_API.md), [HANDOVERS_API.md](./HANDOVERS_API.md) und [PATROL_MANAGEMENT.md](./PATROL_MANAGEMENT.md).
+
+## Kontrollgänge und Patrol-Sync
+
+`patrolController.ts` registriert Objekt-/Tenant-gebundene Kontrollpunkte, versionierte Routen, Rundgänge, Scans, Abweichungen und Auditereignisse. Jede Route prüft serverseitig `patrol:read`, `patrol:create`, `patrol:manage`, `patrol:exception:create` oder `patrol:audit`; `withTenantTransaction` setzt den Tenant-Kontext für RLS. Die Mitarbeiteridentität kommt aus `employees.account_user_id` plus aktiver `employee_site_assignments`-Zuordnung.
+
+Direkte und synchronisierte Rundgangsstarts/-abschlüsse rufen dieselben idempotenten Persistenzfunktionen auf. Der Sync speichert Mutation, Payload-Hash und Serverquittung in derselben Tenant-Transaktion; unerwartete Serverfehler werden nicht als fachliche Ablehnung verschluckt. Aktuelle offene Grenzen der API – z. B. kein Patrol-Konfliktauflöser oder konfigurierter Alarmprovider – sind in [PATROL_MANAGEMENT.md](./PATROL_MANAGEMENT.md) aufgeführt.
 
 ## Alarm- und Notfallmanagement
 

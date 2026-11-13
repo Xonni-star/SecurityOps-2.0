@@ -17,6 +17,7 @@ let employeeId = '';
 let checkpointId = '';
 let routeId = '';
 let roundId = '';
+let recoveryRoundId = '';
 
 beforeAll(async () => {
   const suffix = crypto.randomBytes(6).toString('hex');
@@ -80,7 +81,7 @@ function authorizedHeaders(): Record<string, string> {
 }
 
 afterAll(async () => {
-  if (!checkpointId && !routeId && !roundId && !siteId && !clientId && !employeeId && !userId) return;
+  if (!checkpointId && !routeId && !roundId && !recoveryRoundId && !siteId && !clientId && !employeeId && !userId) return;
   const db = await migrationPool.connect();
   try {
     await db.query('SET session_replication_role = replica');
@@ -96,7 +97,8 @@ afterAll(async () => {
       ? (await db.query('SELECT id FROM patrol_route_versions WHERE tenant_id=$1 AND route_id=$2', [TENANT_ID, routeId]))
         .rows.map(row => row.id)
       : [];
-    const entityIds = [checkpointId, routeId, roundId, ...scanIds, ...exceptionIds, ...versionIds].filter(Boolean);
+    const roundIds = [roundId, recoveryRoundId].filter(Boolean);
+    const entityIds = [checkpointId, routeId, ...roundIds, ...scanIds, ...exceptionIds, ...versionIds].filter(Boolean);
     if (entityIds.length) {
       await db.query('DELETE FROM patrol_events WHERE tenant_id=$1 AND entity_id=ANY($2::uuid[])', [TENANT_ID, entityIds]);
     }
@@ -104,7 +106,7 @@ afterAll(async () => {
       await db.query('DELETE FROM patrol_exceptions WHERE tenant_id=$1 AND checkpoint_id=$2', [TENANT_ID, checkpointId]);
       await db.query('DELETE FROM patrol_scans WHERE tenant_id=$1 AND checkpoint_uuid=$2', [TENANT_ID, checkpointId]);
     }
-    if (roundId) await db.query('DELETE FROM patrol_rounds WHERE tenant_id=$1 AND id=$2', [TENANT_ID, roundId]);
+    if (roundIds.length) await db.query('DELETE FROM patrol_rounds WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [TENANT_ID, roundIds]);
     if (routeId) {
       await db.query('DELETE FROM patrol_route_version_checkpoints WHERE tenant_id=$1 AND route_version_id=ANY($2::uuid[])', [TENANT_ID, versionIds]);
       await db.query('DELETE FROM patrol_route_versions WHERE tenant_id=$1 AND route_id=$2', [TENANT_ID, routeId]);
@@ -135,6 +137,12 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
   const mutationId = () => crypto.randomUUID();
   const capturedAt = new Date().toISOString();
 
+  const invalidCoordinates = await request(app)
+    .post('/api/v1/patrol/checkpoints')
+    .set(authorizedHeaders())
+    .send({ siteId, code: `BAD-${suffix}`, name: 'Invalid coordinates', latitude: 52.52 });
+  expect(invalidCoordinates.status).toBe(400);
+
   const checkpointResponse = await request(app)
     .post('/api/v1/patrol/checkpoints')
     .set(authorizedHeaders())
@@ -143,11 +151,21 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
       code: `PT-${suffix}`,
       name: `Patrol checkpoint ${suffix}`,
       locationDetails: 'Integration test',
+      buildingName: 'Tower A',
+      areaName: 'North entrance',
+      latitude: 52.52,
+      longitude: 13.405,
       requiredIntervalMinutes: 45
     });
   expect(checkpointResponse.status).toBe(201);
   checkpointId = checkpointResponse.body.data.id;
   const checkpoint = checkpointResponse.body.data;
+  expect(checkpoint).toMatchObject({
+    building_name: 'Tower A',
+    area_name: 'North entrance',
+    latitude: '52.520000',
+    longitude: '13.405000'
+  });
   expect(checkpoint.scanPayload).toMatch(/^secops:patrol:v1:/);
   const token = checkpoint.scanPayload.split(':').at(-1) as string;
   expect(token).toHaveLength(43);
@@ -157,6 +175,22 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
   );
   expect(storedToken.rows[0].token_hash).not.toContain(token);
   expect(storedToken.rows[0].token_hash.trim()).toMatch(/^[a-f0-9]{64}$/);
+
+  const updatedCheckpoint = await request(app)
+    .patch(`/api/v1/patrol/checkpoints/${checkpointId}`)
+    .set(authorizedHeaders())
+    .send({
+      code: checkpoint.code,
+      name: `${checkpoint.name} updated`,
+      locationDetails: 'Updated integration details',
+      buildingName: 'Tower B',
+      areaName: 'Service corridor',
+      latitude: 52.521,
+      longitude: 13.406,
+      requiredIntervalMinutes: 30
+    });
+  expect(updatedCheckpoint.status).toBe(200);
+  expect(updatedCheckpoint.body.data.name).toBe(`${checkpoint.name} updated`);
 
   const routeResponse = await request(app)
     .post('/api/v1/patrol/routes')
@@ -184,21 +218,45 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
     });
   expect(invalidVersion.status).toBe(400);
 
-  const roundMutationId = mutationId();
-  const startRound = () => request(app)
-    .post('/api/v1/patrol/rounds')
+  const deviceId = `patrol-test-${suffix}`;
+  const pushMutation = (clientUuid: string, action: 'CREATE' | 'UPDATE', payload: Record<string, unknown>) => request(app)
+    .post('/api/v1/sync/push')
     .set(authorizedHeaders())
-    .send({ siteId, routeId, startedAt: capturedAt, clientMutationId: roundMutationId });
+    .send({
+      deviceId,
+      mutations: [{
+        clientUuid,
+        entityType: 'patrol',
+        action,
+        clientTimestamp: capturedAt,
+        baseVersion: 1,
+        payload
+      }]
+    });
+
+  const roundMutationId = mutationId();
+  const roundIdFromClient = mutationId();
+  const roundStartPayload = {
+    recordType: 'round_start',
+    roundId: roundIdFromClient,
+    siteId,
+    routeId,
+    routeVersion: 1,
+    startedAt: capturedAt
+  };
+  const startRound = () => pushMutation(roundMutationId, 'CREATE', roundStartPayload);
   const roundResponses = await Promise.all([startRound(), startRound()]);
-  expect(roundResponses.map(response => response.status).sort()).toEqual([200, 201]);
-  expect(roundResponses[0].body.data.id).toBe(roundResponses[1].body.data.id);
-  roundId = roundResponses[0].body.data.id;
+  expect(roundResponses.map(response => response.status)).toEqual([200, 200]);
+  expect(roundResponses[0].body.data[0].status).toBe('SYNCED');
+  expect(roundResponses[0].body.data[0].serverId).toBe(roundResponses[1].body.data[0].serverId);
+  roundId = roundResponses[0].body.data[0].serverId;
+  expect(roundId).toBe(roundIdFromClient);
   const activeRounds = await request(app)
     .get(`/api/v1/patrol/rounds?siteId=${siteId}&status=in_progress`)
     .set(authorizedHeaders());
   expect(activeRounds.body.data.map((round: { id: string }) => round.id)).toContain(roundId);
 
-  const pushScan = (clientUuid: string, checkpointToken: string, tokenVersion: number) => request(app)
+  const pushScan = (clientUuid: string, checkpointToken: string, tokenVersion: number, scanRoundId: string | null = roundId) => request(app)
     .post('/api/v1/patrol/sync')
     .set(authorizedHeaders())
     .send({
@@ -212,7 +270,7 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
         payload: {
           siteId,
           checkpointId,
-          roundId,
+          roundId: scanRoundId || undefined,
           method: 'QR_CODE',
           checkpointToken,
           checkpointTokenVersion: tokenVersion,
@@ -258,6 +316,97 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
     .set(authorizedHeaders())
     .send({});
   expect(rotate.status).toBe(200);
+  const rotatedToken = rotate.body.data.scanPayload.split(':').at(-1) as string;
   const staleToken = await pushScan(mutationId(), token, 1);
   expect(staleToken.body.data[0].status).toBe('REJECTED');
+
+  const completedAt = new Date(Date.parse(capturedAt) + 60_000).toISOString();
+  const completionMutationId = mutationId();
+  const completionPayload = { recordType: 'round_complete', roundId, completedAt };
+  const completeRound = () => pushMutation(completionMutationId, 'UPDATE', completionPayload);
+  const completion = await completeRound();
+  expect(completion.body.data[0].status).toBe('SYNCED');
+  const repeatedCompletion = await completeRound();
+  expect(repeatedCompletion.body.data[0].serverId).toBe(completion.body.data[0].serverId);
+  const changedCompletionReplay = await pushMutation(completionMutationId, 'UPDATE', {
+    ...completionPayload,
+    completedAt: new Date(Date.parse(completedAt) + 1_000).toISOString()
+  });
+  expect(changedCompletionReplay.body.data[0].status).toBe('REJECTED');
+
+  const completionTimes = await migrationPool.query(
+    `SELECT completion_client_captured_at,completion_server_received_at,completed_at,status
+       FROM patrol_rounds WHERE tenant_id=$1 AND id=$2`,
+    [TENANT_ID, roundId]
+  );
+  expect(completionTimes.rows[0]).toMatchObject({
+    completion_client_captured_at: expect.any(Date),
+    completion_server_received_at: expect.any(Date),
+    status: 'completed'
+  });
+  expect(new Date(completionTimes.rows[0].completed_at).toISOString()).toBe(completedAt);
+
+  const recoveryMutationId = mutationId();
+  recoveryRoundId = mutationId();
+  const recoveryStartPayload = {
+    roundId: recoveryRoundId,
+    siteId,
+    routeId,
+    routeVersion: 1,
+    startedAt: capturedAt
+  };
+  const directStart = await request(app)
+    .post('/api/v1/patrol/rounds')
+    .set(authorizedHeaders())
+    .send({ ...recoveryStartPayload, clientMutationId: recoveryMutationId });
+  expect(directStart.status).toBe(201);
+  const recoveredStart = await pushMutation(recoveryMutationId, 'CREATE', {
+    recordType: 'round_start',
+    ...recoveryStartPayload
+  });
+  expect(recoveredStart.body.data[0]).toMatchObject({
+    status: 'SYNCED',
+    serverId: recoveryRoundId
+  });
+
+  const recoveryCompletionMutationId = mutationId();
+  const recoveryCompletedAt = new Date(Date.parse(capturedAt) + 120_000).toISOString();
+  const directCompletion = await request(app)
+    .post(`/api/v1/patrol/rounds/${recoveryRoundId}/complete`)
+    .set(authorizedHeaders())
+    .send({ clientMutationId: recoveryCompletionMutationId, completedAt: recoveryCompletedAt });
+  expect(directCompletion.status).toBe(200);
+  const recoveredCompletion = await pushMutation(recoveryCompletionMutationId, 'UPDATE', {
+    recordType: 'round_complete',
+    roundId: recoveryRoundId,
+    completedAt: recoveryCompletedAt
+  });
+  expect(recoveredCompletion.body.data[0]).toMatchObject({
+    status: 'SYNCED',
+    serverId: recoveryRoundId
+  });
+
+  const disabled = await request(app)
+    .patch(`/api/v1/patrol/checkpoints/${checkpointId}/status`)
+    .set(authorizedHeaders())
+    .send({ active: false });
+  expect(disabled.status).toBe(200);
+  const inactiveCheckpointScan = await pushScan(mutationId(), rotatedToken, rotate.body.data.token_version, null);
+  expect(inactiveCheckpointScan.body.data[0].status).toBe('REJECTED');
+  const enabled = await request(app)
+    .patch(`/api/v1/patrol/checkpoints/${checkpointId}/status`)
+    .set(authorizedHeaders())
+    .send({ active: true });
+  expect(enabled.status).toBe(200);
+
+  const archivedRoute = await request(app)
+    .post(`/api/v1/patrol/routes/${routeId}/archive`)
+    .set(authorizedHeaders())
+    .send({});
+  expect(archivedRoute.body.data).toMatchObject({ id: routeId, archived: true });
+  const archivedCheckpoint = await request(app)
+    .post(`/api/v1/patrol/checkpoints/${checkpointId}/archive`)
+    .set(authorizedHeaders())
+    .send({});
+  expect(archivedCheckpoint.body.data).toMatchObject({ id: checkpointId, archived: true });
 });

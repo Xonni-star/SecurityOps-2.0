@@ -56,7 +56,7 @@ import {
   initialGdprPolicies
 } from './mockData';
 import { apiClient, ApiError } from './services/apiClient';
-import { offlineVault, StoredAlarmMutation } from './services/indexedDbService';
+import { offlineVault, OutboxMutation, StoredAlarmMutation } from './services/indexedDbService';
 
 export type ThemeMode = 'dark' | 'light';
 
@@ -233,6 +233,25 @@ function offlineQueuePreviewPayload(entityType: OfflineQueueItem['entityType'], 
   if (entityType !== 'patrol' || typeof payload?.checkpointToken !== 'string') return payload;
   const { checkpointToken: _checkpointToken, ...safePayload } = payload;
   return { ...safePayload, tokenStoredLocally: true };
+}
+
+function offlineOutboxToQueueItem(item: OutboxMutation): OfflineQueueItem {
+  const status: SyncStatus = item.status === 'CONFLICT' ? 'conflict'
+    : item.status === 'FAILED' ? 'failed'
+      : item.status === 'SYNCED' ? 'synced' : 'pending';
+  return {
+    id: item.id,
+    tenantId: item.tenantId,
+    entityType: item.entityType as OfflineQueueItem['entityType'],
+    action: item.action,
+    payload: offlineQueuePreviewPayload(item.entityType as OfflineQueueItem['entityType'], item.payload),
+    createdAt: item.occurredAt,
+    retryCount: item.retryCount,
+    status,
+    errorMessage: item.errorMessage,
+    baseVersion: item.baseVersion,
+    conflictDetails: item.conflictDetails
+  };
 }
 
 // PostgreSQL ist die maßgebliche Datenquelle. Die Mapper übersetzen die
@@ -576,7 +595,7 @@ interface SecurityOpsStore {
   lastSyncTime: string | null;
   toggleNetworkSimulation: () => void;
   syncQueue: OfflineQueueItem[];
-  enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'>) => Promise<void>;
+  enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'> & { id?: string }) => Promise<void>;
   triggerManualSync: () => Promise<{ success: number; failed: number; conflicts: number }>;
   resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => Promise<void>;
   clearCompletedSyncs: () => void;
@@ -1416,7 +1435,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     return results;
   },
 
-  isOnline: true,
+  isOnline: typeof navigator === 'undefined' || navigator.onLine,
   isSyncing: false,
   lastSyncTime: null,
   toggleNetworkSimulation: () => {
@@ -1446,7 +1465,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   enqueueOfflineAction: async (item) => {
     const queueEntry: OfflineQueueItem = {
       ...item,
-      id: `queue-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      id: item.id ?? `queue-${crypto.randomUUID()}`,
       createdAt: new Date().toLocaleTimeString(),
       retryCount: 0,
       status: 'pending'
@@ -1504,7 +1523,12 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       const pendingItems = await offlineVault.getPendingOutbox(currentTenantId);
 
       if (pendingItems.length === 0) {
-        set({ isSyncing: false, lastSyncTime: new Date().toLocaleTimeString() });
+        const allItems = await offlineVault.getOutbox(currentTenantId);
+        set({
+          syncQueue: allItems.map(offlineOutboxToQueueItem),
+          isSyncing: false,
+          lastSyncTime: new Date().toLocaleTimeString()
+        });
         isSyncRunningMutex = false;
         return { success: 0, failed: 0, conflicts: 0 };
       }
@@ -1542,7 +1566,18 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           const receipts = Array.isArray(serverResponse) ? serverResponse : serverResponse?.data;
           if (!Array.isArray(receipts)) continue;
           for (const receipt of receipts) {
-            if (receipt.status === 'SYNCED') { successCount++; await offlineVault.markSynced(receipt.clientUuid); }
+            if (receipt.status === 'SYNCED') {
+              const mutation = orderedItems.find(item => item.id === receipt.clientUuid);
+              if (mutation?.entityType === 'patrol') {
+                if (mutation.payload?.recordType === 'round_start' && mutation.payload.roundId) {
+                  await offlineVault.markPatrolRoundSynced(currentTenantId, mutation.userId, mutation.payload.roundId);
+                } else if (mutation.payload?.recordType === 'round_complete' && mutation.payload.roundId) {
+                  await offlineVault.deletePatrolRound(currentTenantId, mutation.userId, mutation.payload.roundId);
+                }
+              }
+              successCount++;
+              await offlineVault.markSynced(receipt.clientUuid);
+            }
             else if (receipt.status === 'CONFLICT') { conflictCount++; await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', { conflictDetails: receipt.conflictData }); }
             else { failedCount++; await offlineVault.updateMutationStatus(receipt.clientUuid, 'FAILED', { errorMessage: receipt.message || 'Server hat Mutation abgewiesen' }); }
           }
@@ -1559,18 +1594,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         return { success: 0, failed: pendingItems.length, conflicts: 0 };
       }
 
-      const remainingPending = await offlineVault.getPendingOutbox(currentTenantId);
+      const remainingOutbox = await offlineVault.getOutbox(currentTenantId);
       set({
-        syncQueue: remainingPending.map((p) => ({
-          id: p.id,
-          tenantId: p.tenantId,
-          entityType: p.entityType as any,
-          action: p.action,
-          payload: offlineQueuePreviewPayload(p.entityType, p.payload),
-          createdAt: p.occurredAt,
-          retryCount: p.retryCount,
-          status: p.status === 'CONFLICT' ? 'conflict' : 'pending'
-        })),
+        syncQueue: remainingOutbox.map(offlineOutboxToQueueItem),
         isSyncing: false,
         lastSyncTime: new Date().toLocaleTimeString()
       });
@@ -2373,6 +2399,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       entityType: 'patrol',
       action: 'CREATE',
       payload: {
+        recordType: 'scan',
         siteId: scan.siteId,
         checkpointId: scan.checkpointId,
         method: scan.method,
@@ -2853,6 +2880,7 @@ if (typeof window !== 'undefined') {
     useSecurityStore.setState({ isOnline: true });
     void useSecurityStore.getState().syncPendingSOPAcknowledgements();
     void useSecurityStore.getState().syncPendingAlarmMutations();
+    void useSecurityStore.getState().triggerManualSync();
   });
   window.addEventListener('offline', () => {
     useSecurityStore.setState({ isOnline: false });

@@ -11,9 +11,14 @@ interface PatrolCheckpoint {
   code: string;
   name: string;
   location_details: string;
+  building_name?: string | null;
+  area_name?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   token_version: number;
   required_interval_minutes: number;
   active: boolean;
+  archived_at?: string | null;
 }
 
 interface PatrolRoute {
@@ -24,6 +29,7 @@ interface PatrolRoute {
   name: string;
   current_version: number;
   active: boolean;
+  archived_at?: string | null;
   checkpoints: Array<{ checkpointId: string; code: string; name: string; sequence: number; plannedOffsetMinutes: number }>;
 }
 
@@ -97,7 +103,12 @@ export const PatrolModule: React.FC = () => {
   const [checkpointCode, setCheckpointCode] = useState('');
   const [checkpointName, setCheckpointName] = useState('');
   const [checkpointLocation, setCheckpointLocation] = useState('');
+  const [checkpointBuilding, setCheckpointBuilding] = useState('');
+  const [checkpointArea, setCheckpointArea] = useState('');
+  const [checkpointLatitude, setCheckpointLatitude] = useState('');
+  const [checkpointLongitude, setCheckpointLongitude] = useState('');
   const [checkpointInterval, setCheckpointInterval] = useState(60);
+  const [editingCheckpointId, setEditingCheckpointId] = useState('');
   const [routeCode, setRouteCode] = useState('');
   const [routeName, setRouteName] = useState('');
   const [routeChangeReason, setRouteChangeReason] = useState('');
@@ -151,23 +162,78 @@ export const PatrolModule: React.FC = () => {
       setErrorMessage('Wählen Sie zuerst ein Objekt.');
       return;
     }
+    if (Boolean(checkpointLatitude.trim()) !== Boolean(checkpointLongitude.trim())) {
+      setErrorMessage('Breiten- und Längengrad müssen gemeinsam angegeben werden.');
+      return;
+    }
+    const latitude = checkpointLatitude.trim() ? Number(checkpointLatitude) : null;
+    const longitude = checkpointLongitude.trim() ? Number(checkpointLongitude) : null;
+    if ((latitude !== null && !Number.isFinite(latitude)) || (longitude !== null && !Number.isFinite(longitude))) {
+      setErrorMessage('GPS-Koordinaten müssen gültige Zahlen sein.');
+      return;
+    }
+    const checkpointPayload = {
+      code: checkpointCode,
+      name: checkpointName,
+      locationDetails: checkpointLocation,
+      buildingName: checkpointBuilding || null,
+      areaName: checkpointArea || null,
+      latitude,
+      longitude,
+      requiredIntervalMinutes: checkpointInterval
+    };
     setSaving(true);
     try {
-      const created = await apiClient.post<CreatedCheckpoint>('/patrol/checkpoints', {
-        siteId,
-        code: checkpointCode,
-        name: checkpointName,
-        locationDetails: checkpointLocation,
-        requiredIntervalMinutes: checkpointInterval
-      });
-      setCreatedCheckpoint(created);
-      setNotice('Kontrollpunkt angelegt. Der neue QR-/NFC-Token ist nur jetzt sichtbar; sicher verwahren und am Kontrollpunkt hinterlegen.');
+      if (editingCheckpointId) {
+        await apiClient.patch(`/patrol/checkpoints/${editingCheckpointId}`, checkpointPayload);
+        setNotice('Kontrollpunkt aktualisiert; historische Scan- und Routendaten bleiben unverändert.');
+      } else {
+        const created = await apiClient.post<CreatedCheckpoint>('/patrol/checkpoints', {
+          siteId,
+          ...checkpointPayload
+        });
+        setCreatedCheckpoint(created);
+        setNotice('Kontrollpunkt angelegt. Der neue QR-/NFC-Token ist nur jetzt sichtbar; sicher verwahren und am Kontrollpunkt hinterlegen.');
+      }
       setCheckpointCode('');
       setCheckpointName('');
       setCheckpointLocation('');
+      setCheckpointBuilding('');
+      setCheckpointArea('');
+      setCheckpointLatitude('');
+      setCheckpointLongitude('');
+      setEditingCheckpointId('');
       await refresh();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Kontrollpunkt konnte nicht gespeichert werden.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const editCheckpoint = (point: PatrolCheckpoint) => {
+    setSiteId(point.site_id);
+    setEditingCheckpointId(point.id);
+    setCheckpointCode(point.code);
+    setCheckpointName(point.name);
+    setCheckpointLocation(point.location_details);
+    setCheckpointBuilding(point.building_name ?? '');
+    setCheckpointArea(point.area_name ?? '');
+    setCheckpointLatitude(point.latitude == null ? '' : String(point.latitude));
+    setCheckpointLongitude(point.longitude == null ? '' : String(point.longitude));
+    setCheckpointInterval(point.required_interval_minutes);
+    setCreatedCheckpoint(null);
+    setNotice('');
+  };
+
+  const setCheckpointActive = async (point: PatrolCheckpoint, active: boolean) => {
+    setSaving(true);
+    try {
+      await apiClient.patch(`/patrol/checkpoints/${point.id}/status`, { active });
+      setNotice(active ? 'Kontrollpunkt aktiviert.' : 'Kontrollpunkt deaktiviert; Scans werden serverseitig abgelehnt.');
+      await refresh();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Kontrollpunktstatus konnte nicht geändert werden.');
     } finally {
       setSaving(false);
     }
@@ -195,6 +261,19 @@ export const PatrolModule: React.FC = () => {
       await refresh();
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Kontrollpunkt konnte nicht archiviert werden.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const archiveRoute = async (routeId: string) => {
+    setSaving(true);
+    try {
+      await apiClient.post(`/patrol/routes/${routeId}/archive`, {});
+      setNotice('Route archiviert; historische Kontrollgänge und Routenversionen bleiben erhalten.');
+      await refresh();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Route konnte nicht archiviert werden.');
     } finally {
       setSaving(false);
     }
@@ -329,17 +408,24 @@ export const PatrolModule: React.FC = () => {
       {canManage && (
         <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           <form onSubmit={createCheckpoint} className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900 p-4">
-            <h2 className="font-bold text-white">Kontrollpunkt anlegen</h2>
+            <h2 className="font-bold text-white">{editingCheckpointId ? 'Kontrollpunkt bearbeiten' : 'Kontrollpunkt anlegen'}</h2>
             <p className="text-[11px] text-slate-400">Ein zufälliger 256-Bit-Token wird erzeugt; gespeichert wird nur sein SHA-256-Hash. Der Token ist nur nach Anlegen oder Rotation sichtbar.</p>
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <input required maxLength={50} value={checkpointCode} onChange={event => setCheckpointCode(event.target.value)} placeholder="Code (z. B. CP-01)" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
               <input required maxLength={150} value={checkpointName} onChange={event => setCheckpointName(event.target.value)} placeholder="Name" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
               <input maxLength={2000} value={checkpointLocation} onChange={event => setCheckpointLocation(event.target.value)} placeholder="Standortdetails" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              <input maxLength={150} value={checkpointBuilding} onChange={event => setCheckpointBuilding(event.target.value)} placeholder="Gebäude (optional)" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              <input maxLength={150} value={checkpointArea} onChange={event => setCheckpointArea(event.target.value)} placeholder="Bereich (optional)" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              <input type="number" min={-90} max={90} step="any" value={checkpointLatitude} onChange={event => setCheckpointLatitude(event.target.value)} placeholder="Breitengrad (optional)" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              <input type="number" min={-180} max={180} step="any" value={checkpointLongitude} onChange={event => setCheckpointLongitude(event.target.value)} placeholder="Längengrad (optional)" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
               <label className="text-slate-300">Prüfintervall (Min.)
                 <input type="number" min={1} max={1440} value={checkpointInterval} onChange={event => setCheckpointInterval(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
               </label>
             </div>
-            <button disabled={saving || !siteId} className="flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 font-semibold text-white disabled:opacity-50"><Plus className="h-4 w-4" /> Kontrollpunkt speichern</button>
+            <div className="flex flex-wrap gap-2">
+              <button disabled={saving || !siteId} className="flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 font-semibold text-white disabled:opacity-50"><Plus className="h-4 w-4" /> {editingCheckpointId ? 'Änderungen speichern' : 'Kontrollpunkt speichern'}</button>
+              {editingCheckpointId && <button type="button" onClick={() => { setEditingCheckpointId(''); setCheckpointCode(''); setCheckpointName(''); setCheckpointLocation(''); setCheckpointBuilding(''); setCheckpointArea(''); setCheckpointLatitude(''); setCheckpointLongitude(''); }} className="rounded-lg border border-slate-700 px-3 py-2 text-slate-200">Bearbeitung abbrechen</button>}
+            </div>
             {createdCheckpoint && (
               <div className="flex flex-col gap-3 rounded-xl border border-emerald-500/30 bg-slate-950 p-3 sm:flex-row sm:items-center">
                 {checkpointQr && <img src={checkpointQr} alt={`QR-Code für ${createdCheckpoint.code}`} className="h-32 w-32 bg-white p-2" />}
@@ -400,8 +486,9 @@ export const PatrolModule: React.FC = () => {
         <DataPanel title="Aktuelle Routen" loading={loading} empty={!routes.length}>
           <div className="space-y-2">{routes.map(route => (
             <article key={route.id} className="rounded-lg border border-slate-800 bg-slate-950 p-3">
-              <div className="flex items-center justify-between gap-2"><strong className="text-slate-100">{route.route_code} · {route.name}</strong><span className="rounded bg-indigo-500/15 px-2 py-1 text-indigo-200">v{route.current_version}</span></div>
+              <div className="flex items-center justify-between gap-2"><strong className="text-slate-100">{route.route_code} · {route.name}</strong><span className="rounded bg-indigo-500/15 px-2 py-1 text-indigo-200">v{route.current_version}{route.active ? '' : ' · inaktiv'}</span></div>
               <p className="mt-1 text-[11px] text-slate-400">{route.site_name} · {route.checkpoints.map(point => point.code).join(' → ')}</p>
+              {canManage && route.active && <button disabled={saving} onClick={() => void archiveRoute(route.id)} className="mt-2 rounded bg-slate-800 px-2 py-1 text-[10px] text-amber-200">Route archivieren</button>}
             </article>
           ))}</div>
         </DataPanel>
@@ -409,8 +496,8 @@ export const PatrolModule: React.FC = () => {
         <DataPanel title="Kontrollpunkte" loading={loading} empty={!checkpoints.length}>
           <div className="space-y-2">{checkpoints.map(point => (
             <article key={point.id} className="flex flex-col gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div><strong className="text-slate-100">{point.code} · {point.name}</strong><p className="mt-1 text-[11px] text-slate-400">{point.site_name} · Token v{point.token_version} · Intervall {point.required_interval_minutes} Min.</p></div>
-              {canManage && point.active && <div className="flex gap-2"><button disabled={saving} onClick={() => void rotateToken(point.id)} className="rounded bg-slate-800 px-2 py-1 text-[10px] text-blue-200">Token rotieren</button><button disabled={saving} onClick={() => void archiveCheckpoint(point.id)} className="rounded bg-slate-800 px-2 py-1 text-[10px] text-amber-200">Archivieren</button></div>}
+              <div><strong className="text-slate-100">{point.code} · {point.name}</strong><p className="mt-1 text-[11px] text-slate-400">{point.site_name} · Token v{point.token_version} · Intervall {point.required_interval_minutes} Min. · {point.active ? 'aktiv' : point.archived_at ? 'archiviert' : 'deaktiviert'}</p><p className="mt-1 text-[10px] text-slate-500">{[point.building_name, point.area_name, point.location_details, point.latitude != null && point.longitude != null ? `${point.latitude}, ${point.longitude}` : null].filter(Boolean).join(' · ')}</p></div>
+              {canManage && !point.archived_at && <div className="flex flex-wrap gap-2"><button disabled={saving} onClick={() => editCheckpoint(point)} className="rounded bg-slate-800 px-2 py-1 text-[10px] text-slate-200">Bearbeiten</button><button disabled={saving} onClick={() => void setCheckpointActive(point, !point.active)} className="rounded bg-slate-800 px-2 py-1 text-[10px] text-indigo-200">{point.active ? 'Deaktivieren' : 'Aktivieren'}</button>{point.active && <button disabled={saving} onClick={() => void rotateToken(point.id)} className="rounded bg-slate-800 px-2 py-1 text-[10px] text-blue-200">Token rotieren</button>}<button disabled={saving} onClick={() => void archiveCheckpoint(point.id)} className="rounded bg-slate-800 px-2 py-1 text-[10px] text-amber-200">Archivieren</button></div>}
             </article>
           ))}</div>
         </DataPanel>

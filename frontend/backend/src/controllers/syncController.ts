@@ -3,7 +3,12 @@ import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 import { createHandover, handoverCreateSchema, HandoverConflictError } from '../services/handoverService';
 import { computePayloadHash } from '../services/syncHash';
-import { recordPatrolException, recordPatrolScan } from './patrolController';
+import {
+  recordPatrolException,
+  recordPatrolRoundCompletion,
+  recordPatrolRoundStart,
+  recordPatrolScan
+} from './patrolController';
 
 export { canonicalStringify, computePayloadHash } from '../services/syncHash';
 
@@ -571,7 +576,55 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
         // 5. PATROL
         else if (mut.entityType === 'patrol') {
-          if (mut.action === 'CREATE') {
+          if (mut.payload.recordType === 'round_start' && mut.action === 'CREATE') {
+            try {
+              const { recordType: _recordType, ...roundPayload } = mut.payload;
+              const round = await recordPatrolRoundStart(
+                client, tenantId, userId, mut.clientUuid, roundPayload, payloadHash
+              );
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: round.id,
+                status: 'SYNCED',
+                serverVersion: 1,
+                message: round.idempotent ? 'Kontrollgangsstart bereits idempotent bestätigt.' : undefined
+              };
+            } catch (error) {
+              const statusCode = Number((error as any)?.statusCode);
+              if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) throw error;
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: 'none',
+                status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: (error as Error).message
+              };
+            }
+          } else if (mut.payload.recordType === 'round_complete' && mut.action === 'UPDATE') {
+            try {
+              const { recordType: _recordType, ...completionPayload } = mut.payload;
+              const completion = await recordPatrolRoundCompletion(
+                client, tenantId, userId, mut.clientUuid, completionPayload, payloadHash
+              );
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: completion.id,
+                status: 'SYNCED',
+                serverVersion: 1,
+                message: completion.idempotent ? 'Kontrollgangsabschluss bereits idempotent bestätigt.' : undefined
+              };
+            } catch (error) {
+              const statusCode = Number((error as any)?.statusCode);
+              if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) throw error;
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: 'none',
+                status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: (error as Error).message
+              };
+            }
+          } else if (mut.action === 'CREATE') {
             try {
               if (mut.payload.recordType === 'exception') {
                 const { recordType: _recordType, ...exceptionPayload } = mut.payload;
@@ -598,7 +651,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               }
             } catch (error) {
               const statusCode = Number((error as any)?.statusCode);
-              if (statusCode < 400 || statusCode >= 500) throw error;
+              if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) throw error;
               itemResult = {
                 clientUuid: mut.clientUuid,
                 serverId: 'none',
@@ -613,7 +666,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               serverId: 'none',
               status: 'REJECTED',
               serverVersion: mut.baseVersion,
-              message: 'Kontrollgangs-Scans sind unveränderliche Audit-Ereignisse (UPDATE/DELETE unzulässig).'
+              message: 'Nicht unterstützte Kontrollgangsmutation; nur Starts, Abschlüsse, Scans und Abweichungen sind zulässig.'
             };
           }
         }

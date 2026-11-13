@@ -182,11 +182,23 @@ beforeEach(() => {
     authError: null,
     isLoadingData: false,
     isOnline: true,
+    syncQueue: [],
     dataLoadError: null
   });
 });
 
 describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
+  test('Wiederverbindung startet automatisch die Synchronisierung der Offline-Outbox', () => {
+    const originalSync = useSecurityStore.getState().triggerManualSync;
+    const syncPatrolOutbox = vi.fn();
+    useSecurityStore.setState({ triggerManualSync: syncPatrolOutbox });
+
+    window.dispatchEvent(new Event('online'));
+
+    expect(syncPatrolOutbox).toHaveBeenCalledOnce();
+    useSecurityStore.setState({ triggerManualSync: originalSync });
+  });
+
   test('1. loadTenantData hydratisiert Kunden, Objekte, Mitarbeiter und Wachbuch aus der API', async () => {
     mockReadEndpoints();
 
