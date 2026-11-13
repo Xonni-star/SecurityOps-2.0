@@ -918,9 +918,40 @@ export const RosterModule: React.FC = () => {
       {reportOpen && <Dialog title={`Planungsberichte · ${range.from} – ${range.to}`} onClose={() => setReportOpen(false)}>
         <div className="space-y-4">
           <div className="flex justify-end"><button className={buttonClass} onClick={() => window.print()}><Printer size={14} /> Drucken</button><button className={`${buttonClass} ml-2`} onClick={() => void downloadHoursCsv()}><Download size={14} /> Arbeitsstunden-CSV</button></div>
-          <section><h3 className="mb-2 text-xs font-bold text-slate-300">Geplante Stunden</h3><div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Stunden</th><th className="p-2">Wochenenddienste</th></tr></thead><tbody>{workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{row.planned_hours}</td><td className="p-2">{row.weekend_shifts}</td></tr>)}</tbody></table></div></section>
-          <section><h3 className="mb-2 text-xs font-bold text-slate-300">Besetzung / Personalbedarf</h3><div className="overflow-x-auto"><table className="w-full text-left text-xs"><thead className="text-slate-500"><tr><th className="p-2">Datum</th><th className="p-2">Objekt</th><th className="p-2">Besetzt</th><th className="p-2">Bedarf</th><th className="p-2">Offen</th></tr></thead><tbody>{reportCoverage.map(row => <tr key={row.shift_id} className="border-t border-slate-800"><td className="p-2">{String(row.shift_date).slice(0, 10)}</td><td className="p-2">{row.site_name}</td><td className="p-2">{row.assigned_count}</td><td className="p-2">{row.required_count ?? 'n. v.'}</td><td className="p-2">{row.shortfall ?? 'n. v.'}</td></tr>)}</tbody></table></div></section>
-          <p className="text-[11px] text-amber-300">Diese Backendberichte enthalten geplante Stunden, Wochenend-Schichtanzahl und Besetzungsdeckung. Sie sind keine Ist-/Überstunden-, Feiertags-, Nachtarbeits-, Qualifikations- oder Abwesenheitsauswertung und keine Rechtskonformitätsaussage.</p>
+          <section>
+            <h3 className="mb-2 text-xs font-bold text-slate-300">Geplante Stunden</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Stunden</th><th className="p-2">Wochenenddienste</th></tr></thead>
+                <tbody>{workHours.length === 0
+                  ? <tr><td colSpan={4} className="p-3 text-center text-slate-500">Keine Berichtsdaten für diesen Zeitraum.</td></tr>
+                  : workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{row.planned_hours}</td><td className="p-2">{row.weekend_shifts}</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section>
+            <h3 className="mb-2 text-xs font-bold text-slate-300">Besetzung / Personalbedarf</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-slate-500"><tr><th className="p-2">Datum</th><th className="p-2">Objekt</th><th className="p-2">Besetzt</th><th className="p-2">Bedarf</th><th className="p-2">Offen</th></tr></thead>
+                <tbody>{reportCoverage.length === 0
+                  ? <tr><td colSpan={5} className="p-3 text-center text-slate-500">Keine Besetzungsdaten für diesen Zeitraum.</td></tr>
+                  : reportCoverage.map(row => <tr key={row.shift_id} className="border-t border-slate-800"><td className="p-2">{String(row.shift_date).slice(0, 10)}</td><td className="p-2">{row.site_name}</td><td className="p-2">{row.assigned_count}</td><td className="p-2">{row.required_count ?? 'n. v.'}</td><td className="p-2">{row.shortfall ?? 'n. v.'}</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section role="status" aria-label="Berichtsabdeckung" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[11px] text-amber-200">
+            <h3 className="mb-1 font-bold">Teilbericht — nicht freigegeben oder vollständig</h3>
+            <p>Der aktuelle Serververtrag liefert geplante Stunden, Wochenend-Schichtanzahl und Besetzungsdeckung. Nicht bereitgestellt sind:</p>
+            <ul className="mt-1 list-inside list-disc">
+              <li>Ist-Stunden und Überstunden</li>
+              <li>Nacht- und Feiertagsauswertung</li>
+              <li>Qualifikations- und Abwesenheitsauswertung</li>
+            </ul>
+            <p className="mt-1">Nicht verfügbare Werte werden nicht als null oder 0 interpretiert. Dies ist keine Rechtskonformitätsaussage.</p>
+          </section>
         </div>
       </Dialog>}
     </section>

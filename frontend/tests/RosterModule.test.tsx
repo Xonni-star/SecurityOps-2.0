@@ -242,6 +242,19 @@ describe('RosterModule', () => {
     expect(Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Veröffentlichen'))?.hasAttribute('disabled')).toBe(true);
   });
 
+  test('shows report sections as empty or unavailable instead of inventing missing metrics', async () => {
+    await act(async () => root.render(<RosterModule />));
+    const reports = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Berichte'));
+    if (!reports) throw new Error('Berichte fehlen');
+    await act(async () => reports.click());
+
+    expect(container.textContent).toContain('Keine Berichtsdaten für diesen Zeitraum.');
+    expect(container.textContent).toContain('Keine Besetzungsdaten für diesen Zeitraum.');
+    expect(container.querySelector('[aria-label="Berichtsabdeckung"]')?.textContent).toContain('Ist-Stunden und Überstunden');
+    expect(container.querySelector('[aria-label="Berichtsabdeckung"]')?.textContent).toContain('Qualifikations- und Abwesenheitsauswertung');
+    expect(container.textContent).not.toContain('Überstunden: 0');
+  });
+
   test('queues only a supported offline draft create and labels it pending, not approved', async () => {
     mocks.storeState.isOnline = false;
     await act(async () => root.render(<RosterModule />));

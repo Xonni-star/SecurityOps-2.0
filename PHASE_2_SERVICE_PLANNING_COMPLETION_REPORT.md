@@ -9,7 +9,7 @@ Die bestehende `roster`-Route wurde zu einer responsiven Planungsoberfläche aus
 - Monats-, Wochen- und Tageskalender mit Gruppierung nach Zeit, Mitarbeiter, Objekt und Kunde, Zeitraumwahl, Filter und Suche.
 - Schichtentwürfe anlegen, bearbeiten, verschieben, kopieren, wiederholen und über Templates erzeugen; Perioden anlegen und serverseitig veröffentlichen.
 - Mitarbeiter online zuweisen; Tauschanträge stellen und gemäß Berechtigung entscheiden. Serverbefunde und Revisionskonflikte werden angezeigt. Destruktive und Veröffentlichungsaktionen erfordern Bestätigung.
-- Coverage- und Arbeitszeitberichte sowie CSV-Export und Druckansicht.
+- Coverage- und Arbeitszeitberichte sowie CSV-Export und Druckansicht. Leere Berichtsergebnisse sind ausdrücklich gekennzeichnet; nicht verfügbare Kategorien werden als unkonfiguriert/fehlend ausgewiesen und nicht durch Nullwerte ersetzt.
 - Tenant-/User-scoped IndexedDB-Cache sowie dauerhafte Shift-Outbox mit stabiler Mutations-ID und Basisrevision. Nach Sync werden Server-ID/Revision übernommen; Konflikte und Ablehnungen bleiben sichtbar.
 - Offline ist das Anlegen einzelner unbesetzter Drafts ohne Periodenbindung und mit Mindestbesetzung 1 möglich. Offline-Updates verwenden die Server-ID und Basisrevision und ändern weder Periodenzuordnung noch Mindestbesetzung. Beides bleibt bis zur Serverantwort ungeprüft und unveröffentlicht. Zuweisung, Tauschentscheidung und Veröffentlichung sind online-only.
 - Semantische Controls, Lade-/Leer-/Fehlerzustände, Cache-Hinweise und zugängliche Status-/Befunddarstellung.
