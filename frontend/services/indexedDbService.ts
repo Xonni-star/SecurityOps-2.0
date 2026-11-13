@@ -3,7 +3,7 @@
 // Behandelt transaction.onerror und transaction.onabort als echte Fehler. Keine verschluckten Fehler!
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 function patrolMutationOrder(mutation: OutboxMutation): number {
   if (mutation.entityType !== 'patrol') return 0;
@@ -87,6 +87,15 @@ interface StoredPatrolCheckpointCache {
   userId: string;
   checkpoints: Array<Record<string, unknown>>;
   routes?: Array<Record<string, unknown>>;
+  cachedAt: string;
+}
+
+export interface StoredPlanningCache {
+  cacheKey: string;
+  tenantId: string;
+  userId: string;
+  shifts: any[];
+  periods: any[];
   cachedAt: string;
 }
 
@@ -194,6 +203,11 @@ export class IndexedDbService {
         if (!db.objectStoreNames.contains('patrolRounds')) {
           const patrolRounds = db.createObjectStore('patrolRounds', { keyPath: 'cacheKey' });
           patrolRounds.createIndex('tenantUser', ['tenantId', 'userId'], { unique: false });
+        }
+
+        if (!db.objectStoreNames.contains('planningCache')) {
+          const planningCache = db.createObjectStore('planningCache', { keyPath: 'cacheKey' });
+          planningCache.createIndex('tenantUser', ['tenantId', 'userId'], { unique: true });
         }
       };
 
@@ -619,6 +633,41 @@ export class IndexedDbService {
         if (!request.result) return;
         store.put({ ...request.result, serverSynced: true });
       };
+    });
+  }
+
+  async savePlanningCache(
+    tenantId: string,
+    userId: string,
+    shifts: any[],
+    periods: any[]
+  ): Promise<void> {
+    const db = await this.init();
+    const cache: StoredPlanningCache = {
+      cacheKey: `${tenantId}:${userId}`,
+      tenantId,
+      userId,
+      shifts,
+      periods,
+      cachedAt: new Date().toISOString()
+    };
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('planningCache', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Speichern des Offline-Dienstplancaches fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Offline-Dienstplancache-Transaktion abgebrochen'));
+      tx.objectStore('planningCache').put(cache);
+    });
+  }
+
+  async getPlanningCache(tenantId: string, userId: string): Promise<StoredPlanningCache | null> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('planningCache', 'readonly');
+      const request = tx.objectStore('planningCache').get(`${tenantId}:${userId}`);
+      request.onsuccess = () => resolve((request.result as StoredPlanningCache) ?? null);
+      request.onerror = () => reject(request.error || new Error('Lesen des Offline-Dienstplancaches fehlgeschlagen'));
     });
   }
 
