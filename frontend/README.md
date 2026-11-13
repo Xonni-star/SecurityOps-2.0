@@ -10,6 +10,12 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 - **SecurityOps TypeScript-Backend**: `frontend/backend/` (bzw. `backend/` bei flacher Monorepo-Struktur). Enthält die vollwertige Node.js/Express/TypeScript REST-API (`/api/v1`), PostgreSQL RLS-Transaktionen und die Idempotenz-Engine.
 - Es gibt kein separates Root-Proxy-Backend. Alle SecurityOps-Backend-Befehle werden unter `frontend/backend/` ausgeführt.
 
+## Alarm- und Notfallmanagement
+
+`AlarmsModule.tsx` verwendet die tenant- und objektbezogene Alarm-API. Notfallpläne haben unveränderliche Versionen, Entwurfs-/Veröffentlichungsstatus und Gültigkeitszeiträume. Alarmvorfälle besitzen append-only Status-/Maßnahmenhistorien, Objektzuweisungen und nachvollziehbare Zustellstatus. Der Backend-Prozess startet einen PostgreSQL-basierten Eskalationsworker. Offline-Meldungen, Maßnahmen und Statusänderungen werden in der vorhandenen IndexedDB `SecurityOps2_OfflineVault` vorgemerkt und mit stabilen Mutations-IDs synchronisiert. E-Mail/Push-Provider und Offline-Datei-Uploads sind nicht konfiguriert bzw. implementiert; Zustellung wird dafür nicht vorgetäuscht.
+
+Siehe [Alarm-API](./ALARM_EMERGENCY_API.md), [Offline-Architektur](./OFFLINE_ARCHITECTURE.md) und den [Implementierungsbericht](../ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md).
+
 ---
 
 ## 2. Installations-, Build- und Testbefehle

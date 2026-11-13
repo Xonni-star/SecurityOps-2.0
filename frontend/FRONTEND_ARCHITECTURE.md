@@ -19,3 +19,7 @@
 - Network simulation allows switching to offline mode on demand.
 - In offline mode, all guardbook entries, task completions and shift edits are persisted to IndexedDB and staged in `syncQueue`.
 - When connectivity is restored, the queue is synced idempotently with the backend.
+
+## Alarm- und Notfallmanagement
+
+`AlarmsModule.tsx` zeigt gefilterte Alarmvorfälle, Status-/Zustellinformationen, Planverwaltung und getrennte Kontakte-/Konfigurationstabs. Die Oberfläche lädt nur die über den Store verfügbaren, autorisierten Objekte. Neue Vorfälle sowie Maßnahmen und Statusänderungen laufen über Store-Aktionen, die zuerst eine Mutation in `SecurityOps2_OfflineVault` persistieren. Die Anzeige unterscheidet `pending`, `confirmed` und `conflict`; lokale Erfassung wird nicht als erfolgreiche Alarmzustellung dargestellt. Plan- und Alarmdaten werden mandanten-/benutzerspezifisch zwischengespeichert, Kontaktdaten werden dabei aus dem Offline-Plan-Cache entfernt.

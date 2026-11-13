@@ -38,6 +38,9 @@ let createdSopShiftId: string | undefined;
 let createdCrossTenantClientId: string | undefined;
 let createdCrossTenantSiteId: string | undefined;
 let createdAlarmPlanId: string | undefined;
+let createdSiteRestrictedEmployeeId: string | undefined;
+let createdSiteRestrictedSiteId: string | undefined;
+let createdSiteRestrictedCustomerId: string | undefined;
 const createdAlarmIncidentIds: string[] = [];
 const keyNumber = `API-KEY-${Date.now()}`;
 
@@ -94,6 +97,35 @@ beforeAll(async () => {
   const restrictedRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter' LIMIT 1");
   if (!restrictedRole.rows.length) throw new Error('Seed-Rolle Wachdienstmitarbeiter fehlt.');
   await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [restrictedUser.rows[0].id, restrictedRole.rows[0].id, '11111111-1111-1111-1111-111111111111']);
+  const restrictedCustomer = await migrationPool.query(
+    `INSERT INTO clients
+       (id,tenant_id,client_number,company_name,contact_person,email,phone,address,contract_start,contract_end)
+     VALUES ('c3333333-3333-3333-3333-333333333333',$1,$2,'API Restricted Customer','API Contact',
+       'restricted-customer@example.test','+49 30 003','Testweg 3',CURRENT_DATE,CURRENT_DATE + 365)
+     RETURNING id`,
+    [TENANT_FFM_ID, `API-RESTRICTED-${Date.now()}`]
+  );
+  createdSiteRestrictedCustomerId = restrictedCustomer.rows[0].id;
+  const restrictedSite = await migrationPool.query(
+    `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+     VALUES ($1,$2,$3,'API Restricted Site','Testweg 3')
+     RETURNING id`,
+    [TENANT_FFM_ID, createdSiteRestrictedCustomerId, `API-RESTRICTED-${Date.now()}`]
+  );
+  createdSiteRestrictedSiteId = restrictedSite.rows[0].id;
+  const restrictedEmployee = await migrationPool.query(
+    `INSERT INTO employees
+       (tenant_id,personnel_number,first_name,last_name,email,phone,role,status,date_of_joining)
+     VALUES ($1,$2,'API','Restricted',$3,'+49 30 001','Wachdienstmitarbeiter','Aktiv',CURRENT_DATE)
+     RETURNING id`,
+    [TENANT_FFM_ID, `API-RESTRICTED-${Date.now()}`, SITE_RESTRICTED_USER_EMAIL]
+  );
+  createdSiteRestrictedEmployeeId = restrictedEmployee.rows[0].id;
+  await migrationPool.query(
+    `INSERT INTO employee_site_assignments (tenant_id,employee_id,site_id)
+     VALUES ($1,$2,$3)`,
+    [TENANT_FFM_ID, createdSiteRestrictedEmployeeId, createdSiteRestrictedSiteId]
+  );
 
   const dmsRestricted = await migrationPool.query(
     `INSERT INTO users (email,password_hash,first_name,last_name,phone)
@@ -177,16 +209,58 @@ afterAll(async () => {
          WHERE tenant_id=$1 AND (emergency_plan_id=$2 OR alarm_incident_id=ANY($3::uuid[]))`,
         [TENANT_FFM_ID,createdAlarmPlanId ?? null,createdAlarmIncidentIds]
       );
+      await cleanup.query(
+        `DELETE FROM alarm_event_actions WHERE tenant_id=$1 AND alarm_incident_id=ANY($2::uuid[])`,
+        [TENANT_FFM_ID,createdAlarmIncidentIds]
+      );
+      await cleanup.query(
+        `DELETE FROM alarm_event_status_history WHERE tenant_id=$1 AND alarm_incident_id=ANY($2::uuid[])`,
+        [TENANT_FFM_ID,createdAlarmIncidentIds]
+      );
+      await cleanup.query(
+        `DELETE FROM alarm_event_assignments WHERE tenant_id=$1 AND alarm_incident_id=ANY($2::uuid[])`,
+        [TENANT_FFM_ID,createdAlarmIncidentIds]
+      );
+      await cleanup.query(
+        `DELETE FROM alarm_notifications WHERE tenant_id=$1 AND alarm_incident_id=ANY($2::uuid[])`,
+        [TENANT_FFM_ID,createdAlarmIncidentIds]
+      );
+      await cleanup.query(
+        `DELETE FROM alarm_escalation_jobs WHERE tenant_id=$1 AND alarm_incident_id=ANY($2::uuid[])`,
+        [TENANT_FFM_ID,createdAlarmIncidentIds]
+      );
+      await cleanup.query(
+        `DELETE FROM alarm_mutation_receipts
+         WHERE tenant_id=$1 AND response_json->'incident'->>'id'=ANY($2::text[])`,
+        [TENANT_FFM_ID,createdAlarmIncidentIds]
+      );
       if (createdAlarmIncidentIds.length) {
         await cleanup.query('DELETE FROM alarm_incidents WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [TENANT_FFM_ID,createdAlarmIncidentIds]);
       }
       if (createdAlarmPlanId) {
+        await cleanup.query('DELETE FROM emergency_contacts WHERE tenant_id=$1 AND emergency_plan_id=$2', [TENANT_FFM_ID,createdAlarmPlanId]);
+        await cleanup.query('DELETE FROM emergency_plan_versions WHERE tenant_id=$1 AND emergency_plan_id=$2', [TENANT_FFM_ID,createdAlarmPlanId]);
         await cleanup.query('DELETE FROM emergency_plans WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdAlarmPlanId]);
       }
     } finally {
       await cleanup.query('SET session_replication_role = origin');
       cleanup.release();
     }
+  }
+  if (createdSiteRestrictedEmployeeId) {
+    await migrationPool.query('DELETE FROM employees WHERE tenant_id=$1 AND id=$2', [
+      TENANT_FFM_ID, createdSiteRestrictedEmployeeId
+    ]);
+  }
+  if (createdSiteRestrictedSiteId) {
+    await migrationPool.query('DELETE FROM sites WHERE tenant_id=$1 AND id=$2', [
+      TENANT_FFM_ID, createdSiteRestrictedSiteId
+    ]);
+  }
+  if (createdSiteRestrictedCustomerId) {
+    await migrationPool.query('DELETE FROM clients WHERE tenant_id=$1 AND id=$2', [
+      TENANT_FFM_ID, createdSiteRestrictedCustomerId
+    ]);
   }
   if (createdSopShiftId) {
     await migrationPool.query('DELETE FROM shifts WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdSopShiftId]);
@@ -1073,40 +1147,45 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
   test('Alarmmanagement speichert Notfallpläne, Vorfälle, Übungen und append-only Ereignisse tenantgebunden', async () => {
     const token = await login(SEED_USER_EMAIL);
     const siteId = 'b1111111-1111-1111-1111-111111111111';
+    const typeResult = await migrationPool.query(
+      'SELECT id FROM alarm_types WHERE tenant_id=$1 AND code=$2',
+      [TENANT_FFM_ID, 'bma']
+    );
+    const todayResult = await migrationPool.query('SELECT CURRENT_DATE::text AS today');
     const plan = await request(app).post('/api/v1/emergency-plans').set(authHeaders(token)).send({
       siteId,
-      scenario: 'BMA - Brandmeldeanlage',
+      alarmTypeId: typeResult.rows[0].id,
+      effectiveFrom: todayResult.rows[0].today,
       chainOfAction: ['Leitstelle prüfen', 'Erstkraft entsenden'],
-      contacts: [{ role: 'Feuerwehr', name: 'Notruf', phone: '112' }],
-      isActive: true
+      contacts: [{ contactType: 'fire', role: 'Feuerwehr', name: 'Notruf', phone: '112' }]
     });
     expect(plan.status).toBe(201);
     createdAlarmPlanId = plan.body.data.id;
-    expect(plan.body.data.revision_version).toBe(1);
+    expect(plan.body.data.revision_version).toBe(2);
 
     const edited = await request(app).patch(`/api/v1/emergency-plans/${createdAlarmPlanId}`)
       .set(authHeaders(token)).send({
-        contacts: [{ role: 'Feuerwehr', name: 'Leitstelle', phone: '112' }],
-        revisionVersion: 1
+        contacts: [{ contactType: 'fire', role: 'Feuerwehr', name: 'Leitstelle', phone: '112' }],
+        revisionVersion: 2
       });
     expect(edited.status).toBe(200);
-    expect(edited.body.data.revision_version).toBe(2);
+    expect((await request(app).post(`/api/v1/emergency-plans/${createdAlarmPlanId}/publish`)
+      .set(authHeaders(token)).send({ revisionVersion: 3 })).status).toBe(200);
     expect((await request(app).patch(`/api/v1/emergency-plans/${createdAlarmPlanId}`)
-      .set(authHeaders(token)).send({ isActive: false, revisionVersion: 1 })).status).toBe(409);
+      .set(authHeaders(token)).send({ chainOfAction: ['Veraltete Bearbeitung'], revisionVersion: 2 })).status).toBe(409);
 
-    const todayResult = await migrationPool.query('SELECT CURRENT_DATE::text AS today');
     const drill = await request(app).post(`/api/v1/emergency-plans/${createdAlarmPlanId}/drills`)
       .set(authHeaders(token)).send({ drillDate: todayResult.rows[0].today });
     expect(drill.status).toBe(200);
     expect(drill.body.data.last_drill_date).toBeTruthy();
 
     const incident = await request(app).post('/api/v1/alarms').set(authHeaders(token)).send({
-      siteId, emergencyPlanId: createdAlarmPlanId,
+      siteId, emergencyPlanId: createdAlarmPlanId, alarmTypeId: typeResult.rows[0].id,
       scenario: 'BMA - Brandmeldeanlage', severity: 'Kritisch',
       title: 'Brandmeldeanlage API-Test', description: 'Rauchmelder meldet Alarm.'
     });
     expect(incident.status).toBe(201);
-    const incidentId = incident.body.data.id as string;
+    const incidentId = incident.body.data.incident.id as string;
     createdAlarmIncidentIds.push(incidentId);
 
     const acknowledged = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
@@ -1118,7 +1197,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const resolved = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
       .set(authHeaders(token)).send({ action: 'resolve', note: 'Fehlalarm nach Prüfung bestätigt.', revisionVersion: 3 });
     expect(resolved.status).toBe(200);
-    expect(resolved.body.data).toMatchObject({
+    expect(resolved.body.data.incident).toMatchObject({
       status: 'abgeschlossen',
       revision_version: 4,
       resolution_note: 'Fehlalarm nach Prüfung bestätigt.'
@@ -1131,14 +1210,14 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     ]));
     const history = await request(app).get(`/api/v1/alarms/${incidentId}/events`).set(authHeaders(token));
     expect(history.status).toBe(200);
-    expect(history.body.data.map((event: any) => event.action)).toEqual(expect.arrayContaining([
-      'incident_resolved', 'incident_escalated', 'incident_acknowledged', 'incident_reported'
-    ]));
+    const incidentActions = history.body.data.map((event: any) => event.action);
+    expect(incidentActions).toContain('incident_reported');
+    expect(incidentActions.filter((action: string) => action === 'incident_status_changed')).toHaveLength(3);
     expect(history.body.data).toHaveLength(4);
     const planHistory = await request(app).get(`/api/v1/emergency-plans/${createdAlarmPlanId}/events`).set(authHeaders(token));
     expect(planHistory.status).toBe(200);
     expect(planHistory.body.data.map((event: any) => event.action)).toEqual(
-      expect.arrayContaining(['plan_created', 'plan_updated', 'drill_recorded'])
+      expect.arrayContaining(['plan_created', 'plan_updated', 'plan_published', 'drill_recorded'])
     );
     expect((await request(app).get(`/api/v1/alarms/${incidentId}/events`)
       .set(authHeaders(await login(BAVARIA_USER_EMAIL)))).status).toBe(404);
@@ -1146,24 +1225,28 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
   test('Wachdienst kann Vorfälle melden und beantworten, aber keine Notfallpläne verwalten', async () => {
     const token = await login(SITE_RESTRICTED_USER_EMAIL);
-    const siteId = 'b1111111-1111-1111-1111-111111111111';
+    const siteId = createdSiteRestrictedSiteId!;
+    const typeResult = await migrationPool.query(
+      'SELECT id FROM alarm_types WHERE tenant_id=$1 AND code=$2',
+      [TENANT_FFM_ID, 'ema']
+    );
     const forbiddenPlan = await request(app).post('/api/v1/emergency-plans').set(authHeaders(token)).send({
-      siteId, scenario: 'EMA - Einbruchsalarm', chainOfAction: ['Leitstelle informieren'],
-      contacts: [], isActive: true
+      siteId, alarmTypeId: typeResult.rows[0].id, chainOfAction: ['Leitstelle informieren'],
+      contacts: []
     });
     expect(forbiddenPlan.status).toBe(403);
 
     const reported = await request(app).post('/api/v1/alarms').set(authHeaders(token)).send({
-      siteId, scenario: 'EMA - Einbruchsalarm', severity: 'Dringend',
+      siteId, alarmTypeId: typeResult.rows[0].id, severity: 'Dringend',
       title: 'EMA API-Test', description: 'Bewegung im Lagerbereich.'
     });
     expect(reported.status).toBe(201);
-    const incidentId = reported.body.data.id as string;
+    const incidentId = reported.body.data.incident.id as string;
     createdAlarmIncidentIds.push(incidentId);
     const closed = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
       .set(authHeaders(token)).send({ action: 'resolve', note: 'Objekt geprüft, kein Einbruch.', revisionVersion: 1 });
     expect(closed.status).toBe(200);
-    expect(closed.body.data.status).toBe('abgeschlossen');
+    expect(closed.body.data.incident.status).toBe('abgeschlossen');
   });
 
   test('Öffentlicher Health-Endpunkt gibt keine Datenbankfehlerdetails preis', async () => {

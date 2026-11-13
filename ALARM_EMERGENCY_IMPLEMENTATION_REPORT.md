@@ -1,44 +1,40 @@
 # Alarm- und Notfallmanagement: Implementierungsbericht
 
-## Ergebnis
+## Umfang und Ergebnis
 
-Umgesetzt wurde das im verfügbaren Auftrag sichtbare Alarm- und Notfallmanagement. Die zugehörige Master-Brief-Anlage war in der Session-Library nicht verfügbar; deshalb lässt sich die Vollständigkeit gegenüber den dort möglicherweise enthaltenen zusätzlichen Akzeptanzkriterien nicht bestätigen. Dieser Bericht beansprucht keine darüber hinausgehende Abnahme.
+Die Umsetzung folgt der angehängten Master-Brief-Anforderung zum mandantenfähigen Alarm- und Notfallmanagement. Die Umsetzung ergänzt die vorhandene React-/Express-/PostgreSQL-Architektur und ihre Sitzungs-, RBAC-, Tenant-RLS-, IndexedDB- und CI-Muster. Es wurde keine Produktionsbereitstellung vorgenommen.
 
-## Implementierter Umfang
+## Implementierte Funktionen
 
-- Neue PostgreSQL-Migration mit mandantengebundenen Notfallplänen, Alarmvorfällen und unveränderlichen Ereignissen. Zusammengesetzte Mandantenschlüssel begrenzen Objekt- und Planbeziehungen auf denselben Mandanten.
-- `FORCE ROW LEVEL SECURITY` für alle drei Tabellen sowie eingeschränkte Rechte der Anwendungsrolle. Ereignisse sind für die Anwendungsrolle nur einfügbar; Trigger weisen Aktualisierung und Löschung zurück.
-- Authentifizierte, berechtigungsgeprüfte Endpunkte zum Verwalten und Archivieren von Plänen, Dokumentieren eines Übungsdatums, Melden von Vorfällen, Reagieren auf Vorfälle und Lesen der Ereignisverläufe.
-- Revisionsgeschützte Änderungen und serverseitig geprüfte Statusübergänge. Jede Reaktion verlangt eine nichtleere Maßnahme/Begründung; abgeschlossene Vorfälle können nicht wieder geöffnet werden.
-- Ersetzung der statischen Alarmansicht durch eine API-gestützte Oberfläche mit Vorfallmeldung, Planverwaltung, Übungsdatum, Reaktionen und Verlauf. Der Alarmbereich ist in die bestehende Mobile-App-Navigation eingebunden.
-- Seed-Rollen und Berechtigungen sowie fokussierte Backend-, RLS-/API-Integrations- und Frontendtests.
-
-Details zu Endpunkten, Rollen und Grenzen stehen in [Alarm- und Notfallmanagement: API](./frontend/ALARM_EMERGENCY_API.md).
+- Mandantengebundene, administrierbare Alarmarten einschließlich der im Brief genannten Vorkommnisse; Migration und Seed legen die Systemtypen je Tenant an.
+- Notfallpläne mit Kunden-, Site-, Alarmtyp-, Verantwortlichen- und Gültigkeitsbezug, unveränderlichen Versions-Snapshots, Entwurfs-/Veröffentlichungs-/Archivstatus und Übungsprotokollen. Veröffentlichung und Vorfallverknüpfung prüfen aktive Kunden/Sites/Alarmtypen sowie Gültigkeitsdaten.
+- Kontaktverwaltung mit Kunden-/Site-/Planbezug, rollenbasierter Leseberechtigung und Site-Scope-Prüfungen. Kontaktinformationen werden nicht in den Offline-Cache repliziert.
+- Vorfallmeldung, Einsatzkraftzuweisung, vollständiger Statuslebenszyklus, nachvollziehbare Zeitstempel und Begründungen. Maßnahmen, Statushistorie und Managementereignisse sind append-only; Revisionen und Mutation-Quittungen schützen gegen konkurrierende und wiederholte Übertragungen.
+- Tenant- und Site-scoped Alarmdashboard mit Filtern, überfälligen Eskalationen, Zuweisungen, Statuszählern und aktuellen Ereignissen.
+- Servergesteuerte Eskalationsregeln und persistente Hintergrundjobs mit Sperren/Leases, Wiederholungen und sichtbarem Zustellstatus. In-App-Zustellungen werden nur bei aktivem Benutzerkonto als zugestellt markiert. Nicht konfigurierte E-Mail-/Push-Kanäle bleiben `not_configured`.
+- Offline-Erfassung von Alarmmeldungen, Maßnahmen und Statusänderungen im vorhandenen IndexedDB-Store. Synchronisation nutzt stabile Mutation-IDs und serverseitige Idempotenz; `pending`, `confirmed` und `conflict` bleiben unterscheidbar.
+- Migrationen mit `FORCE ROW LEVEL SECURITY`, tenantgebundenen Fremdschlüsseln, eingeschränkten Anwendungsrechten und unveränderlichen Ereignis-/Aktionsdaten.
 
 ## Verifizierte lokale Prüfungen
 
-Alle folgenden Prüfungen liefen lokal; die datenbankgebundenen Prüfungen nutzten einen isolierten Docker-Container mit PostgreSQL 16.15. Die vollständige Backend-Testsuite führte auch Migrationen und RLS-/Mandantentrennungsprüfungen aus.
-
 | Prüfung | Ergebnis |
 |---|---|
-| `npm --prefix frontend/backend test` | 15 Suites, 186 Tests bestanden |
-| `npm --prefix frontend test` | 9 Dateien, 48 Tests bestanden |
-| `npm --prefix frontend/backend run build` | erfolgreich |
-| `npm --prefix frontend run build` | erfolgreich |
-| Migration, RLS-/API-Integration gegen isoliertes PostgreSQL | in der vollständigen Backend-Testsuite bestanden |
-| Produktions-Compose-Konfiguration | `docker compose ... config --no-interpolate --quiet` erfolgreich |
-| Backend- und Frontend-Container-Images | lokale Docker-Builds erfolgreich |
-| Pull-Request-CI | alle 4 CI-Jobs bestanden |
+| Backend-Jest einschließlich Migration, RLS und API-Integration | 17 Suites, 193 Tests bestanden |
+| Frontend-Vitest | 9 Dateien, 48 Tests bestanden |
+| Backend TypeScript-Build | erfolgreich |
+| Frontend Produktions-Build | erfolgreich |
+| Frische PostgreSQL-16-Migration bis Version 016 und Seed auf isolierter Testdatenbank | erfolgreich |
+| Produktions-Compose-Konfiguration | erfolgreich mit ausschließlich test-only Pflichtvariablen |
+| Produktions-Backend- und Frontend-Container-Images | lokale Builds erfolgreich |
 | `git diff --check` | ohne Beanstandungen |
 
-Der Frontend-Build gibt bestehende Vite-Konfigurations- und Bundlegrößen-Warnungen aus, endet aber erfolgreich. Die Docker-Prüfung validierte die Produktions-Compose-Konfiguration und baute beide Images; es wurden keine Images gestartet und keine Bereitstellung vorgenommen.
+Der Frontend-Build meldet bestehende Vite-Konfigurations- und Bundlegrößen-Warnungen, endet aber erfolgreich. Die Container wurden gebaut, nicht gestartet. Es fand keine Bereitstellung statt.
 
-## Einschränkungen und Freigabestatus
+## Grenzen und Freigabe
 
-- Die Master-Brief-Anlage und ihre vollständigen Akzeptanzkriterien konnten nicht geprüft werden.
-- Keine externen Leitstellen-/Telefonieintegrationen, Push-Benachrichtigungen oder automatischen zeitgesteuerten Eskalationen.
-- Keine Offline-Erfassung oder spätere Synchronisierung von Alarmen.
-- Übungsdokumentation speichert das jüngste Übungsdatum am Plan und ein Ereignis; separate Datensätze je Übung gibt es nicht.
-- Die Alarm-API bietet derzeit feste Höchstgrenzen statt konfigurierbarer Pagination/Filterung.
-- Es fand keine Produktionsbereitstellung statt. Die Implementierung ist nicht für Produktion freigegeben.
-- PR [#12](https://github.com/Xonni-star/SecurityOps-2.0/pull/12) ist gegen `main` geöffnet; alle 4 CI-Jobs sind bestanden. Er bleibt offen, bis die fehlende Master-Brief-Anlage und ihre vollständigen Akzeptanzkriterien geprüft werden können.
+- Externe E-Mail-/Push-Provider, Leitstellen-/Telefonieintegration und Benachrichtigung externer Kundenkontakte sind nicht konfiguriert. `not_configured` wird nicht als erfolgreiche Zustellung ausgegeben.
+- Alarmfotos und Dateien können nicht offline aufgenommen oder später hochgeladen werden; Aktionen können nur vorhandene DMS-Dokumente referenzieren.
+- Vorfalllisten und Verlaufsendpunkte verwenden feste Höchstgrenzen statt cursorbasierter Pagination.
+- Die lokale Worker-Implementierung verwendet PostgreSQL-Jobs und Leases; Hochverfügbarkeit und Produktionsbetrieb des Workers sind nicht durch einen Produktiv-Deployment-Test belegt.
+- Keine Produktionsdatenbank wurde verwendet und keine Produktion wurde geändert.
+- PR [#12](https://github.com/Xonni-star/SecurityOps-2.0/pull/12) bleibt geöffnet und wird nicht gemergt. Der PR-CI-Status für den finalen Commit wird nach dem Push ergänzt.

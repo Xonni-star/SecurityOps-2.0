@@ -6,10 +6,20 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   patch: vi.fn(),
+  reportAlarmIncident: vi.fn(),
+  changeAlarmStatus: vi.fn(),
+  addAlarmAction: vi.fn(),
   loadTenantData: vi.fn(),
   state: {
     emergencyPlans: [] as any[],
     alarmIncidents: [] as any[],
+    alarmTypes: [] as any[],
+    alarmSites: [] as any[],
+    clients: [] as any[],
+    employees: [] as any[],
+    documents: [] as any[],
+    pendingAlarmMutations: [] as any[],
+    isOnline: true,
     sites: [] as any[],
     authUser: { permissions: ['alarm:read', 'alarm:manage', 'alarm:report', 'alarm:respond'], tenantId: 'tenant-a' },
     loadTenantData: vi.fn()
@@ -39,7 +49,7 @@ const incident = {
   siteName: 'Objekt A',
   scenario: 'BMA - Brandmeldeanlage',
   severity: 'Kritisch',
-  status: 'gemeldet',
+  status: 'neu',
   title: 'Brandmelder ausgelöst',
   description: 'Technikraum prüfen',
   reportedAt: '2026-11-12T10:00:00.000Z',
@@ -57,6 +67,18 @@ describe('AlarmsModule', () => {
     root = createRoot(container);
     mocks.state.emergencyPlans = [];
     mocks.state.alarmIncidents = [incident];
+    mocks.state.alarmTypes = [{ id: 'type-a', code: 'fire', label: 'Brand', isActive: true }];
+    mocks.state.alarmSites = [{ ...site, customerId: 'customer-a' }];
+    mocks.state.clients = [];
+    mocks.state.employees = [];
+    mocks.state.documents = [];
+    mocks.state.pendingAlarmMutations = [];
+    mocks.state.isOnline = true;
+    Object.assign(mocks.state, {
+      reportAlarmIncident: mocks.reportAlarmIncident,
+      changeAlarmStatus: mocks.changeAlarmStatus,
+      addAlarmAction: mocks.addAlarmAction
+    });
     mocks.state.sites = [site];
     mocks.state.authUser = {
       permissions: ['alarm:read', 'alarm:manage', 'alarm:report', 'alarm:respond'],
@@ -65,6 +87,9 @@ describe('AlarmsModule', () => {
     mocks.state.loadTenantData = mocks.loadTenantData;
     mocks.get.mockResolvedValue([]);
     mocks.post.mockResolvedValue({});
+    mocks.reportAlarmIncident.mockResolvedValue({ state: 'confirmed' });
+    mocks.changeAlarmStatus.mockResolvedValue({ state: 'confirmed' });
+    mocks.addAlarmAction.mockResolvedValue({ state: 'confirmed' });
     mocks.loadTenantData.mockResolvedValue(undefined);
   });
 
@@ -74,7 +99,7 @@ describe('AlarmsModule', () => {
     vi.clearAllMocks();
   });
 
-  test('alarm reports are persisted through the API and refresh tenant data', async () => {
+  test('alarm reports are submitted through the durable alarm mutation store', async () => {
     await act(async () => root.render(<AlarmsModule />));
     const reportButton = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Alarm melden'));
     await act(async () => reportButton?.click());
@@ -97,14 +122,12 @@ describe('AlarmsModule', () => {
     const save = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Meldung speichern'));
     await act(async () => save?.click());
 
-    expect(mocks.post).toHaveBeenCalledWith('/alarms', expect.objectContaining({
+    expect(mocks.reportAlarmIncident).toHaveBeenCalledWith(expect.objectContaining({
       siteId: 'site-a',
-      scenario: 'BMA - Brandmeldeanlage',
       severity: 'Dringend',
       title: 'BMA ausgelöst',
       emergencyPlanId: null
     }));
-    expect(mocks.loadTenantData).toHaveBeenCalled();
   });
 
   test('read-only access does not expose alarm reporting or plan administration actions', async () => {
@@ -122,10 +145,10 @@ describe('AlarmsModule', () => {
 
   test('incident response requires a documented action note', async () => {
     await act(async () => root.render(<AlarmsModule />));
-    const acknowledge = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Bestätigen'));
-    await act(async () => acknowledge?.click());
+    const changeStatus = Array.from(container.querySelectorAll('button')).find((button) => button.textContent?.includes('Status ändern'));
+    await act(async () => changeStatus?.click());
 
-    expect(container.textContent).toContain('Bitte vor der Statusänderung');
-    expect(mocks.post).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Bitte einen zulässigen Zielstatus und eine Begründung auswählen.');
+    expect(mocks.changeAlarmStatus).not.toHaveBeenCalled();
   });
 });

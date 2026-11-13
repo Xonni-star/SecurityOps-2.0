@@ -14,7 +14,7 @@ import * as resourceController from './controllers/resourceController';
 import * as employeeController from './controllers/employeeController';
 import * as documentController from './controllers/documentController';
 import * as sopController from './controllers/sopController';
-import * as alarmController from './controllers/alarmController';
+import * as alarmWorkflowController from './controllers/alarmWorkflowController';
 
 export const app = express();
 
@@ -167,16 +167,39 @@ app.get('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:
 app.post('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:assign'), sopController.assignSop);
 
 // Alarm- und Notfallmanagement
-app.get('/api/v1/emergency-plans', authenticateJwt, requirePermission('alarm:read'), alarmController.listEmergencyPlans);
-app.post('/api/v1/emergency-plans', authenticateJwt, requirePermission('alarm:manage'), alarmController.createEmergencyPlan);
-app.patch('/api/v1/emergency-plans/:id', authenticateJwt, requirePermission('alarm:manage'), alarmController.updateEmergencyPlan);
-app.post('/api/v1/emergency-plans/:id/archive', authenticateJwt, requirePermission('alarm:manage'), alarmController.archiveEmergencyPlan);
-app.post('/api/v1/emergency-plans/:id/drills', authenticateJwt, requirePermission('alarm:manage'), alarmController.recordEmergencyDrill);
-app.get('/api/v1/emergency-plans/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmController.listEmergencyPlanEvents);
-app.get('/api/v1/alarms', authenticateJwt, requirePermission('alarm:read'), alarmController.listAlarmIncidents);
-app.post('/api/v1/alarms', authenticateJwt, requirePermission('alarm:report'), alarmController.reportAlarmIncident);
-app.get('/api/v1/alarms/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmController.listAlarmIncidentEvents);
-app.post('/api/v1/alarms/:id/transitions', authenticateJwt, requirePermission('alarm:respond'), alarmController.transitionAlarmIncident);
+app.get('/api/v1/alarm-types', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmTypes);
+app.get('/api/v1/alarm-sites', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmSites);
+app.post('/api/v1/alarm-types', authenticateJwt, requirePermission('alarm:type:manage'), alarmWorkflowController.createAlarmType);
+app.patch('/api/v1/alarm-types/:id', authenticateJwt, requirePermission('alarm:type:manage'), alarmWorkflowController.updateAlarmType);
+app.get('/api/v1/emergency-contacts', authenticateJwt, requirePermission('emergency_contact:read'), alarmWorkflowController.listEmergencyContacts);
+app.post('/api/v1/emergency-contacts', authenticateJwt, requirePermission('emergency_contact:manage'), alarmWorkflowController.createEmergencyContact);
+app.patch('/api/v1/emergency-contacts/:id', authenticateJwt, requirePermission('emergency_contact:manage'), alarmWorkflowController.updateEmergencyContact);
+app.post('/api/v1/emergency-contacts/:id/archive', authenticateJwt, requirePermission('emergency_contact:manage'), alarmWorkflowController.archiveEmergencyContact);
+app.get('/api/v1/emergency-plans', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listEmergencyPlansV2);
+app.post('/api/v1/emergency-plans', authenticateJwt, requirePermission('alarm:manage'), alarmWorkflowController.createEmergencyPlanV2);
+app.patch('/api/v1/emergency-plans/:id', authenticateJwt, requirePermission('alarm:manage'), alarmWorkflowController.updateEmergencyPlanV2);
+app.post('/api/v1/emergency-plans/:id/publish', authenticateJwt, requirePermission('emergency_plan:publish'), alarmWorkflowController.publishEmergencyPlan);
+app.get('/api/v1/emergency-plans/:id/versions', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listEmergencyPlanVersions);
+app.post('/api/v1/emergency-plans/:id/archive', authenticateJwt, requirePermission('alarm:manage'), alarmWorkflowController.archiveEmergencyPlanV2);
+app.post('/api/v1/emergency-plans/:id/drills', authenticateJwt, requirePermission('alarm:manage'), alarmWorkflowController.recordEmergencyDrillV2);
+app.get('/api/v1/emergency-plans/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listEmergencyPlanEventsV2);
+app.get('/api/v1/alarms', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmIncidentsV2);
+app.post('/api/v1/alarms', authenticateJwt, requirePermission('alarm:report'), alarmWorkflowController.reportAlarmIncidentV2);
+app.post('/api/v1/alarms/sync', authenticateJwt, requirePermission('alarm:report'), alarmWorkflowController.syncAlarmMutations);
+app.get('/api/v1/alarms/recent-events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listRecentAlarmEvents);
+app.get('/api/v1/alarms/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmEventsV2);
+app.get('/api/v1/alarms/:id/actions', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmActions);
+app.post('/api/v1/alarms/:id/actions', authenticateJwt, requirePermission('alarm:action:create'), alarmWorkflowController.createAlarmAction);
+app.get('/api/v1/alarms/:id/status-history', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmStatusHistory);
+app.get('/api/v1/alarms/:id/assignments', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmAssignments);
+app.post('/api/v1/alarms/:id/assignments', authenticateJwt, requirePermission('alarm:assign'), alarmWorkflowController.assignAlarmResponder);
+app.post('/api/v1/alarms/:id/transitions', authenticateJwt, requirePermission('alarm:respond'), alarmWorkflowController.transitionAlarmIncidentV2);
+app.get('/api/v1/alarm-escalation-rules', authenticateJwt, requirePermission('alarm:escalation:manage'), alarmWorkflowController.listEscalationRules);
+app.post('/api/v1/alarm-escalation-rules', authenticateJwt, requirePermission('alarm:escalation:manage'), alarmWorkflowController.createEscalationRule);
+app.post('/api/v1/alarm-escalation-rules/:id/revisions', authenticateJwt, requirePermission('alarm:escalation:manage'), alarmWorkflowController.reviseEscalationRule);
+app.get('/api/v1/alarm-notifications', authenticateJwt, requirePermission('alarm:notifications:read'), alarmWorkflowController.listAlarmNotifications);
+app.get('/api/v1/alarm-escalation-status', authenticateJwt, requirePermission('alarm:notifications:read'), alarmWorkflowController.listAlarmEscalationStatus);
+app.post('/api/v1/alarm-notifications/:id/retry', authenticateJwt, requirePermission('alarm:escalation:manage'), alarmWorkflowController.retryAlarmNotification);
 
 app.get('/api/v1/logbook', authenticateJwt, requirePermission('logbook:read'), guardbookController.listGuardbook);
 app.post('/api/v1/logbook', authenticateJwt, requirePermission('logbook:create'), guardbookController.createGuardbookEntry);

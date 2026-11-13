@@ -1,41 +1,91 @@
 # Alarm- und Notfallmanagement: API
 
-Alle Endpunkte verwenden `/api/v1`, erfordern eine gültige JWT-Sitzung und verwenden ausschließlich den Mandanten des authentifizierten Benutzers. Ein Mandantenheader oder eine Mandanten-ID im Request wählt den Mandanten nicht aus. PostgreSQL erzwingt die Mandantentrennung zusätzlich per `FORCE ROW LEVEL SECURITY`.
+Alle Pfade verwenden `/api/v1`, erfordern eine gültige Sitzung und nutzen ausschließlich den Tenant der authentifizierten Datenbanksitzung. PostgreSQL erzwingt `FORCE ROW LEVEL SECURITY`; nicht übergeordnete Rollen werden zusätzlich auf Sites begrenzt, die dem angemeldeten Mitarbeiter über `employee_site_assignments` zugewiesen sind. Die UI-Tenant-Auswahl ist kein Autorisierungsmerkmal.
 
 ## Berechtigungen
 
-| Berechtigung | Zugriff |
+| Berechtigung | Zweck |
 |---|---|
-| `alarm:read` | Notfallpläne, Vorfälle und deren Ereignisverläufe lesen |
-| `alarm:manage` | Notfallpläne erstellen, ändern, archivieren und Übungen dokumentieren |
-| `alarm:report` | Alarmvorfälle melden |
-| `alarm:respond` | Vorfälle bestätigen, eskalieren oder abschließen |
+| `alarm:read` | Sites, Alarmarten, Pläne, Vorfälle, Historien und Zuweisungen lesen |
+| `alarm:manage` | Pläne erstellen, neue Entwurfsversionen speichern, archivieren und Übungen protokollieren |
+| `alarm:report` | Alarmvorfälle melden und Offline-Mutationen synchronisieren |
+| `alarm:respond` | Statusübergänge ausführen |
+| `alarm:action:create` | Maßnahmen und Notizen protokollieren |
+| `alarm:assign` | Einsatzkräfte zuweisen/entfernen |
+| `alarm:archive` | abgeschlossene Vorfälle archivieren; zusätzlich zu `alarm:respond` erforderlich |
+| `alarm:type:manage` | Alarmarten administrieren |
+| `alarm:escalation:manage` | Eskalationsregeln und Zustellwiederholungen verwalten |
+| `alarm:notifications:read` | Zustell- und Eskalationsstatus lesen |
+| `emergency_plan:publish` | Notfallplanversion veröffentlichen |
+| `emergency_contact:read` | Kontaktdaten und Kontakt-Snapshots lesen |
+| `emergency_contact:manage` | Notfallkontakte erstellen, ändern und archivieren |
 
-Systemadministration, Geschäftsführung, Einsatzleitung und Qualitätsmanagement erhalten alle vier Rechte. Objektleitung und Wachdienstmitarbeiter erhalten Lesen, Melden und Reagieren; Auditoren erhalten Leserechte. Die API prüft jede Berechtigung serverseitig.
+Die API prüft Berechtigungen über die bestehende Datenbank-RBAC-Middleware. Zusätzlich prüft der Controller bei Objektzugriffen die Site-Zuordnung. Kontaktfelder werden nur über geschützte Kontaktendpunkte bzw. mit `emergency_contact:read` zurückgegeben; ohne dieses Recht bleiben Planversions-Kontakt-Snapshots leer. Plan- und Vorfallerstellung erfordert ein aktives Objekt und einen aktiven Kunden.
 
 ## Endpunkte
 
+Alle Antworten verwenden den üblichen `{ success, data }`-Envelope. `POST /alarms/sync` liefert je Mutation `confirmed`, `conflict` oder `retry`.
+
 | Methode und Pfad | Berechtigung | Zweck |
 |---|---|---|
-| `GET /emergency-plans` | `alarm:read` | Nicht archivierte Notfallpläne des Mandanten |
-| `POST /emergency-plans` | `alarm:manage` | Notfallplan für ein aktives Objekt anlegen |
-| `PATCH /emergency-plans/:id` | `alarm:manage` | Plan mit `revisionVersion` aktualisieren |
-| `POST /emergency-plans/:id/archive` | `alarm:manage` | Plan mit `revisionVersion` archivieren |
-| `POST /emergency-plans/:id/drills` | `alarm:manage` | Übungsdatum erfassen; der Plan hält das jüngste Datum fest |
-| `GET /emergency-plans/:id/events` | `alarm:read` | Unveränderliche Planereignisse, maximal 200 |
-| `GET /alarms` | `alarm:read` | Vorfälle des Mandanten, maximal 500 |
-| `POST /alarms` | `alarm:report` | Vorfall für ein aktives Objekt melden |
-| `GET /alarms/:id/events` | `alarm:read` | Unveränderliche Vorfallereignisse, maximal 200 |
-| `POST /alarms/:id/transitions` | `alarm:respond` | Vorfallstatus mit Maßnahme und `revisionVersion` ändern |
+| `GET /alarm-types` | `alarm:read` | Aktive Alarmarten des Tenants |
+| `POST /alarm-types` | `alarm:type:manage` | Erweiterbare Alarmart anlegen |
+| `PATCH /alarm-types/:id` | `alarm:type:manage` | Label oder Aktivstatus ändern |
+| `GET /alarm-sites` | `alarm:read` | Aktive, site-scoped Kundenobjekte |
+| `GET /emergency-plans` | `alarm:read` | Nicht archivierte Pläne aktiver Kunden/Sites |
+| `POST /emergency-plans` | `alarm:manage` | Entwurf mit Objekt, Alarmart, Verantwortlichem und Gültigkeit anlegen |
+| `PATCH /emergency-plans/:id` | `alarm:manage` | Eine neue unveröffentlichte Planversion mit `revisionVersion` speichern |
+| `POST /emergency-plans/:id/publish` | `emergency_plan:publish` | Aktuelle gültige Version veröffentlichen |
+| `GET /emergency-plans/:id/versions` | `alarm:read` | Unveränderliche Versionen; Kontaktsnapshot nur mit Kontakt-Leserecht |
+| `POST /emergency-plans/:id/archive` | `alarm:manage` | Plan archivieren |
+| `POST /emergency-plans/:id/drills` | `alarm:manage` | Übung protokollieren |
+| `GET /emergency-plans/:id/events` | `alarm:read` | Planereignisse (max. 200) |
+| `GET /emergency-contacts` | `emergency_contact:read` | Site-/Kunden-/Plan-Kontakte innerhalb des Site-Scopes |
+| `POST /emergency-contacts` | `emergency_contact:manage` | Kontakt mit Kunden-, Site- oder Planbezug anlegen |
+| `PATCH /emergency-contacts/:id` | `emergency_contact:manage` | Kontakt mit `revisionVersion` ändern |
+| `POST /emergency-contacts/:id/archive` | `emergency_contact:manage` | Kontakt archivieren |
+| `GET /alarms` | `alarm:read` | Alarmübersicht, max. 500; Filter siehe unten |
+| `GET /alarms/recent-events` | `alarm:read` | Mandanten-/site-scoped letzte Ereignisse (1–100, Standard 25) |
+| `POST /alarms` | `alarm:report` | Alarm mit Site, Alarmart, Priorität und optional gültigem Plan melden |
+| `POST /alarms/sync` | `alarm:report` | Persistierte Offline-Mutationen idempotent synchronisieren |
+| `GET /alarms/:id/events` | `alarm:read` | Unveränderliche Ereignisse (max. 200) |
+| `GET /alarms/:id/actions` | `alarm:read` | Chronologische Maßnahmen/Notizen |
+| `POST /alarms/:id/actions` | `alarm:action:create` | Maßnahme oder Notiz mit Beschreibung, Ergebnis und optional vorhandenem DMS-Dokument erfassen |
+| `GET /alarms/:id/status-history` | `alarm:read` | Append-only Statushistorie |
+| `GET /alarms/:id/assignments` | `alarm:read` | Einsatzkraft-Zuweisungen |
+| `POST /alarms/:id/assignments` | `alarm:assign` | Einsatzkraft zuweisen/entfernen |
+| `POST /alarms/:id/transitions` | `alarm:respond` | Status mit Begründung und `revisionVersion` ändern |
+| `GET /alarm-escalation-rules` | `alarm:escalation:manage` | Konfigurierte Eskalationsregeln |
+| `POST /alarm-escalation-rules` | `alarm:escalation:manage` | Regel mit Eskalationsstufen anlegen |
+| `POST /alarm-escalation-rules/:id/revisions` | `alarm:escalation:manage` | Regelstufen revidieren |
+| `GET /alarm-notifications` | `alarm:notifications:read` | Tatsächliche Zustellstatus |
+| `GET /alarm-escalation-status` | `alarm:notifications:read` | Job-, Stufen- und Zustellstatus |
+| `POST /alarm-notifications/:id/retry` | `alarm:escalation:manage` | Eine fehlgeschlagene, wiederholbare Zustellung erneut einreihen |
 
-## Daten und Workflow
+`GET /alarms` akzeptiert `customerId`, `siteId`, `alarmTypeId`, `status`, `severity`, `assignedEmployeeId`, `dateFrom`, `dateUntil` und `overdue=true`. Statuswerte sind `neu`, `bestätigt`, `in_bearbeitung`, `eskaliert`, `einsatzkraefte_verstaendigt`, `massnahmen_eingeleitet`, `entwarnung`, `abgeschlossen` und `archiviert`.
 
-Die unterstützten Szenarien sind Brandmeldeanlage, Einbruchsalarm, Bombendrohung, medizinischer Notfall und Hausfriedensbruch/Aggression. Ein Notfallplan enthält Objekt, Szenario, Maßnahmenkette, optionale Kontakte, Aktivstatus und letztes Übungsdatum. Ein Vorfall enthält Objekt, Szenario, Schweregrad, Titel, Beschreibung, Meldezeitpunkt und Status.
+## Plan- und Vorfallintegrität
 
-Vorfallstatus: `gemeldet → bestätigt → eskaliert → abgeschlossen`. Eskalation ist aus `gemeldet` oder `bestätigt` möglich; ein Vorfall kann auch direkt abgeschlossen werden. Jede Änderung verlangt eine nichtleere Maßnahme/Begründung und die aktuelle positive Revisionsnummer. Veraltete Revisionen sowie unzulässige Übergänge werden mit HTTP 409 abgewiesen. Abgeschlossene Vorfälle können nicht wieder geöffnet werden.
+Notfallpläne besitzen Entwurfs-/Veröffentlichungs-/Archivstatus, fortlaufende unveränderliche Versions-Snapshots, Kunden-/Site-/Alarmart-Zuordnung, verantwortliche Person und Gültigkeitszeitraum. Veröffentlichen erfordert eine Version, ein Gültigkeitsbeginn sowie aktive Alarmart, Kunde und Site. Bei einer Vorfallmeldung wird der veröffentlichte Plan nur verknüpft, wenn Kunde, Site, Alarmart und Gültigkeitszeitraum übereinstimmen; die konkrete veröffentlichte Version wird eingefroren.
 
-Pläne und Vorfälle werden zusammen mit ihren Ereignissen in derselben Mandantentransaktion geändert. Ereignisse protokollieren den authentifizierten Akteur und sind für die Anwendungsrolle ausschließlich einfügbar; Datenbanktrigger verhindern nachträgliche Aktualisierung oder Löschung. Pläne werden archiviert statt gelöscht. Zusammengesetzte Mandanten-Fremdschlüssel verhindern Verknüpfungen mit Objekten, Plänen oder Vorfällen anderer Mandanten.
+Statusübergänge werden mit authentifiziertem Akteur, serverseitigem Zeitstempel und Begründung protokolliert. Die fachlich zulässigen Übergänge führen vom neuen Ereignis über Bearbeitung/Eskalation und Entwarnung zum Abschluss; nur abgeschlossene Ereignisse dürfen archiviert werden. Aktionen und Statushistorie sind append-only. Revisionen verhindern, dass konkurrierende Änderungen still überschreiben.
 
-## Grenzen
+## Eskalation und Benachrichtigung
 
-Die API bietet keine externen Leitstellen-/Telefonieintegrationen, Push-Benachrichtigungen, automatischen Eskalationsscheduler, Datei-/Bildanhänge oder separaten Drill-Datensatz je Übung. Die Übungs-API aktualisiert nur das jüngste Übungsdatum und fügt ein unveränderliches Ereignis hinzu. Der Vorfall-Endpunkt liefert höchstens 500 Einträge und bietet derzeit keine Filter- oder Pagination-Parameter. Der Alarmbildschirm benötigt Onlinezugriff; Offline-Erfassung und nachgelagerte Synchronisierung sind nicht implementiert.
+Der Backendprozess startet einen Worker, der fällige PostgreSQL-Jobs mit Sperren und Leases verarbeitet. Regeln definieren minimale Priorität, optional Site/Alarmart sowie zeitversetzte Schritte an eine Rolle oder Einsatzkraft. Wiederholungen verwenden exponentielle Verzögerung und enden nach fünf Versuchen mit sichtbarem `blocked`-Status. Wird ein Vorfall nicht mehr als `neu` geführt, werden nicht ausgeführte Eskalationsjobs abgebrochen.
+
+In-App-Benachrichtigungen werden tenantgebunden gespeichert und nur bei Zuordnung eines aktiven Benutzerkontos als `delivered` markiert. E-Mail und Push haben derzeit keinen Provider und bleiben ehrlich `not_configured`; sie werden nicht als zugestellt behandelt. Die API enthält zwar Fehler-/Retry-Status, aber ein externer Versandprovider ist eine noch offene Integration.
+
+## Offline-Synchronisation
+
+Die vorhandene IndexedDB `SecurityOps2_OfflineVault` speichert Alarmmeldungen, Maßnahmen und Statusänderungen in `alarmMutations`, getrennt von anderen Outbox-Mutationen. Jede Mutation wird vor Übertragung lokal gespeichert und mit derselben `clientMutationId` wiederholt. Der Server vergleicht Tenant, Benutzer, Mutationstyp und Payload-Hash, um Wiederholungen idempotent zu beantworten. Meldungen werden vor abhängigen lokalen Maßnahmen/Statusänderungen verarbeitet. Temporäre Netzwerkfehler bleiben `pending`; fachliche Konflikte bleiben sichtbar `conflict`; erst eine erfolgreiche Serverquittung setzt `confirmed`.
+
+Plan-/Alarmtypen/Sites werden pro Tenant und Benutzer gecacht; der Cache entfernt Kontaktdaten. Offline-Datei-/Fotoupload und Offline-Änderungen an Plänen, Kontakten oder Eskalationsregeln sind nicht implementiert. Lokale Erfassung ist keine serverseitige Alarmierung und keine externe Zustellbestätigung.
+
+## Bekannte Einschränkungen
+
+- E-Mail-/Push-Zustellung, externe Leitstellen- und Telefonieintegration sind nicht konfiguriert.
+- Die Oberfläche kann vorhandene DMS-Dokumente referenzieren, aber keine Alarmfotos/Dateien offline vormerken oder hochladen.
+- Eskalationsregeln unterstützen Rolle oder Einsatzkraft als Empfänger, aber keine direkte Benachrichtigung an externe Kundenkontakte.
+- Vorfallliste und Verlaufsendpunkte haben feste Höchstgrenzen statt cursorbasierter Pagination.
+- Die Migration und Tests belegen Datenbank-/API-Sicherheit lokal; Produktionsbetrieb und Hochverfügbarkeit des Workers sind nicht freigegeben.

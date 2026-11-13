@@ -9,7 +9,10 @@ import {
   SOPDocument,
   SOPPendingAcknowledgement,
   EmergencyPlan,
+  AlarmSite,
+  AlarmType,
   AlarmIncident,
+  AlarmMutation,
   KeyItem,
   TaskItem,
   ManagedDocument,
@@ -52,14 +55,15 @@ import {
   initialActiveSessions,
   initialGdprPolicies
 } from './mockData';
-import { apiClient } from './services/apiClient';
-import { offlineVault } from './services/indexedDbService';
+import { apiClient, ApiError } from './services/apiClient';
+import { offlineVault, StoredAlarmMutation } from './services/indexedDbService';
 
 export type ThemeMode = 'dark' | 'light';
 
 // Mutex zur Verhinderung paralleler Synchronisationsläufe
 let isSyncRunningMutex = false;
 let isSOPSyncRunning = false;
+let isAlarmSyncRunning = false;
 let lastSOPSyncFailureNoticeAt = 0;
 const SOP_SYNC_FAILURE_NOTICE_COOLDOWN_MS = 30_000;
 
@@ -119,6 +123,45 @@ function currentSOPIdentity(state: SecurityOpsStore): { tenantId: string; userId
   return {
     tenantId: state.currentTenantId || state.authUser?.tenantId || '',
     userId: state.authUser?.id || state.currentUserId
+  };
+}
+
+function createAlarmMutationId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `alarm-${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
+}
+
+function mapLocalAlarmIncident(
+  mutation: StoredAlarmMutation,
+  plans: EmergencyPlan[],
+  sites: AlarmSite[],
+  types: AlarmType[]
+): AlarmIncident | null {
+  if (mutation.type !== 'incident_report') return null;
+  const payload = mutation.payload;
+  const siteId = String(payload.siteId ?? '');
+  const type = types.find(item => item.id === payload.alarmTypeId);
+  const plan = plans.find(item => item.id === payload.emergencyPlanId);
+  return {
+    id: `local:${mutation.clientMutationId}`,
+    tenantId: mutation.tenantId,
+    customerId: sites.find(item => item.id === siteId)?.customerId,
+    siteId,
+    siteName: sites.find(item => item.id === siteId)?.name ?? 'Objekt (offline erfasst)',
+    emergencyPlanId: typeof payload.emergencyPlanId === 'string' ? payload.emergencyPlanId : null,
+    emergencyPlanVersionId: plan?.publishedVersionId ?? null,
+    alarmTypeId: typeof payload.alarmTypeId === 'string' ? payload.alarmTypeId : undefined,
+    alarmTypeLabel: type?.label,
+    scenario: type?.code ?? String(payload.scenario ?? ''),
+    severity: String(payload.severity ?? 'Normal') as AlarmIncident['severity'],
+    status: 'neu',
+    title: String(payload.title ?? ''),
+    description: String(payload.description ?? ''),
+    reportedAt: mutation.capturedAt,
+    capturedAt: mutation.capturedAt,
+    revisionVersion: 1,
+    clientMutationId: mutation.clientMutationId,
+    syncStatus: mutation.status === 'conflict' ? 'conflict' : mutation.status === 'confirmed' ? 'confirmed' : 'pending'
   };
 }
 
@@ -295,35 +338,69 @@ function mapEmergencyPlanRow(row: any, tenantId: string): EmergencyPlan {
   return {
     id: asString(row.id),
     tenantId,
+    customerId: row.customer_id ?? row.customerId ?? undefined,
+    customerName: row.customer_name ?? row.customerName ?? undefined,
     siteId: asString(row.site_id ?? row.siteId),
     siteName: asString(row.site_name ?? row.siteName),
-    scenario: asString(row.scenario) as EmergencyPlan['scenario'],
+    alarmTypeId: row.alarm_type_id ?? row.alarmTypeId ?? undefined,
+    alarmTypeLabel: row.alarm_type_label ?? row.alarmTypeLabel ?? undefined,
+    scenario: asString(row.scenario),
+    ownerEmployeeId: row.owner_employee_id ?? row.ownerEmployeeId ?? null,
+    effectiveFrom: row.effective_from ?? row.effectiveFrom ?? null,
+    effectiveUntil: row.effective_until ?? row.effectiveUntil ?? null,
+    publicationStatus: row.publication_status ?? row.publicationStatus ?? (row.is_active ? 'published' : 'draft'),
+    currentVersionId: row.current_version_id ?? row.currentVersionId ?? null,
+    publishedVersionId: row.published_version_id ?? row.publishedVersionId ?? null,
+    versionNumber: asNumber(row.version_number ?? row.versionNumber, 1),
     chainOfAction: Array.isArray(steps) ? steps.filter((step: unknown): step is string => typeof step === 'string') : [],
-    contacts: Array.isArray(row.contacts) ? row.contacts : [],
-    lastDrillDate: asString(row.last_drill_date ?? row.lastDrillDate),
+    contacts: Array.isArray(row.contacts) ? row.contacts.map((contact: any) => ({
+      id: contact.id,
+      contactType: contact.contact_type ?? contact.contactType,
+      role: asString(contact.role),
+      name: asString(contact.name),
+      phone: asString(contact.phone),
+      email: contact.email ?? null,
+      notes: contact.notes ?? ''
+    })) : [],
+    lastDrillDate: row.last_drill_date ?? row.lastDrillDate ?? null,
     isActive: row.is_active ?? row.isActive ?? true,
     revisionVersion: asNumber(row.revision_version ?? row.revisionVersion, 1),
-    archivedAt: row.archived_at ?? row.archivedAt ?? null
+    archivedAt: row.archived_at ?? row.archivedAt ?? null,
+    offlineCopy: row.offlineCopy ?? false
   };
 }
 
 function mapAlarmIncidentRow(row: any, tenantId: string): AlarmIncident {
+  const rawStatus = asString(row.status, 'neu');
   return {
     id: asString(row.id),
     tenantId,
+    incidentNumber: asNumber(row.incident_number ?? row.incidentNumber, 0) || undefined,
+    customerId: row.customer_id ?? row.customerId ?? undefined,
+    customerName: row.customer_name ?? row.customerName ?? undefined,
     siteId: asString(row.site_id ?? row.siteId),
     siteName: asString(row.site_name ?? row.siteName),
     emergencyPlanId: row.emergency_plan_id ?? row.emergencyPlanId ?? null,
-    scenario: asString(row.scenario) as EmergencyPlan['scenario'],
+    emergencyPlanVersionId: row.emergency_plan_version_id ?? row.emergencyPlanVersionId ?? null,
+    alarmTypeId: row.alarm_type_id ?? row.alarmTypeId ?? undefined,
+    alarmTypeLabel: row.alarm_type_label ?? row.alarmTypeLabel ?? undefined,
+    scenario: asString(row.scenario),
     severity: asString(row.severity, 'Normal') as AlarmIncident['severity'],
-    status: asString(row.status, 'gemeldet') as AlarmIncident['status'],
+    status: (rawStatus === 'gemeldet' ? 'neu' : rawStatus) as AlarmIncident['status'],
     title: asString(row.title),
     description: asString(row.description),
     reportedAt: asString(row.reported_at ?? row.reportedAt),
+    capturedAt: row.captured_at ?? row.capturedAt ?? undefined,
+    serverReceivedAt: row.server_received_at ?? row.serverReceivedAt ?? undefined,
     acknowledgedAt: row.acknowledged_at ?? row.acknowledgedAt ?? null,
     escalatedAt: row.escalated_at ?? row.escalatedAt ?? null,
     resolvedAt: row.resolved_at ?? row.resolvedAt ?? null,
     reporterName: asString(row.reporter_name ?? row.reporterName),
+    assignedEmployeeId: row.assigned_employee_id ?? row.assignedEmployeeId ?? null,
+    assignedEmployeeName: row.assigned_employee_name ?? row.assignedEmployeeName ?? undefined,
+    isOverdue: Boolean(row.is_overdue ?? row.isOverdue),
+    syncStatus: row.syncStatus,
+    clientMutationId: row.client_mutation_id ?? row.clientMutationId ?? undefined,
     resolutionNote: row.resolution_note ?? row.resolutionNote ?? null,
     revisionVersion: asNumber(row.revision_version ?? row.revisionVersion, 1)
   };
@@ -510,8 +587,11 @@ interface SecurityOpsStore {
   shifts: Shift[];
   guardBook: GuardBookEntry[];
   sops: SOPDocument[];
+  alarmTypes: AlarmType[];
+  alarmSites: AlarmSite[];
   emergencyPlans: EmergencyPlan[];
   alarmIncidents: AlarmIncident[];
+  pendingAlarmMutations: AlarmMutation[];
   keys: KeyItem[];
   tasks: TaskItem[];
   documents: ManagedDocument[];
@@ -562,6 +642,10 @@ interface SecurityOpsStore {
   pendingSOPAcknowledgements: SOPPendingAcknowledgement[];
   acknowledgeSOP: (sopId: string) => Promise<boolean>;
   syncPendingSOPAcknowledgements: () => Promise<void>;
+  reportAlarmIncident: (payload: Record<string, unknown>) => Promise<{ state: 'confirmed' | 'pending'; data?: unknown }>;
+  addAlarmAction: (incidentId: string, payload: Record<string, unknown>) => Promise<{ state: 'confirmed' | 'pending'; data?: unknown }>;
+  changeAlarmStatus: (incidentId: string, payload: Record<string, unknown>) => Promise<{ state: 'confirmed' | 'pending'; data?: unknown }>;
+  syncPendingAlarmMutations: () => Promise<void>;
   issueKey: (keyId: string, holderName: string, holderId: string, returnDate: string) => Promise<void>;
   returnKey: (keyId: string) => Promise<void>;
   addTask: (task: Omit<TaskItem, 'id' | 'tenantId'>) => Promise<void>;
@@ -570,6 +654,142 @@ interface SecurityOpsStore {
   toggleTaskStatus: (taskId: string) => Promise<void>;
   addEmergencyPlan: (plan: Omit<EmergencyPlan, 'id' | 'tenantId'>) => void;
   resolveAlarm: (siteId: string) => void;
+}
+
+type StoreSetter = (partial: Partial<SecurityOpsStore> | ((state: SecurityOpsStore) => Partial<SecurityOpsStore>)) => void;
+type StoreGetter = () => SecurityOpsStore;
+
+function storedAlarmMutationToState(mutation: StoredAlarmMutation): AlarmMutation {
+  return {
+    clientMutationId: mutation.clientMutationId,
+    tenantId: mutation.tenantId,
+    userId: mutation.userId,
+    type: mutation.type,
+    payload: mutation.payload,
+    capturedAt: mutation.capturedAt,
+    status: mutation.status,
+    serverId: mutation.serverId,
+    errorMessage: mutation.errorMessage,
+    updatedAt: mutation.updatedAt
+  };
+}
+
+async function submitAlarmMutation(
+  set: StoreSetter,
+  get: StoreGetter,
+  type: StoredAlarmMutation['type'],
+  payload: Record<string, unknown>,
+  endpoint: string
+): Promise<{ state: 'confirmed' | 'pending'; data?: unknown }> {
+  const identity = currentSOPIdentity(get());
+  if (!identity.tenantId || !identity.userId) throw new Error('Für die Offline-Erfassung ist eine aktive Sitzung erforderlich.');
+  const clientMutationId = createAlarmMutationId();
+  const capturedAt = typeof payload.capturedAt === 'string' ? payload.capturedAt : new Date().toISOString();
+  let effectivePayload = payload;
+  let effectiveEndpoint = endpoint;
+  let hasPendingIncidentDependency = false;
+  if (type !== 'incident_report' && typeof payload.incidentId === 'string' && payload.incidentId.startsWith('local:')) {
+    const dependencyId = payload.incidentId.slice('local:'.length);
+    const mutations = await offlineVault.getAlarmMutations(identity.tenantId, identity.userId);
+    const report = mutations.find(item => item.clientMutationId === dependencyId && item.type === 'incident_report');
+    if (!report) throw new Error('Die lokale Alarmmeldung für diese Maßnahme wurde nicht gefunden.');
+    if (report.status === 'conflict') throw new Error('Die lokale Alarmmeldung ist in Konflikt und muss zuerst geprüft werden.');
+    if (report.status === 'confirmed' && report.serverId) {
+      effectivePayload = { ...payload, incidentId: report.serverId };
+      effectiveEndpoint = endpoint.replace(payload.incidentId, report.serverId);
+    } else {
+      hasPendingIncidentDependency = true;
+    }
+  }
+  const queued = await offlineVault.enqueueAlarmMutation({
+    clientMutationId,
+    tenantId: identity.tenantId,
+    userId: identity.userId,
+    type,
+    payload: { ...effectivePayload, ...(type === 'incident_report' ? { capturedAt } : {}) },
+    capturedAt
+  });
+  if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return { state: 'pending' };
+  set(state => ({
+    pendingAlarmMutations: [
+      ...state.pendingAlarmMutations.filter(item => item.clientMutationId !== clientMutationId),
+      storedAlarmMutationToState(queued)
+    ],
+    alarmIncidents: type === 'incident_report'
+      ? [
+          ...state.alarmIncidents.filter(item => item.clientMutationId !== clientMutationId),
+          mapLocalAlarmIncident(queued, state.emergencyPlans, state.sites, state.alarmTypes)!
+        ]
+      : state.alarmIncidents
+  }));
+  if (!get().isOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+    return { state: 'pending' };
+  }
+  if (hasPendingIncidentDependency) {
+    void get().syncPendingAlarmMutations();
+    return { state: 'pending' };
+  }
+  try {
+    const requestPayload = Object.fromEntries(
+      Object.entries(queued.payload).filter(([key]) => key !== 'incidentId')
+    );
+    const response = await apiClient.post<any>(effectiveEndpoint, { ...requestPayload, clientMutationId });
+    const responseData = response?.data ?? response;
+    const incident = responseData?.incident;
+    const action = responseData?.action;
+    const serverId = incident?.id ?? action?.id;
+    await offlineVault.updateAlarmMutation(clientMutationId, {
+      status: 'confirmed',
+      serverId,
+      errorMessage: undefined
+    });
+    if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return { state: 'confirmed', data: response };
+    set(state => {
+      const mutation = state.pendingAlarmMutations.find(item => item.clientMutationId === clientMutationId);
+      const updatedIncidents = state.alarmIncidents.map(item => {
+        if (type === 'incident_report' && item.clientMutationId === clientMutationId && incident) {
+          return {
+            ...item,
+            ...mapAlarmIncidentRow(incident, identity.tenantId),
+            siteName: item.siteName,
+            syncStatus: 'confirmed' as const
+          };
+        }
+        if (type === 'status_change' && item.id === String(payload.incidentId) && responseData?.incident) {
+          return { ...item, ...responseData.incident, status: responseData.incident.status, syncStatus: item.syncStatus };
+        }
+        return item;
+      });
+      return {
+        pendingAlarmMutations: mutation
+          ? state.pendingAlarmMutations.map(item => item.clientMutationId === clientMutationId
+              ? { ...item, status: 'confirmed' as const, serverId, errorMessage: undefined, updatedAt: new Date().toISOString() }
+              : item)
+          : state.pendingAlarmMutations,
+        alarmIncidents: updatedIncidents
+      };
+    });
+    return { state: 'confirmed', data: response };
+  } catch (error) {
+    if (error instanceof ApiError && error.isNetworkError) {
+      return { state: 'pending' };
+    }
+    const message = error instanceof Error ? error.message : 'Alarmmutation konnte nicht bestätigt werden.';
+    await offlineVault.updateAlarmMutation(clientMutationId, { status: 'conflict', errorMessage: message });
+    if (isCurrentSOPIdentity(identity.tenantId, identity.userId)) {
+      set(state => ({
+        pendingAlarmMutations: state.pendingAlarmMutations.map(item => item.clientMutationId === clientMutationId
+          ? { ...item, status: 'conflict', errorMessage: message, updatedAt: new Date().toISOString() }
+          : item),
+        alarmIncidents: type === 'incident_report'
+          ? state.alarmIncidents.map(item => item.clientMutationId === clientMutationId
+              ? { ...item, syncStatus: 'conflict' }
+              : item)
+          : state.alarmIncidents
+      }));
+    }
+    throw error;
+  }
 }
 
 export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
@@ -617,8 +837,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         isAuthenticating: false,
         pendingSOPAcknowledgements: [],
         sops: [],
+        alarmTypes: [],
+        alarmSites: [],
         emergencyPlans: [],
-        alarmIncidents: []
+        alarmIncidents: [],
+        pendingAlarmMutations: []
       });
       await get().loadTenantData();
     } catch (error: any) {
@@ -647,8 +870,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       documents: [],
       pendingSOPAcknowledgements: [],
       sops: [],
+      alarmTypes: [],
+      alarmSites: [],
       emergencyPlans: [],
-      alarmIncidents: []
+      alarmIncidents: [],
+      pendingAlarmMutations: []
     });
   },
 
@@ -668,7 +894,12 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         isAuthenticated: true,
         currentTenantId: me.tenantId ?? me.tenant_id ?? '',
         pendingSOPAcknowledgements: [],
-        sops: []
+        sops: [],
+        alarmTypes: [],
+        alarmSites: [],
+        emergencyPlans: [],
+        alarmIncidents: [],
+        pendingAlarmMutations: []
       });
       apiClient.setTenantId(me.tenantId ?? me.tenant_id ?? '');
       await get().loadTenantData();
@@ -676,7 +907,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       apiClient.setCsrfToken(null);
       set({
         authUser: null, isAuthenticated: false, documents: [], pendingSOPAcknowledgements: [], sops: [],
-        emergencyPlans: [], alarmIncidents: []
+        alarmTypes: [], alarmSites: [], emergencyPlans: [], alarmIncidents: [], pendingAlarmMutations: []
       });
     }
   },
@@ -696,15 +927,18 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       tasks: [],
       documents: [],
       sops: [],
+      alarmTypes: [],
+      alarmSites: [],
       emergencyPlans: [],
       alarmIncidents: [],
+      pendingAlarmMutations: [],
       pendingSOPAcknowledgements: []
     });
 
     const permissions = get().authUser?.permissions || [];
     const canReadDocuments = permissions.includes('documents:read');
     const canReadSOPs = permissions.includes('sop:read') || permissions.includes('sop:manage');
-    const canReadAlarms = permissions.includes('alarm:read') || permissions.includes('alarm:manage');
+    const canReadAlarms = permissions.includes('alarm:read');
     const [
       clientsResult,
       sitesResult,
@@ -715,6 +949,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       tasksResult,
       documentsResult,
       sopsResult,
+      alarmTypesResult,
+      alarmSitesResult,
       emergencyPlansResult,
       alarmIncidentsResult
     ] = await Promise.allSettled([
@@ -727,6 +963,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       apiClient.get<any[]>('/tasks'),
       canReadDocuments ? apiClient.get<any[]>('/documents') : Promise.resolve([]),
       canReadSOPs ? apiClient.get<any[]>('/sops') : Promise.resolve([]),
+      canReadAlarms ? apiClient.get<any[]>('/alarm-types') : Promise.resolve([]),
+      canReadAlarms ? apiClient.get<any[]>('/alarm-sites') : Promise.resolve([]),
       canReadAlarms ? apiClient.get<any[]>('/emergency-plans') : Promise.resolve([]),
       canReadAlarms ? apiClient.get<any[]>('/alarms') : Promise.resolve([])
     ]);
@@ -822,21 +1060,139 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       errors.push(`Dienstanweisungen: ${errorText(sopsResult.reason)}`);
     }
 
-    if (canReadAlarms && emergencyPlansResult.status === 'fulfilled') {
-      nextState.emergencyPlans = emergencyPlansResult.value.map((row) => mapEmergencyPlanRow(row, tenantId));
-    } else if (canReadAlarms && emergencyPlansResult.status === 'rejected') {
-      errors.push(`Notfallpläne: ${errorText(emergencyPlansResult.reason)}`);
+    if (canReadAlarms && alarmTypesResult.status === 'fulfilled') {
+      nextState.alarmTypes = alarmTypesResult.value.map((row) => ({
+        id: asString(row.id),
+        tenantId,
+        code: asString(row.code),
+        label: asString(row.label),
+        isSystem: Boolean(row.is_system ?? row.isSystem),
+        isActive: row.is_active ?? row.isActive ?? true
+      }));
+    } else if (canReadAlarms && alarmTypesResult.status === 'rejected') {
+      try {
+        const cached = await offlineVault.getEmergencyPlanCache(tenantId, requestIdentity.userId);
+        if (cached?.types.length) {
+          nextState.alarmTypes = cached.types.map((row) => ({
+            id: asString(row.id),
+            tenantId,
+            code: asString(row.code),
+            label: asString(row.label),
+            isSystem: Boolean(row.is_system ?? row.isSystem),
+            isActive: row.is_active ?? row.isActive ?? true
+          }));
+        } else {
+          errors.push(`Alarmarten: ${errorText(alarmTypesResult.reason)}`);
+        }
+      } catch (error) {
+        errors.push(`Alarmarten: ${errorText(alarmTypesResult.reason)}; Offline-Cache: ${errorText(error)}`);
+      }
     }
 
+    if (canReadAlarms && alarmSitesResult.status === 'fulfilled') {
+      nextState.alarmSites = alarmSitesResult.value.map((row) => ({
+        id: asString(row.id),
+        customerId: asString(row.customer_id ?? row.customerId),
+        name: asString(row.name)
+      }));
+    } else if (canReadAlarms && alarmSitesResult.status === 'rejected') {
+      try {
+        const cached = await offlineVault.getEmergencyPlanCache(tenantId, requestIdentity.userId);
+        if (cached?.sites.length) {
+          nextState.alarmSites = cached.sites.map((row) => ({
+            id: asString(row.id),
+            customerId: asString(row.customer_id ?? row.customerId),
+            name: asString(row.name)
+          }));
+        } else {
+          errors.push(`Alarmobjekte: ${errorText(alarmSitesResult.reason)}`);
+        }
+      } catch (error) {
+        errors.push(`Alarmobjekte: ${errorText(alarmSitesResult.reason)}; Offline-Cache: ${errorText(error)}`);
+      }
+    }
+
+    let loadedPlans: EmergencyPlan[] = [];
+    if (canReadAlarms && emergencyPlansResult.status === 'fulfilled') {
+      loadedPlans = emergencyPlansResult.value.map((row) => mapEmergencyPlanRow(row, tenantId));
+      nextState.emergencyPlans = loadedPlans;
+      try {
+        await offlineVault.saveEmergencyPlanCache(
+          tenantId,
+          requestIdentity.userId,
+          emergencyPlansResult.value,
+          (nextState.alarmTypes as AlarmType[] | undefined) ?? [],
+          (nextState.alarmSites as AlarmSite[] | undefined) ?? []
+        );
+      } catch (error) {
+        errors.push(`Offline-Notfallplancache: ${errorText(error)}`);
+      }
+    } else if (canReadAlarms && emergencyPlansResult.status === 'rejected') {
+      try {
+        const cached = await offlineVault.getEmergencyPlanCache(tenantId, requestIdentity.userId);
+        if (cached) {
+          loadedPlans = cached.plans.map((row) => ({ ...mapEmergencyPlanRow(row, tenantId), offlineCopy: true }));
+          nextState.emergencyPlans = loadedPlans;
+          errors.push('Notfallpläne stammen aus dem lokalen Offline-Cache; Kontaktinformationen werden nicht offline gespeichert.');
+        } else {
+          errors.push(`Notfallpläne: ${errorText(emergencyPlansResult.reason)}`);
+        }
+      } catch (cacheError) {
+        errors.push(`Notfallpläne: ${errorText(emergencyPlansResult.reason)}; Offline-Cache: ${errorText(cacheError)}`);
+      }
+    }
+
+    let loadedIncidents: AlarmIncident[] = [];
     if (canReadAlarms && alarmIncidentsResult.status === 'fulfilled') {
-      nextState.alarmIncidents = alarmIncidentsResult.value.map((row) => mapAlarmIncidentRow(row, tenantId));
+      loadedIncidents = alarmIncidentsResult.value.map((row) => mapAlarmIncidentRow(row, tenantId));
     } else if (canReadAlarms && alarmIncidentsResult.status === 'rejected') {
       errors.push(`Alarmvorfälle: ${errorText(alarmIncidentsResult.reason)}`);
+    }
+
+    if (canReadAlarms) {
+      try {
+        const localMutations = await offlineVault.getAlarmMutations(tenantId, requestIdentity.userId);
+        const mutationById = new Map(localMutations.map(item => [item.clientMutationId, item]));
+        loadedIncidents = loadedIncidents.map(item => {
+          const mutation = item.clientMutationId ? mutationById.get(item.clientMutationId) : undefined;
+          return mutation
+            ? { ...item, syncStatus: mutation.status, clientMutationId: mutation.clientMutationId }
+            : item;
+        });
+        const loadedTypes = (nextState.alarmTypes as AlarmType[] | undefined) ?? [];
+        const sitesForLocal = (nextState.alarmSites as AlarmSite[] | undefined) ?? [];
+        const mutations: AlarmMutation[] = localMutations.map(item => ({
+          clientMutationId: item.clientMutationId,
+          tenantId: item.tenantId,
+          userId: item.userId,
+          type: item.type,
+          payload: item.payload,
+          capturedAt: item.capturedAt,
+          status: item.status,
+          serverId: item.serverId,
+          errorMessage: item.errorMessage,
+          updatedAt: item.updatedAt
+        }));
+        nextState.pendingAlarmMutations = mutations;
+        const knownMutationIds = new Set(loadedIncidents.map(item => item.clientMutationId).filter(Boolean));
+        const localIncidents = localMutations
+          .filter(item => item.type === 'incident_report' && !knownMutationIds.has(item.clientMutationId))
+          .map(item => mapLocalAlarmIncident(item, loadedPlans, sitesForLocal, loadedTypes))
+          .filter((item): item is AlarmIncident => item !== null);
+        loadedIncidents = [...localIncidents, ...loadedIncidents];
+        nextState.alarmIncidents = loadedIncidents;
+      } catch (error) {
+        errors.push(`Offline-Alarmmutationen: ${errorText(error)}`);
+        nextState.alarmIncidents = loadedIncidents;
+      }
     }
 
     const dataLoadError = errors.length > 0 ? errors.join(' | ') : null;
     set({ ...nextState, isLoadingData: false, dataLoadError });
     if (canReadSOPs && sopsResult.status === 'fulfilled') void get().syncPendingSOPAcknowledgements();
+    if (canReadAlarms && alarmTypesResult.status === 'fulfilled' && emergencyPlansResult.status === 'fulfilled') {
+      void get().syncPendingAlarmMutations();
+    }
 
     if (dataLoadError) {
       get().addNotification('Daten teilweise nicht geladen', dataLoadError, 'alert');
@@ -854,8 +1210,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   setCurrentTenantId: (tenantId) => {
     apiClient.setTenantId(tenantId);
     set({
-      currentTenantId: tenantId, pendingSOPAcknowledgements: [], sops: [],
-      emergencyPlans: [], alarmIncidents: []
+      currentTenantId: tenantId, pendingSOPAcknowledgements: [], sops: [], alarmTypes: [],
+      alarmSites: [],
+      emergencyPlans: [], alarmIncidents: [], pendingAlarmMutations: []
     });
     void get().loadTenantData();
   },
@@ -950,6 +1307,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
     if (nextState) {
       void get().syncPendingSOPAcknowledgements();
+      void get().syncPendingAlarmMutations();
       get().triggerManualSync();
       get().addNotification(
         'Verbindung wiederhergestellt',
@@ -1374,9 +1732,12 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   shifts: initialShifts,
   guardBook: initialGuardBookEntries,
   sops: [],
+  alarmTypes: [],
+  alarmSites: [],
   pendingSOPAcknowledgements: [],
   emergencyPlans: initialEmergencyPlans,
   alarmIncidents: [],
+  pendingAlarmMutations: [],
   keys: initialKeys,
   tasks: initialTasks,
   documents: [],
@@ -2105,6 +2466,83 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
+  reportAlarmIncident: (payload) => submitAlarmMutation(set, get, 'incident_report', payload, '/alarms'),
+
+  addAlarmAction: (incidentId, payload) => submitAlarmMutation(
+    set, get, 'action_create', { ...payload, incidentId }, `/alarms/${incidentId}/actions`
+  ),
+
+  changeAlarmStatus: (incidentId, payload) => submitAlarmMutation(
+    set, get, 'status_change', { ...payload, incidentId }, `/alarms/${incidentId}/transitions`
+  ),
+
+  syncPendingAlarmMutations: async () => {
+    if (!get().isOnline || (typeof navigator !== 'undefined' && navigator.onLine === false) || isAlarmSyncRunning) return;
+    const identity = currentSOPIdentity(get());
+    if (!identity.tenantId || !identity.userId) return;
+    if (!get().authUser?.permissions.includes('alarm:report')) return;
+    isAlarmSyncRunning = true;
+    try {
+      const records = await offlineVault.getAlarmMutations(identity.tenantId, identity.userId);
+      const pending = records.filter(record => record.status === 'pending').sort((left, right) => {
+        const leftIsReport = left.type === 'incident_report' ? 0 : 1;
+        const rightIsReport = right.type === 'incident_report' ? 0 : 1;
+        return leftIsReport - rightIsReport || left.capturedAt.localeCompare(right.capturedAt);
+      });
+      if (!pending.length || !isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
+      const results = await apiClient.post<any[]>('/alarms/sync', {
+        mutations: pending.map(record => ({
+          clientMutationId: record.clientMutationId,
+          type: record.type,
+          payload: record.payload
+        }))
+      });
+      if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
+      for (const result of results) {
+        if (result.state === 'confirmed') {
+          await offlineVault.updateAlarmMutation(result.clientMutationId, {
+            status: 'confirmed',
+            serverId: result.incident?.id ?? result.action?.id,
+            errorMessage: undefined
+          });
+        } else if (result.state === 'conflict') {
+          await offlineVault.updateAlarmMutation(result.clientMutationId, {
+            status: 'conflict',
+            errorMessage: result.error ?? 'Der Server meldet einen Versionskonflikt.'
+          });
+        } else if (result.state === 'retry') {
+          await offlineVault.updateAlarmMutation(result.clientMutationId, {
+            errorMessage: result.error ?? 'Synchronisierung wird erneut versucht.'
+          });
+        }
+      }
+      const updatedRecords = await offlineVault.getAlarmMutations(identity.tenantId, identity.userId);
+      if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
+      set({
+        pendingAlarmMutations: updatedRecords.map(storedAlarmMutationToState),
+        alarmIncidents: get().alarmIncidents.map(incident => {
+          const mutation = updatedRecords.find(record => record.clientMutationId === incident.clientMutationId);
+          return mutation
+            ? { ...incident, syncStatus: mutation.status, clientMutationId: mutation.clientMutationId }
+            : incident;
+        })
+      });
+      if (results.some(result => result.state === 'confirmed')) {
+        await get().loadTenantData();
+      }
+    } catch (error) {
+      if (isCurrentSOPIdentity(identity.tenantId, identity.userId)) {
+        get().addNotification(
+          'Alarm-Synchronisierung ausstehend',
+          `Lokal gespeicherte Alarmmutationen bleiben erhalten. ${errorText(error)}`,
+          'warning'
+        );
+      }
+    } finally {
+      isAlarmSyncRunning = false;
+    }
+  },
+
   issueKey: async (keyId, holderName, holderId, returnDate) => {
     const issuedAt = new Date().toISOString().replace('T', ' ').substring(0, 16);
 
@@ -2252,6 +2690,7 @@ if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
     useSecurityStore.setState({ isOnline: true });
     void useSecurityStore.getState().syncPendingSOPAcknowledgements();
+    void useSecurityStore.getState().syncPendingAlarmMutations();
   });
   window.addEventListener('offline', () => {
     useSecurityStore.setState({ isOnline: false });

@@ -85,7 +85,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Wachbuch | teilweise | Lesen persistiert; Schreiben über Outbox/Sync |
 | Dokumente | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte PostgreSQL-Verwaltung, private Dateispeicherung, Versionen, Kategorien, Ordner, Audit und REST-API; Einschränkungen siehe [DMS-Bericht](./DMS_IMPLEMENTATION_REPORT.md) |
 | SOPs | implementiert, nicht deployed | Versionierter Prüf-/Freigabe-Workflow, Zuweisungen, Bestätigungen, JSON-Berichte; Einschränkungen siehe [SOP-API](./frontend/SOP_API.md) und [Implementierungsbericht](./SOP_IMPLEMENTATION_REPORT.md) |
-| Alarme/Notfallpläne | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte Notfallpläne, Alarmvorfälle, Maßnahmenverlauf und Übungsdokumentation; Umfang und Einschränkungen siehe [API-Dokumentation](./frontend/ALARM_EMERGENCY_API.md) und [Implementierungsbericht](./ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md) |
+| Alarme/Notfallpläne | implementiert, lokal verifiziert; nicht deployed | Versionierte und veröffentlichbare objektbezogene Notfallpläne, konfigurierbare Alarmarten, vollständiger Alarmstatus-/Maßnahmenverlauf, site-scoped Zugriff, Offline-Outbox und serverseitiger Eskalationsworker; E-Mail/Push sind nicht konfiguriert und lokale Datei-Uploads fehlen. Details: [API](./frontend/ALARM_EMERGENCY_API.md), [Bericht](./ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md) |
 | Übergaben | offen | Nur lokales Mobile-Modul |
 | Streifenkontrollen | offen | Nur lokales Mobile-Modul |
 | Benutzer/Rechte | teilweise | Login/RBAC vorhanden; Verwaltungs-API offen |

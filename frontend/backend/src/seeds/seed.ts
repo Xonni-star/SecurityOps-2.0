@@ -1,8 +1,37 @@
 import argon2 from 'argon2';
+import { PoolClient } from 'pg';
 import { pool, withTenantTransaction } from '../config/database';
 
 export const TENANT_FRANKFURT_ID = '11111111-1111-1111-1111-111111111111';
 export const TENANT_BAVARIA_ID = '22222222-2222-2222-2222-222222222222';
+
+const DEFAULT_ALARM_TYPES = [
+  ['brandalarm', 'Brandalarm'],
+  ['bma', 'Brandmeldeanlage (BMA)'],
+  ['einbruchalarm', 'Einbruchalarm'],
+  ['ema', 'Einbruchmeldeanlage (EMA)'],
+  ['ueberfallalarm', 'Überfallalarm'],
+  ['medizinischer_notfall', 'Medizinischer Notfall'],
+  ['technischer_alarm', 'Technischer Alarm'],
+  ['stromausfall', 'Stromausfall'],
+  ['wasserschaden', 'Wasserschaden'],
+  ['gasaustritt', 'Gasaustritt'],
+  ['evakuierung', 'Evakuierung'],
+  ['sicherheitsvorfall', 'Sicherheitsvorfall'],
+  ['sonstiger_alarm', 'Sonstiger Alarm'],
+  ['bombendrohung', 'Bombendrohung'],
+  ['hausfriedensbruch_aggression', 'Hausfriedensbruch / Aggression']
+] as const;
+
+async function seedAlarmTypes(db: PoolClient, tenantId: string): Promise<void> {
+  for (const [code, label] of DEFAULT_ALARM_TYPES) {
+    await db.query(
+      `INSERT INTO alarm_types (tenant_id,code,label,is_system)
+       VALUES ($1,$2,$3,true) ON CONFLICT (tenant_id,code) DO NOTHING`,
+      [tenantId, code, label]
+    );
+  }
+}
 
 export async function seedDatabase(): Promise<void> {
   console.log('[SEED] Starte Datenbankbefüllung mit Testmandanten und isolierten Daten...');
@@ -89,7 +118,16 @@ export async function seedDatabase(): Promise<void> {
       { code: 'alarm:read', module: 'alarm' },
       { code: 'alarm:manage', module: 'alarm' },
       { code: 'alarm:report', module: 'alarm' },
-      { code: 'alarm:respond', module: 'alarm' }
+      { code: 'alarm:respond', module: 'alarm' },
+      { code: 'alarm:type:manage', module: 'alarm' },
+      { code: 'alarm:assign', module: 'alarm' },
+      { code: 'alarm:archive', module: 'alarm' },
+      { code: 'alarm:action:create', module: 'alarm' },
+      { code: 'alarm:escalation:manage', module: 'alarm' },
+      { code: 'alarm:notifications:read', module: 'alarm' },
+      { code: 'emergency_plan:publish', module: 'alarm' },
+      { code: 'emergency_contact:read', module: 'alarm' },
+      { code: 'emergency_contact:manage', module: 'alarm' }
     ];
 
     for (const p of permissions) {
@@ -138,9 +176,16 @@ export async function seedDatabase(): Promise<void> {
       JOIN permissions p ON
         (r.name IN ('Systemadministrator', 'Geschäftsführung', 'Einsatzleitung', 'Qualitätsmanagement')
           AND p.code LIKE 'alarm:%')
+        OR (r.name IN ('Systemadministrator','Geschäftsführung','Einsatzleitung','Qualitätsmanagement')
+          AND p.code IN ('emergency_plan:publish','emergency_contact:read','emergency_contact:manage'))
         OR (r.name IN ('Objektleitung', 'Wachdienstmitarbeiter')
-          AND p.code IN ('alarm:read', 'alarm:report', 'alarm:respond'))
+          AND p.code IN ('alarm:read', 'alarm:report', 'alarm:respond', 'alarm:action:create', 'emergency_contact:read'))
+        OR (r.name = 'Objektleitung'
+          AND p.code IN ('alarm:assign','alarm:archive','alarm:notifications:read','emergency_plan:publish','emergency_contact:manage'))
+        OR (r.name = 'Wachdienstmitarbeiter'
+          AND p.code IN ('alarm:action:create','emergency_contact:read'))
         OR (r.name = 'Auditor' AND p.code = 'alarm:read')
+        OR (r.name = 'Auditor' AND p.code IN ('alarm:notifications:read','emergency_contact:read'))
       ON CONFLICT DO NOTHING;
     `);
 
@@ -185,6 +230,7 @@ export async function seedDatabase(): Promise<void> {
 
     // 5. Daten für Mandant Frankfurt (Tenant A) innerhalb geschützter RLS-Transaktion anlegen
     await withTenantTransaction(TENANT_FRANKFURT_ID, async (tx) => {
+      await seedAlarmTypes(tx, TENANT_FRANKFURT_ID);
       // Kunde
       await tx.query(`
         INSERT INTO clients (id, tenant_id, client_number, company_name, contact_person, email, phone, address, contract_start, contract_end)
@@ -209,6 +255,7 @@ export async function seedDatabase(): Promise<void> {
 
     // 6. Daten für Mandant Bavaria (Tenant B) innerhalb geschützter RLS-Transaktion anlegen
     await withTenantTransaction(TENANT_BAVARIA_ID, async (tx) => {
+      await seedAlarmTypes(tx, TENANT_BAVARIA_ID);
       await tx.query(`
         INSERT INTO clients (id, tenant_id, client_number, company_name, contact_person, email, phone, address, contract_start, contract_end)
         VALUES ('c2222222-2222-2222-2222-222222222222', $1, 'KUN-BAV-101', 'BioPharm Innovations AG (KRITIS)', 'Christian Lindner-Sachs', 'security@biopharm.eu', '+49 89 4522-890', 'Am Klopferspitz 19, 82152 Planegg', '2021-08-01', '2027-07-31')

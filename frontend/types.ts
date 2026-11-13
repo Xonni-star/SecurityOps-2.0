@@ -274,37 +274,107 @@ export interface SOPPendingAcknowledgement {
 export interface EmergencyPlan {
   id: string;
   tenantId: string;
+  customerId?: string;
+  customerName?: string;
   siteId: string;
   siteName: string;
-  scenario: 'BMA - Brandmeldeanlage' | 'EMA - Einbruchsalarm' | 'Bombendrohung' | 'Medizinischer Notfall' | 'Hausfriedensbruch / Aggression';
+  alarmTypeId?: string;
+  alarmTypeLabel?: string;
+  scenario: string;
+  ownerEmployeeId?: string | null;
+  effectiveFrom?: string | null;
+  effectiveUntil?: string | null;
+  publicationStatus?: 'draft' | 'published' | 'archived';
+  currentVersionId?: string | null;
+  publishedVersionId?: string | null;
+  versionNumber?: number;
   chainOfAction: string[];
-  contacts: { role: string; name: string; phone: string }[];
-  lastDrillDate: string;
+  contacts: {
+    id?: string;
+    contactType?: string;
+    role: string;
+    name: string;
+    phone: string;
+    email?: string | null;
+    notes?: string;
+  }[];
+  lastDrillDate: string | null;
   isActive: boolean;
   revisionVersion: number;
   archivedAt?: string | null;
+  offlineCopy?: boolean;
 }
 
-export type AlarmIncidentStatus = 'gemeldet' | 'bestätigt' | 'eskaliert' | 'abgeschlossen';
+export interface AlarmType {
+  id: string;
+  tenantId: string;
+  code: string;
+  label: string;
+  isSystem: boolean;
+  isActive: boolean;
+}
+
+export interface AlarmSite {
+  id: string;
+  customerId: string;
+  name: string;
+}
+
+export type AlarmIncidentStatus =
+  | 'neu'
+  | 'bestätigt'
+  | 'in_bearbeitung'
+  | 'eskaliert'
+  | 'einsatzkraefte_verstaendigt'
+  | 'massnahmen_eingeleitet'
+  | 'entwarnung'
+  | 'abgeschlossen'
+  | 'archiviert';
 
 export interface AlarmIncident {
   id: string;
   tenantId: string;
+  incidentNumber?: number;
+  customerId?: string;
+  customerName?: string;
   siteId: string;
   siteName: string;
   emergencyPlanId?: string | null;
-  scenario: EmergencyPlan['scenario'];
+  emergencyPlanVersionId?: string | null;
+  alarmTypeId?: string;
+  alarmTypeLabel?: string;
+  scenario: string;
   severity: 'Niedrig' | 'Normal' | 'Dringend' | 'Kritisch';
   status: AlarmIncidentStatus;
   title: string;
   description: string;
   reportedAt: string;
+  capturedAt?: string;
+  serverReceivedAt?: string;
   acknowledgedAt?: string | null;
   escalatedAt?: string | null;
   resolvedAt?: string | null;
   reporterName?: string;
+  assignedEmployeeId?: string | null;
+  assignedEmployeeName?: string;
+  isOverdue?: boolean;
+  syncStatus?: 'pending' | 'confirmed' | 'conflict';
+  clientMutationId?: string;
   resolutionNote?: string | null;
   revisionVersion: number;
+}
+
+export interface AlarmMutation {
+  clientMutationId: string;
+  tenantId: string;
+  userId: string;
+  type: 'incident_report' | 'action_create' | 'status_change';
+  payload: Record<string, unknown>;
+  capturedAt: string;
+  status: 'pending' | 'confirmed' | 'conflict';
+  serverId?: string;
+  errorMessage?: string;
+  updatedAt: string;
 }
 
 export interface KeyItem {

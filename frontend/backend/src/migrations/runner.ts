@@ -1086,6 +1086,36 @@ export function deriveExpectedSchemaObjects(migrations: MigrationFile[]): Expect
       }
     }
     for (const [name, kind] of extracted.types) result.types.set(name, kind);
+
+    const tokens = lexSql(migration.sql, migration.filename);
+    for (let index = 0; index < tokens.length; index++) {
+      if (!isWord(tokens[index], 'identity')) continue;
+      let statementStart = index - 1;
+      while (statementStart >= 0 && !isPunct(tokens[statementStart], ';')) statementStart--;
+
+      let alterTableIndex = -1;
+      let addColumnIndex = -1;
+      for (let cursor = statementStart + 1; cursor < index; cursor++) {
+        if (isWord(tokens[cursor], 'alter') && isWord(tokens[cursor + 1], 'table')) {
+          alterTableIndex = cursor;
+        }
+        if (isWord(tokens[cursor], 'add') && isWord(tokens[cursor + 1], 'column')) {
+          addColumnIndex = cursor;
+        }
+      }
+      if (alterTableIndex < 0 || addColumnIndex < 0) continue;
+
+      const table = parseQualifiedName(tokens, alterTableIndex + 2, migration.filename);
+      if (!isPublicName(table.name)) continue;
+      let columnIndex = addColumnIndex + 2;
+      if (isWord(tokens[columnIndex], 'if') && isWord(tokens[columnIndex + 1], 'not') &&
+          isWord(tokens[columnIndex + 2], 'exists')) {
+        columnIndex += 3;
+      }
+      const column = identifierFromToken(tokens[columnIndex], migration.filename);
+      const sequenceName = `${table.name.key}_${column.key}_seq`.slice(0, 63);
+      result.relations.set(sequenceName, 'S');
+    }
   }
 
   return result;
