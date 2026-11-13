@@ -6,7 +6,7 @@ import { withTenantTransaction } from '../config/database';
 import { computePayloadHash } from '../services/syncHash';
 import { materializePatrolOccurrences } from '../services/patrolScheduleWorker';
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const dateTime = z.string().datetime({ offset: true });
 const MAX_OFFLINE_SYNC_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_CLIENT_CLOCK_DRIFT_MS = 5 * 60 * 1000;
@@ -61,10 +61,7 @@ const checkpointBaseSchema = z.object({
   longitude: z.number().min(-180).max(180).nullable().optional(),
   requiredIntervalMinutes: z.number().int().min(1).max(1440).default(60)
 }).strict();
-const checkpointCoordinatesSchema = <T extends z.ZodTypeAny>(schema: T) => schema.superRefine((checkpoint: {
-  latitude?: number | null;
-  longitude?: number | null;
-}, ctx: z.RefinementCtx) => {
+const checkpointCoordinatesSchema = <T extends z.ZodType<{ latitude?: number | null; longitude?: number | null }>>(schema: T) => schema.superRefine((checkpoint, ctx) => {
   if ((checkpoint.latitude == null) !== (checkpoint.longitude == null)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['latitude'], message: 'Breiten- und Längengrad müssen gemeinsam angegeben werden.' });
   }

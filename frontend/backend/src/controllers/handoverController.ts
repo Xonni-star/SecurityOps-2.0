@@ -14,7 +14,7 @@ import {
 } from '../services/handoverService';
 import { computePayloadHash } from '../services/syncHash';
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const confirmationSchema = z.object({
   clientMutationId: z.string().min(8).max(64).regex(/^[A-Za-z0-9_-]+$/),
   expectedRevisionVersion: z.number().int().positive(),

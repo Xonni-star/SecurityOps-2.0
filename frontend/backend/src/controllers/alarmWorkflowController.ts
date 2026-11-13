@@ -4,7 +4,7 @@ import { PoolClient } from 'pg';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const date = z.string().date();
 const alarmStatuses = [
   'neu', 'bestätigt', 'in_bearbeitung', 'eskaliert', 'einsatzkraefte_verstaendigt',

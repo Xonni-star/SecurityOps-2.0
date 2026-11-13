@@ -28,7 +28,7 @@ const syncMutationItemSchema = z.object({
   action: z.enum(['CREATE', 'UPDATE', 'DELETE']),
   clientTimestamp: z.string(),
   baseVersion: z.number().int().default(1),
-  payload: z.record(z.any())
+  payload: z.record(z.string(), z.any())
 });
 
 const syncPushBatchSchema = z.object({
@@ -41,7 +41,7 @@ const conflictResolveSchema = z.object({
   entityType: z.enum(['task', 'shift', 'key', 'guardbook', 'patrol']),
   strategy: z.enum(['USE_LOCAL', 'USE_SERVER', 'RECORD_AS_EXCEPTION']),
   expectedVersion: z.number().int().positive('expectedVersion muss eine positive Ganzzahl sein.'),
-  localPayload: z.record(z.any()).optional()
+  localPayload: z.record(z.string(), z.any()).optional()
 }).superRefine((value, ctx) => {
   if (value.entityType === 'patrol' && value.strategy === 'USE_LOCAL') {
     ctx.addIssue({

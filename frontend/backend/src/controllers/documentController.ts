@@ -13,27 +13,27 @@ const categorySchema = z.object({
 
 const folderSchema = z.object({
   name: z.string().trim().min(1).max(150),
-  parentId: z.string().uuid().nullable().optional()
+  parentId: z.string().guid().nullable().optional()
 }).strict();
 
 const relationshipSchema = z.object({
   type: z.enum(['customer', 'site', 'employee', 'shift', 'incident']).nullable(),
-  id: z.string().uuid().nullable()
+  id: z.string().guid().nullable()
 }).strict().refine((value) => (value.type === null) === (value.id === null), {
   message: 'Beziehungstyp und ID müssen gemeinsam gesetzt oder entfernt werden.'
 });
 
 const uploadMetadataSchema = z.object({
   title: z.string().trim().min(1).max(255),
-  categoryId: z.string().uuid(),
-  folderId: z.string().uuid().optional(),
+  categoryId: z.string().guid(),
+  folderId: z.string().guid().optional(),
   description: z.string().max(10000).default(''),
   documentNumber: z.string().trim().max(100).optional(),
   validFrom: z.string().date().optional(),
   validUntil: z.string().date().optional(),
-  responsibleUserId: z.string().uuid().optional(),
+  responsibleUserId: z.string().guid().optional(),
   relationshipType: z.enum(['customer', 'site', 'employee', 'shift', 'incident']).optional(),
-  relationshipId: z.string().uuid().optional()
+  relationshipId: z.string().guid().optional()
 }).strict().refine((value) => Boolean(value.relationshipType) === Boolean(value.relationshipId), {
   message: 'Beziehungstyp und ID müssen gemeinsam gesetzt werden.'
 }).refine((value) => !value.validFrom || !value.validUntil || value.validUntil >= value.validFrom, {
@@ -42,14 +42,14 @@ const uploadMetadataSchema = z.object({
 
 const updateDocumentSchema = z.object({
   title: z.string().trim().min(1).max(255).optional(),
-  categoryId: z.string().uuid().optional(),
-  folderId: z.string().uuid().nullable().optional(),
+  categoryId: z.string().guid().optional(),
+  folderId: z.string().guid().nullable().optional(),
   status: z.enum(['Entwurf', 'In Prüfung', 'Freigegeben', 'Veröffentlicht', 'Abgelaufen']).optional(),
   description: z.string().max(10000).optional(),
   documentNumber: z.string().trim().max(100).nullable().optional(),
   validFrom: z.string().date().nullable().optional(),
   validUntil: z.string().date().nullable().optional(),
-  responsibleUserId: z.string().uuid().nullable().optional(),
+  responsibleUserId: z.string().guid().nullable().optional(),
   tags: z.array(z.string().trim().min(1).max(50)).max(20).optional(),
   relationship: relationshipSchema.optional()
 }).strict().refine((value) => Object.keys(value).length > 0, {
@@ -104,7 +104,7 @@ async function assertTenantUser(db: PoolClient, tenantId: string, userId: string
 }
 
 function uuid(value: string): string {
-  return z.string().uuid().parse(value);
+  return z.string().guid().parse(value);
 }
 
 function requireFile(req: Request): Buffer {
@@ -229,8 +229,8 @@ export async function listDocuments(req: Request, res: Response, next: NextFunct
     const tenantId = req.user!.tenantId;
     const querySchema = z.object({
       search: z.string().trim().max(200).optional(),
-      categoryId: z.string().uuid().optional(),
-      folderId: z.string().uuid().optional(),
+      categoryId: z.string().guid().optional(),
+      folderId: z.string().guid().optional(),
       root: z.enum(['true', 'false']).optional(),
       status: z.enum(['Entwurf', 'In Prüfung', 'Freigegeben', 'Veröffentlicht', 'Abgelaufen', 'Archiviert']).optional(),
       archived: z.enum(['true', 'false']).default('false'),
@@ -638,7 +638,7 @@ export async function moveDocument(req: Request, res: Response, next: NextFuncti
     const tenantId = req.user!.tenantId;
     const user = req.user!;
     const documentId = uuid(req.params.id);
-    const body = z.object({ folderId: z.string().uuid().nullable() }).strict().parse(req.body);
+    const body = z.object({ folderId: z.string().guid().nullable() }).strict().parse(req.body);
     const result = await withTenantTransaction(tenantId, async (db) => {
       await assertTenantFolder(db, tenantId, body.folderId);
       const updated = await db.query(

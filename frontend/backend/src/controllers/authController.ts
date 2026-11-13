@@ -8,7 +8,7 @@ import { env } from '../config/env';
 const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8),
-  requestedTenantId: z.string().uuid().optional()
+  requestedTenantId: z.string().guid().optional()
 });
 
 /**

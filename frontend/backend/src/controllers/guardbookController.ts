@@ -3,8 +3,8 @@ import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 
 const createGuardbookSchema = z.object({
-  siteId: z.string().uuid('siteId muss eine gültige UUID sein.'),
-  guardId: z.string().uuid('guardId muss eine gültige UUID sein.'),
+  siteId: z.string().guid('siteId muss eine gültige UUID sein.'),
+  guardId: z.string().guid('guardId muss eine gültige UUID sein.'),
   category: z.string().min(2).max(50),
   priority: z.enum(['Niedrig', 'Normal', 'Dringend', 'Kritisch']).default('Normal'),
   title: z.string().min(3).max(255),
@@ -14,7 +14,7 @@ const createGuardbookSchema = z.object({
 });
 
 const revisionGuardbookSchema = z.object({
-  entryId: z.string().uuid('entryId muss eine gültige UUID sein.'),
+  entryId: z.string().guid('entryId muss eine gültige UUID sein.'),
   correctionNote: z.string().min(5, 'Korrekturhinweis muss mindestens 5 Zeichen enthalten.')
 });
 
