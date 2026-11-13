@@ -36,10 +36,10 @@ Still not implemented or verified: direct photo capture and offline binary attac
 
 ### Local worktree
 
-Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) remains open against `main`. The verified project base is `5608b9010096ebac06a000ed2a2870dadd66ab60`; implementation commit `51d836443d25c51284782a6be91b06ec1fd8559d` is pushed. No merge was performed.
+Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) remains open against `main`. The verified project base is `5608b9010096ebac06a000ed2a2870dadd66ab60`; the latest implementation head is `d61057ee3a29a4c40586ff05de080bd0193855bb`. No merge was performed.
 
 - Backend TypeScript build: passed.
-- Full Backend Jest: 20 suites, 219 tests passed. The Patrol integration suite passed with the additional security, grace-window, event-history, and occurrence-filter regressions. Jest still reports an open `TCPWRAP` handle from the existing migration-pool test setup after successful completion.
+- Full Backend Jest: 20 suites, 219 tests passed. The Patrol integration suite passed with security, grace-window, event-history, occurrence-filter, and stale/future/out-of-round completion timestamp regressions. Jest still reports an open `TCPWRAP` handle from the existing migration-pool test setup after successful completion.
 - PostgreSQL migration/RLS suite: 65 tests passed.
 - Patrol API integration: passed, including parallel schedule materialization/processing, missed and abandoned handling, employee-group authorization, DMS attachment linking, and both idempotent conflict-resolution choices.
 - Frontend Vitest: 11 files, 56 tests passed, including IndexedDB reopen/restart recovery and automatic sync on reconnect.
@@ -52,11 +52,13 @@ Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.c
 
 ### GitHub CI
 
-The four required CI jobs passed for implementation commit `51d836443d25c51284782a6be91b06ec1fd8559d`:
+All four required jobs passed for current code head `d61057ee3a29a4c40586ff05de080bd0193855bb`:
 
-- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946236) — passed
-- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946856) — passed
-- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946852) — passed
-- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946742) — passed
+- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43437507879/job/131926310353) — passed
+- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43437507879/job/131926310031) — passed
+- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43437507879/job/131926309728) — passed
+- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43437507879/job/131926310190) — passed
 
-This report-only follow-up does not alter application code. The PR Checks tab remains authoritative for the live branch head. PR #14 stays open for independent review and will not be merged by this agent.
+This report correction is documentation-only; the PR Checks tab is authoritative for the latest branch head.
+
+PR #14 stays open for independent review and will not be merged by this agent.
