@@ -41,6 +41,14 @@ beforeEach(() => {
 });
 
 describe('alarm escalation worker delivery state', () => {
+  test('claims jobs with row locks, skips concurrent workers, and reclaims expired leases', async () => {
+    await processDueAlarmEscalations();
+    const claimSql = db.query.mock.calls.find(([sql]) => String(sql).includes('SELECT j.id'))?.[0] as string;
+    expect(claimSql).toContain("j.status='pending'");
+    expect(claimSql).toContain("j.status='processing' AND j.lease_until<=CURRENT_TIMESTAMP");
+    expect(claimSql).toContain('FOR UPDATE OF j SKIP LOCKED');
+  });
+
   test('records an in-app notification as delivered only after resolving an active user', async () => {
     await expect(processDueAlarmEscalations()).resolves.toBe(1);
 

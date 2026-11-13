@@ -5,6 +5,7 @@ import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
 import { authHeaders } from './testUtils';
 import { removeDocumentBlob } from '../services/documentFiles';
+import { claimDueAlarmEscalationJobs } from '../services/alarmEscalationWorker';
 
 const SEED_PASSWORD = 'SecOpsVault2025SecurePassword!';
 const SEED_USER_EMAIL = 'a.schmidt@ffm-sec.de';
@@ -41,6 +42,8 @@ let createdAlarmPlanId: string | undefined;
 let createdSiteRestrictedEmployeeId: string | undefined;
 let createdSiteRestrictedSiteId: string | undefined;
 let createdSiteRestrictedCustomerId: string | undefined;
+let createdAlarmEscalationRuleId: string | undefined;
+let createdAlarmEscalationStepId: string | undefined;
 const createdAlarmIncidentIds: string[] = [];
 const keyNumber = `API-KEY-${Date.now()}`;
 
@@ -200,7 +203,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (createdAlarmPlanId || createdAlarmIncidentIds.length) {
+  if (createdAlarmPlanId || createdAlarmIncidentIds.length || createdAlarmEscalationRuleId) {
     const cleanup = await migrationPool.connect();
     try {
       await cleanup.query('SET session_replication_role = replica');
@@ -241,6 +244,14 @@ afterAll(async () => {
         await cleanup.query('DELETE FROM emergency_contacts WHERE tenant_id=$1 AND emergency_plan_id=$2', [TENANT_FFM_ID,createdAlarmPlanId]);
         await cleanup.query('DELETE FROM emergency_plan_versions WHERE tenant_id=$1 AND emergency_plan_id=$2', [TENANT_FFM_ID,createdAlarmPlanId]);
         await cleanup.query('DELETE FROM emergency_plans WHERE tenant_id=$1 AND id=$2', [TENANT_FFM_ID,createdAlarmPlanId]);
+      }
+      if (createdAlarmEscalationRuleId) {
+        await cleanup.query('DELETE FROM alarm_escalation_steps WHERE tenant_id=$1 AND rule_id=$2', [
+          TENANT_FFM_ID, createdAlarmEscalationRuleId
+        ]);
+        await cleanup.query('DELETE FROM alarm_escalation_rules WHERE tenant_id=$1 AND id=$2', [
+          TENANT_FFM_ID, createdAlarmEscalationRuleId
+        ]);
       }
     } finally {
       await cleanup.query('SET session_replication_role = origin');
@@ -1205,20 +1216,58 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
 
     const incidents = await request(app).get('/api/v1/alarms').set(authHeaders(await login(SEED_USER_EMAIL)));
     expect(incidents.status).toBe(200);
-    expect(incidents.body.data).toEqual(expect.arrayContaining([
+    expect(incidents.body.data.items).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: incidentId, site_id: siteId, status: 'abgeschlossen' })
     ]));
     const history = await request(app).get(`/api/v1/alarms/${incidentId}/events`).set(authHeaders(token));
     expect(history.status).toBe(200);
-    const incidentActions = history.body.data.map((event: any) => event.action);
+    const incidentActions = history.body.data.items.map((event: any) => event.action);
     expect(incidentActions).toContain('incident_reported');
     expect(incidentActions.filter((action: string) => action === 'incident_status_changed')).toHaveLength(3);
-    expect(history.body.data).toHaveLength(4);
+    expect(history.body.data.items).toHaveLength(4);
+    const firstEventPage = await request(app)
+      .get(`/api/v1/alarms/${incidentId}/events?limit=2`)
+      .set(authHeaders(token));
+    expect(firstEventPage.body.data.items).toHaveLength(2);
+    expect(firstEventPage.body.data.page.hasMore).toBe(true);
+    const secondEventPage = await request(app)
+      .get(`/api/v1/alarms/${incidentId}/events?limit=2&cursor=${encodeURIComponent(firstEventPage.body.data.page.nextCursor)}`)
+      .set(authHeaders(token));
+    expect(secondEventPage.body.data.items).toHaveLength(2);
+    expect(new Set([
+      ...firstEventPage.body.data.items.map((item: any) => item.id),
+      ...secondEventPage.body.data.items.map((item: any) => item.id)
+    ]).size).toBe(4);
     const planHistory = await request(app).get(`/api/v1/emergency-plans/${createdAlarmPlanId}/events`).set(authHeaders(token));
     expect(planHistory.status).toBe(200);
-    expect(planHistory.body.data.map((event: any) => event.action)).toEqual(
+    expect(planHistory.body.data.items.map((event: any) => event.action)).toEqual(
       expect.arrayContaining(['plan_created', 'plan_updated', 'plan_published', 'drill_recorded'])
     );
+    for (const description of ['Absperrung geprüft', 'Leitstelle informiert']) {
+      expect((await request(app).post(`/api/v1/alarms/${incidentId}/actions`).set(authHeaders(token)).send({
+        actionType: 'measure', description, result: 'Dokumentiert'
+      })).status).toBe(201);
+    }
+    const firstActionPage = await request(app)
+      .get(`/api/v1/alarms/${incidentId}/actions?limit=1`)
+      .set(authHeaders(token));
+    expect(firstActionPage.body.data.page.hasMore).toBe(true);
+    const secondActionPage = await request(app)
+      .get(`/api/v1/alarms/${incidentId}/actions?limit=1&cursor=${encodeURIComponent(firstActionPage.body.data.page.nextCursor)}`)
+      .set(authHeaders(token));
+    expect(firstActionPage.body.data.items).toHaveLength(1);
+    expect(secondActionPage.body.data.items).toHaveLength(1);
+    expect(firstActionPage.body.data.items[0].id).not.toBe(secondActionPage.body.data.items[0].id);
+    const firstStatusPage = await request(app)
+      .get(`/api/v1/alarms/${incidentId}/status-history?limit=1`)
+      .set(authHeaders(token));
+    expect(firstStatusPage.body.data.page.hasMore).toBe(true);
+    const secondStatusPage = await request(app)
+      .get(`/api/v1/alarms/${incidentId}/status-history?limit=1&cursor=${encodeURIComponent(firstStatusPage.body.data.page.nextCursor)}`)
+      .set(authHeaders(token));
+    expect(firstStatusPage.body.data.items).toHaveLength(1);
+    expect(secondStatusPage.body.data.items).toHaveLength(1);
+    expect(firstStatusPage.body.data.items[0].id).not.toBe(secondStatusPage.body.data.items[0].id);
     expect((await request(app).get(`/api/v1/alarms/${incidentId}/events`)
       .set(authHeaders(await login(BAVARIA_USER_EMAIL)))).status).toBe(404);
   });
@@ -1230,6 +1279,22 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
       'SELECT id FROM alarm_types WHERE tenant_id=$1 AND code=$2',
       [TENANT_FFM_ID, 'ema']
     );
+    const lead = await migrationPool.query('SELECT id FROM users WHERE email=$1', [SEED_USER_EMAIL]);
+    const rule = await migrationPool.query(
+      `INSERT INTO alarm_escalation_rules
+         (tenant_id,name,site_id,alarm_type_id,minimum_severity,created_by,updated_by)
+       VALUES ($1,$2,$3,$4,'Niedrig',$5,$5) RETURNING id`,
+      [TENANT_FFM_ID, `Worker safety ${Date.now()}`, siteId, typeResult.rows[0].id, lead.rows[0].id]
+    );
+    createdAlarmEscalationRuleId = rule.rows[0].id;
+    const step = await migrationPool.query(
+      `INSERT INTO alarm_escalation_steps
+         (tenant_id,rule_id,step_number,delay_minutes,recipient_role_id,channel)
+       SELECT $1,$2,1,0,id,'in_app' FROM roles WHERE name='Einsatzleitung'
+       RETURNING id`,
+      [TENANT_FFM_ID, createdAlarmEscalationRuleId]
+    );
+    createdAlarmEscalationStepId = step.rows[0].id;
     const forbiddenPlan = await request(app).post('/api/v1/emergency-plans').set(authHeaders(token)).send({
       siteId, alarmTypeId: typeResult.rows[0].id, chainOfAction: ['Leitstelle informieren'],
       contacts: []
@@ -1243,10 +1308,74 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(reported.status).toBe(201);
     const incidentId = reported.body.data.incident.id as string;
     createdAlarmIncidentIds.push(incidentId);
+    for (const title of ['EMA pagination 2', 'EMA pagination 3']) {
+      const additional = await request(app).post('/api/v1/alarms').set(authHeaders(token)).send({
+        siteId, alarmTypeId: typeResult.rows[0].id, severity: 'Dringend', title
+      });
+      expect(additional.status).toBe(201);
+      createdAlarmIncidentIds.push(additional.body.data.incident.id);
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const pageIds: string[] = [];
+    let cursor: string | null = null;
+    for (let pageNumber = 0; pageNumber < 3; pageNumber++) {
+      const query = new URLSearchParams({ siteId, dateFrom: today, limit: '1' });
+      if (cursor) query.set('cursor', cursor);
+      const page = await request(app).get(`/api/v1/alarms?${query.toString()}`).set(authHeaders(token));
+      expect(page.status).toBe(200);
+      expect(page.body.data.items).toHaveLength(1);
+      pageIds.push(page.body.data.items[0].id);
+      cursor = page.body.data.page.nextCursor;
+      if (pageNumber < 2) expect(cursor).toBeTruthy();
+    }
+    expect(new Set(pageIds).size).toBe(3);
+    expect((await request(app).get(`/api/v1/alarms?siteId=${siteId}&limit=0`)
+      .set(authHeaders(token))).status).toBe(400);
+    expect((await request(app).get(`/api/v1/alarms?siteId=${siteId}&cursor=invalid`)
+      .set(authHeaders(token))).status).toBe(400);
+
+    const job = await migrationPool.query(
+      `SELECT id FROM alarm_escalation_jobs WHERE tenant_id=$1 AND alarm_incident_id=$2 AND step_id=$3`,
+      [TENANT_FFM_ID, incidentId, createdAlarmEscalationStepId]
+    );
+    expect(job.rows).toHaveLength(1);
+    await migrationPool.query(
+      `UPDATE alarm_escalation_jobs SET status='processing',
+         lease_until=CURRENT_TIMESTAMP-interval '1 second' WHERE tenant_id=$1 AND id=$2`,
+      [TENANT_FFM_ID, job.rows[0].id]
+    );
+
+    const firstWorker = await pool.connect();
+    const secondWorker = await pool.connect();
+    try {
+      await firstWorker.query('BEGIN');
+      await firstWorker.query("SELECT set_config('app.current_tenant',$1,true)", [TENANT_FFM_ID]);
+      const firstClaims = await claimDueAlarmEscalationJobs(firstWorker, TENANT_FFM_ID);
+      expect(firstClaims.map((row: any) => row.id)).toContain(job.rows[0].id);
+
+      await secondWorker.query('BEGIN');
+      await secondWorker.query("SELECT set_config('app.current_tenant',$1,true)", [TENANT_FFM_ID]);
+      await expect(claimDueAlarmEscalationJobs(secondWorker, TENANT_FFM_ID)).resolves.toEqual([]);
+
+      await firstWorker.query('ROLLBACK');
+      const recoveredClaims = await claimDueAlarmEscalationJobs(secondWorker, TENANT_FFM_ID);
+      expect(recoveredClaims.map((row: any) => row.id)).toContain(job.rows[0].id);
+      await secondWorker.query('ROLLBACK');
+    } finally {
+      firstWorker.release();
+      secondWorker.release();
+    }
+
     const closed = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
       .set(authHeaders(token)).send({ action: 'resolve', note: 'Objekt geprüft, kein Einbruch.', revisionVersion: 1 });
     expect(closed.status).toBe(200);
     expect(closed.body.data.incident.status).toBe('abgeschlossen');
+    const closedIncidents = await request(app)
+      .get(`/api/v1/alarms?siteId=${siteId}&status=abgeschlossen&limit=1`)
+      .set(authHeaders(token));
+    expect(closedIncidents.body.data.items.map((item: any) => item.id)).toEqual([incidentId]);
+    expect(closedIncidents.body.data.page.hasMore).toBe(false);
   });
 
   test('Öffentlicher Health-Endpunkt gibt keine Datenbankfehlerdetails preis', async () => {

@@ -498,6 +498,28 @@ export function mapDmsDocumentRow(row: any, tenantId: string): ManagedDocument {
   };
 }
 
+type AlarmIncidentQuery = {
+  customerId?: string;
+  siteId?: string;
+  alarmTypeId?: string;
+  status?: string;
+  severity?: string;
+  assignedEmployeeId?: string;
+  dateFrom?: string;
+  dateUntil?: string;
+  overdue?: boolean;
+};
+
+function alarmIncidentQueryString(filters: AlarmIncidentQuery): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (typeof value === 'boolean' ? value : Boolean(value)) params.set(key, String(value));
+  }
+  return params.toString();
+}
+
+let alarmIncidentRequestId = 0;
+
 interface SecurityOpsStore {
   // Theme
   theme: ThemeMode;
@@ -514,6 +536,12 @@ interface SecurityOpsStore {
   logout: () => Promise<void>;
   restoreSession: () => Promise<void>;
   loadTenantData: () => Promise<void>;
+  loadAlarmIncidents: (filters: AlarmIncidentQuery) => Promise<void>;
+  loadMoreAlarmIncidents: () => Promise<void>;
+  alarmIncidentFilterQuery: string;
+  alarmIncidentNextCursor: string | null;
+  hasMoreAlarmIncidents: boolean;
+  isLoadingMoreAlarmIncidents: boolean;
 
   // Multi-Tenancy
   tenants: Tenant[];
@@ -841,6 +869,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         alarmSites: [],
         emergencyPlans: [],
         alarmIncidents: [],
+        alarmIncidentFilterQuery: '',
         pendingAlarmMutations: []
       });
       await get().loadTenantData();
@@ -874,6 +903,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       alarmSites: [],
       emergencyPlans: [],
       alarmIncidents: [],
+      alarmIncidentFilterQuery: '',
       pendingAlarmMutations: []
     });
   },
@@ -899,6 +929,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         alarmSites: [],
         emergencyPlans: [],
         alarmIncidents: [],
+        alarmIncidentFilterQuery: '',
         pendingAlarmMutations: []
       });
       apiClient.setTenantId(me.tenantId ?? me.tenant_id ?? '');
@@ -907,13 +938,16 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       apiClient.setCsrfToken(null);
       set({
         authUser: null, isAuthenticated: false, documents: [], pendingSOPAcknowledgements: [], sops: [],
-        alarmTypes: [], alarmSites: [], emergencyPlans: [], alarmIncidents: [], pendingAlarmMutations: []
+        alarmTypes: [], alarmSites: [], emergencyPlans: [], alarmIncidents: [], alarmIncidentFilterQuery: '',
+        pendingAlarmMutations: []
       });
     }
   },
 
   loadTenantData: async () => {
     const requestIdentity = currentSOPIdentity(get());
+    const alarmRequest = ++alarmIncidentRequestId;
+    const alarmFilterQuery = get().alarmIncidentFilterQuery;
     set({
       isLoadingData: true,
       dataLoadError: null,
@@ -931,6 +965,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       alarmSites: [],
       emergencyPlans: [],
       alarmIncidents: [],
+      alarmIncidentFilterQuery: alarmFilterQuery,
+      alarmIncidentNextCursor: null,
+      hasMoreAlarmIncidents: false,
+      isLoadingMoreAlarmIncidents: false,
       pendingAlarmMutations: [],
       pendingSOPAcknowledgements: []
     });
@@ -966,7 +1004,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       canReadAlarms ? apiClient.get<any[]>('/alarm-types') : Promise.resolve([]),
       canReadAlarms ? apiClient.get<any[]>('/alarm-sites') : Promise.resolve([]),
       canReadAlarms ? apiClient.get<any[]>('/emergency-plans') : Promise.resolve([]),
-      canReadAlarms ? apiClient.get<any[]>('/alarms') : Promise.resolve([])
+      canReadAlarms
+        ? apiClient.get<any>(`/alarms?limit=100${alarmFilterQuery ? `&${alarmFilterQuery}` : ''}`)
+        : Promise.resolve({ items: [], page: {} })
     ]);
 
     if (!isCurrentSOPIdentity(requestIdentity.tenantId, requestIdentity.userId)) return;
@@ -1143,13 +1183,18 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
 
     let loadedIncidents: AlarmIncident[] = [];
-    if (canReadAlarms && alarmIncidentsResult.status === 'fulfilled') {
-      loadedIncidents = alarmIncidentsResult.value.map((row) => mapAlarmIncidentRow(row, tenantId));
-    } else if (canReadAlarms && alarmIncidentsResult.status === 'rejected') {
+    if (canReadAlarms && alarmRequest === alarmIncidentRequestId && alarmIncidentsResult.status === 'fulfilled') {
+      const incidentPage = Array.isArray(alarmIncidentsResult.value)
+        ? { items: alarmIncidentsResult.value, page: { nextCursor: null, hasMore: false } }
+        : alarmIncidentsResult.value;
+      loadedIncidents = incidentPage.items.map((row: any) => mapAlarmIncidentRow(row, tenantId));
+      nextState.alarmIncidentNextCursor = incidentPage.page?.nextCursor ?? null;
+      nextState.hasMoreAlarmIncidents = Boolean(incidentPage.page?.hasMore);
+    } else if (canReadAlarms && alarmRequest === alarmIncidentRequestId && alarmIncidentsResult.status === 'rejected') {
       errors.push(`Alarmvorfälle: ${errorText(alarmIncidentsResult.reason)}`);
     }
 
-    if (canReadAlarms) {
+    if (canReadAlarms && alarmRequest === alarmIncidentRequestId) {
       try {
         const localMutations = await offlineVault.getAlarmMutations(tenantId, requestIdentity.userId);
         const mutationById = new Map(localMutations.map(item => [item.clientMutationId, item]));
@@ -1187,6 +1232,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       }
     }
 
+    if (alarmRequest !== alarmIncidentRequestId) {
+      delete nextState.alarmIncidents;
+      delete nextState.alarmIncidentNextCursor;
+      delete nextState.hasMoreAlarmIncidents;
+      delete nextState.isLoadingMoreAlarmIncidents;
+    }
+
     const dataLoadError = errors.length > 0 ? errors.join(' | ') : null;
     set({ ...nextState, isLoadingData: false, dataLoadError });
     if (canReadSOPs && sopsResult.status === 'fulfilled') void get().syncPendingSOPAcknowledgements();
@@ -1196,6 +1248,64 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
     if (dataLoadError) {
       get().addNotification('Daten teilweise nicht geladen', dataLoadError, 'alert');
+    }
+  },
+
+  loadAlarmIncidents: async (filters) => {
+    const requestIdentity = currentSOPIdentity(get());
+    const requestId = ++alarmIncidentRequestId;
+    const filterQuery = alarmIncidentQueryString(filters);
+    set({
+      alarmIncidentFilterQuery: filterQuery,
+      alarmIncidentNextCursor: null,
+      hasMoreAlarmIncidents: false,
+      isLoadingMoreAlarmIncidents: false
+    });
+    const query = filterQuery ? `&${filterQuery}` : '';
+    const page = await apiClient.get<any>(`/alarms?limit=100${query}`);
+    if (
+      requestId !== alarmIncidentRequestId ||
+      !isCurrentSOPIdentity(requestIdentity.tenantId, requestIdentity.userId)
+    ) return;
+    const fetched = (page.items as any[]).map(row => mapAlarmIncidentRow(row, requestIdentity.tenantId));
+    const localPending = get().alarmIncidents.filter(incident =>
+      incident.syncStatus === 'pending' || incident.syncStatus === 'conflict'
+    );
+    const knownIds = new Set(localPending.map(incident => incident.id));
+    set({
+      alarmIncidents: [...localPending, ...fetched.filter(incident => !knownIds.has(incident.id))],
+      alarmIncidentNextCursor: page.page?.nextCursor ?? null,
+      hasMoreAlarmIncidents: Boolean(page.page?.hasMore)
+    });
+  },
+
+  loadMoreAlarmIncidents: async () => {
+    const state = get();
+    const cursor = state.alarmIncidentNextCursor;
+    if (!cursor || !state.hasMoreAlarmIncidents || state.isLoadingMoreAlarmIncidents) return;
+    const requestIdentity = currentSOPIdentity(state);
+    const requestId = alarmIncidentRequestId;
+    set({ isLoadingMoreAlarmIncidents: true });
+    try {
+      const page = await apiClient.get<any>(
+        `/alarms?limit=100${state.alarmIncidentFilterQuery ? `&${state.alarmIncidentFilterQuery}` : ''}&cursor=${encodeURIComponent(cursor)}`
+      );
+      if (
+        requestId !== alarmIncidentRequestId ||
+        !isCurrentSOPIdentity(requestIdentity.tenantId, requestIdentity.userId)
+      ) return;
+      const nextIncidents = (page.items as any[]).map(row => mapAlarmIncidentRow(row, requestIdentity.tenantId));
+      const current = get().alarmIncidents;
+      const knownIds = new Set(current.map(incident => incident.id));
+      set({
+        alarmIncidents: [...current, ...nextIncidents.filter(incident => !knownIds.has(incident.id))],
+        alarmIncidentNextCursor: page.page?.nextCursor ?? null,
+        hasMoreAlarmIncidents: Boolean(page.page?.hasMore),
+        isLoadingMoreAlarmIncidents: false
+      });
+    } catch (error) {
+      set({ isLoadingMoreAlarmIncidents: false });
+      throw error;
     }
   },
 
@@ -1212,7 +1322,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     set({
       currentTenantId: tenantId, pendingSOPAcknowledgements: [], sops: [], alarmTypes: [],
       alarmSites: [],
-      emergencyPlans: [], alarmIncidents: [], pendingAlarmMutations: []
+      emergencyPlans: [], alarmIncidents: [], alarmIncidentFilterQuery: '',
+      alarmIncidentNextCursor: null, hasMoreAlarmIncidents: false,
+      isLoadingMoreAlarmIncidents: false, pendingAlarmMutations: []
     });
     void get().loadTenantData();
   },
@@ -1737,6 +1849,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   pendingSOPAcknowledgements: [],
   emergencyPlans: initialEmergencyPlans,
   alarmIncidents: [],
+  alarmIncidentFilterQuery: '',
+  alarmIncidentNextCursor: null,
+  hasMoreAlarmIncidents: false,
+  isLoadingMoreAlarmIncidents: false,
   pendingAlarmMutations: [],
   keys: initialKeys,
   tasks: initialTasks,

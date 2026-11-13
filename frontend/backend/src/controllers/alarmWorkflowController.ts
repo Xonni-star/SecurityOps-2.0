@@ -99,6 +99,7 @@ const escalationRuleSchema = z.object({
 type User = NonNullable<Request['user']>;
 type SiteScope = string[] | null;
 type MutationKind = 'incident_report' | 'action_create' | 'status_change';
+type PageCursor = { timestamp: string; id: string };
 
 function httpError(statusCode: number, message: string): Error & { statusCode: number } {
   return Object.assign(new Error(message), { statusCode });
@@ -115,6 +116,56 @@ function validateCapturedAt(capturedAt?: string): void {
       timestamp < Date.now() - 90 * 24 * 60 * 60_000) {
     throw httpError(400, 'Der Erfassungszeitpunkt darf höchstens fünf Minuten in der Zukunft und maximal 90 Tage zurückliegen.');
   }
+}
+
+function pageLimit(value: unknown, fallback = 50): number {
+  return z.coerce.number().int().min(1).max(100).default(fallback).parse(value);
+}
+
+function decodePageCursor(value: unknown): PageCursor | null {
+  if (value === undefined) return null;
+  const encoded = z.string().min(1).max(512).parse(value);
+  try {
+    return z.object({
+      timestamp: z.string().datetime({ offset: true }),
+      id: uuid
+    }).strict().parse(JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')));
+  } catch {
+    throw httpError(400, 'Der Seiten-Cursor ist ungültig.');
+  }
+}
+
+function encodePageCursor(timestamp: string, id: string): string {
+  return Buffer.from(JSON.stringify({ timestamp, id })).toString('base64url');
+}
+
+function pageResult<T extends { id: string; [key: string]: any }>(
+  rows: T[],
+  limit: number,
+  timestampField: string
+): { items: Omit<T, '_cursor_timestamp'>[]; page: { limit: number; hasMore: boolean; nextCursor: string | null } } {
+  const hasMore = rows.length > limit;
+  const rowsOnPage = rows.slice(0, limit);
+  const last = rowsOnPage[rowsOnPage.length - 1];
+  const cursorTimestamp = last?._cursor_timestamp;
+  const timestamp = last
+    ? typeof cursorTimestamp === 'string'
+      ? cursorTimestamp
+      : last[timestampField] instanceof Date
+        ? last[timestampField].toISOString()
+        : String(last[timestampField])
+    : null;
+  const items = rowsOnPage.map(({ _cursor_timestamp: _cursorTimestamp, ...row }) => row);
+  return {
+    items,
+    page: {
+      limit,
+      hasMore,
+      nextCursor: hasMore && last && timestamp
+        ? encodePageCursor(timestamp, last.id)
+        : null
+    }
+  };
 }
 
 async function siteScope(db: PoolClient, user: User): Promise<SiteScope> {
@@ -550,6 +601,8 @@ export async function recordEmergencyDrillV2(req: Request, res: Response, next: 
 export async function listEmergencyPlanEventsV2(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const planId = uuid.parse(req.params.id);
+    const limit = pageLimit(req.query.limit);
+    const cursor = decodePageCursor(req.query.cursor);
     const user = req.user!;
     const data = await withTenantTransaction(user.tenantId, async db => {
       const plan = await db.query(
@@ -559,13 +612,16 @@ export async function listEmergencyPlanEventsV2(req: Request, res: Response, nex
       if (!plan.rows.length) throw httpError(404, 'Notfallplan nicht gefunden.');
       await assertSiteAccess(db, user, plan.rows[0].site_id);
       const result = await db.query(
-        `SELECT e.id,e.action,e.details,e.occurred_at,concat(u.first_name,' ',u.last_name) AS actor_name
+        `SELECT e.id,e.action,e.details,e.occurred_at,
+                to_char(e.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS _cursor_timestamp,
+                concat(u.first_name,' ',u.last_name) AS actor_name
          FROM emergency_management_events e JOIN users u ON u.id=e.actor_user_id
          WHERE e.tenant_id=$1 AND e.emergency_plan_id=$2
-         ORDER BY e.occurred_at DESC,e.id DESC LIMIT 200`,
-        [user.tenantId, planId]
+           AND ($3::timestamptz IS NULL OR (e.occurred_at,e.id)<($3::timestamptz,$4::uuid))
+         ORDER BY e.occurred_at DESC,e.id DESC LIMIT $5`,
+        [user.tenantId, planId, cursor?.timestamp ?? null, cursor?.id ?? null, limit + 1]
       );
-      return result.rows;
+      return pageResult(result.rows, limit, 'occurred_at');
     });
     res.json({ success: true, data });
   } catch (error) { next(error); }
@@ -574,17 +630,22 @@ export async function listEmergencyPlanEventsV2(req: Request, res: Response, nex
 export async function listAlarmEventsV2(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const incidentId = uuid.parse(req.params.id);
+    const limit = pageLimit(req.query.limit);
+    const cursor = decodePageCursor(req.query.cursor);
     const user = req.user!;
     const data = await withTenantTransaction(user.tenantId, async db => {
       await getIncidentForUser(db, user, incidentId);
       const result = await db.query(
-        `SELECT e.id,e.action,e.details,e.occurred_at,concat(u.first_name,' ',u.last_name) AS actor_name
+        `SELECT e.id,e.action,e.details,e.occurred_at,
+                to_char(e.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS _cursor_timestamp,
+                concat(u.first_name,' ',u.last_name) AS actor_name
          FROM emergency_management_events e JOIN users u ON u.id=e.actor_user_id
          WHERE e.tenant_id=$1 AND e.alarm_incident_id=$2
-         ORDER BY e.occurred_at DESC,e.id DESC LIMIT 200`,
-        [user.tenantId, incidentId]
+           AND ($3::timestamptz IS NULL OR (e.occurred_at,e.id)<($3::timestamptz,$4::uuid))
+         ORDER BY e.occurred_at DESC,e.id DESC LIMIT $5`,
+        [user.tenantId, incidentId, cursor?.timestamp ?? null, cursor?.id ?? null, limit + 1]
       );
-      return result.rows;
+      return pageResult(result.rows, limit, 'occurred_at');
     });
     res.json({ success: true, data });
   } catch (error) { next(error); }
@@ -955,8 +1016,11 @@ export async function listAlarmIncidentsV2(req: Request, res: Response, next: Ne
       assignedEmployeeId: uuid.optional(),
       dateFrom: date.optional(),
       dateUntil: date.optional(),
-      overdue: z.enum(['true', 'false']).optional()
+      overdue: z.enum(['true', 'false']).optional(),
+      limit: z.coerce.number().int().min(1).max(100).default(50),
+      cursor: z.string().min(1).max(512).optional()
     }).strict().parse(req.query);
+    const cursor = decodePageCursor(filters.cursor);
     const user = req.user!;
     const data = await withTenantTransaction(user.tenantId, async db => {
       const scope = await siteScope(db, user);
@@ -981,9 +1045,14 @@ export async function listAlarmIncidentsV2(req: Request, res: Response, next: Ne
           WHERE j.tenant_id=a.tenant_id AND j.alarm_incident_id=a.id AND j.status='pending'
             AND COALESCE(j.retry_at,j.scheduled_at)<=CURRENT_TIMESTAMP)`);
       }
+      values.push(cursor?.timestamp ?? null, cursor?.id ?? null);
+      clauses.push(`($${values.length - 1}::timestamptz IS NULL OR
+        (a.reported_at,a.id)<($${values.length - 1}::timestamptz,$${values.length}::uuid))`);
+      values.push(filters.limit + 1);
       const result = await db.query(
         `SELECT a.id,a.tenant_id,a.incident_number,a.customer_id,c.company_name AS customer_name,
                 a.site_id,s.name AS site_name,a.emergency_plan_id,a.emergency_plan_version_id,
+                to_char(a.reported_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS _cursor_timestamp,
                 a.alarm_type_id,t.code AS scenario,t.label AS alarm_type_label,a.severity,a.status,
                 a.title,a.description,a.reported_at,a.captured_at,a.server_received_at,
                 a.acknowledged_at,a.escalated_at,a.resolved_at,a.reported_by,a.resolved_by,
@@ -1000,11 +1069,10 @@ export async function listAlarmIncidentsV2(req: Request, res: Response, next: Ne
          JOIN users ru ON ru.id=a.reported_by
          LEFT JOIN employees e ON e.id=a.assigned_employee_id AND e.tenant_id=a.tenant_id
          WHERE ${clauses.join(' AND ')}
-         ORDER BY is_overdue DESC,CASE WHEN a.status IN ('abgeschlossen','archiviert') THEN 1 ELSE 0 END,
-           a.reported_at DESC LIMIT 500`,
+         ORDER BY a.reported_at DESC,a.id DESC LIMIT $${values.length}`,
         values
       );
-      return result.rows;
+      return pageResult(result.rows, filters.limit, 'reported_at');
     });
     res.json({ success: true, data });
   } catch (error) { next(error); }
@@ -1243,18 +1311,22 @@ export async function syncAlarmMutations(req: Request, res: Response, next: Next
 export async function listAlarmActions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const incidentId = uuid.parse(req.params.id);
+    const limit = pageLimit(req.query.limit);
+    const cursor = decodePageCursor(req.query.cursor);
     const user = req.user!;
     const data = await withTenantTransaction(user.tenantId, async db => {
       await getIncidentForUser(db, user, incidentId);
       const result = await db.query(
         `SELECT a.id,a.action_type,a.description,a.result,a.captured_at,a.occurred_at,a.server_received_at,
+                to_char(a.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS _cursor_timestamp,
                 concat(u.first_name,' ',u.last_name) AS actor_name
          FROM alarm_event_actions a JOIN users u ON u.id=a.actor_user_id
          WHERE a.tenant_id=$1 AND a.alarm_incident_id=$2
-         ORDER BY a.occurred_at,a.id`,
-        [user.tenantId, incidentId]
+           AND ($3::timestamptz IS NULL OR (a.occurred_at,a.id)>($3::timestamptz,$4::uuid))
+         ORDER BY a.occurred_at,a.id LIMIT $5`,
+        [user.tenantId, incidentId, cursor?.timestamp ?? null, cursor?.id ?? null, limit + 1]
       );
-      return result.rows;
+      return pageResult(result.rows, limit, 'occurred_at');
     });
     res.json({ success: true, data });
   } catch (error) { next(error); }
@@ -1263,17 +1335,22 @@ export async function listAlarmActions(req: Request, res: Response, next: NextFu
 export async function listAlarmStatusHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const incidentId = uuid.parse(req.params.id);
+    const limit = pageLimit(req.query.limit);
+    const cursor = decodePageCursor(req.query.cursor);
     const user = req.user!;
     const data = await withTenantTransaction(user.tenantId, async db => {
       await getIncidentForUser(db, user, incidentId);
       const result = await db.query(
         `SELECT h.id,h.from_status,h.to_status,h.reason,h.occurred_at,
+                to_char(h.occurred_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS _cursor_timestamp,
                 concat(u.first_name,' ',u.last_name) AS actor_name
          FROM alarm_event_status_history h JOIN users u ON u.id=h.actor_user_id
-         WHERE h.tenant_id=$1 AND h.alarm_incident_id=$2 ORDER BY h.occurred_at,h.id`,
-        [user.tenantId, incidentId]
+         WHERE h.tenant_id=$1 AND h.alarm_incident_id=$2
+           AND ($3::timestamptz IS NULL OR (h.occurred_at,h.id)>($3::timestamptz,$4::uuid))
+         ORDER BY h.occurred_at,h.id LIMIT $5`,
+        [user.tenantId, incidentId, cursor?.timestamp ?? null, cursor?.id ?? null, limit + 1]
       );
-      return result.rows;
+      return pageResult(result.rows, limit, 'occurred_at');
     });
     res.json({ success: true, data });
   } catch (error) { next(error); }

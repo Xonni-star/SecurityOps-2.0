@@ -39,19 +39,19 @@ Alle Antworten verwenden den üblichen `{ success, data }`-Envelope. `POST /alar
 | `GET /emergency-plans/:id/versions` | `alarm:read` | Unveränderliche Versionen; Kontaktsnapshot nur mit Kontakt-Leserecht |
 | `POST /emergency-plans/:id/archive` | `alarm:manage` | Plan archivieren |
 | `POST /emergency-plans/:id/drills` | `alarm:manage` | Übung protokollieren |
-| `GET /emergency-plans/:id/events` | `alarm:read` | Planereignisse (max. 200) |
+| `GET /emergency-plans/:id/events` | `alarm:read` | Cursor-paginierte Planereignisse |
 | `GET /emergency-contacts` | `emergency_contact:read` | Site-/Kunden-/Plan-Kontakte innerhalb des Site-Scopes |
 | `POST /emergency-contacts` | `emergency_contact:manage` | Kontakt mit Kunden-, Site- oder Planbezug anlegen |
 | `PATCH /emergency-contacts/:id` | `emergency_contact:manage` | Kontakt mit `revisionVersion` ändern |
 | `POST /emergency-contacts/:id/archive` | `emergency_contact:manage` | Kontakt archivieren |
-| `GET /alarms` | `alarm:read` | Alarmübersicht, max. 500; Filter siehe unten |
+| `GET /alarms` | `alarm:read` | Cursor-paginierte Alarmübersicht; Filter siehe unten |
 | `GET /alarms/recent-events` | `alarm:read` | Mandanten-/site-scoped letzte Ereignisse (1–100, Standard 25) |
 | `POST /alarms` | `alarm:report` | Alarm mit Site, Alarmart, Priorität und optional gültigem Plan melden |
 | `POST /alarms/sync` | `alarm:report` | Persistierte Offline-Mutationen idempotent synchronisieren |
-| `GET /alarms/:id/events` | `alarm:read` | Unveränderliche Ereignisse (max. 200) |
-| `GET /alarms/:id/actions` | `alarm:read` | Chronologische Maßnahmen/Notizen |
+| `GET /alarms/:id/events` | `alarm:read` | Cursor-paginierte unveränderliche Ereignisse |
+| `GET /alarms/:id/actions` | `alarm:read` | Cursor-paginierte Maßnahmen/Notizen |
 | `POST /alarms/:id/actions` | `alarm:action:create` | Maßnahme oder Notiz mit Beschreibung, Ergebnis und optional vorhandenem DMS-Dokument erfassen |
-| `GET /alarms/:id/status-history` | `alarm:read` | Append-only Statushistorie |
+| `GET /alarms/:id/status-history` | `alarm:read` | Cursor-paginierte append-only Statushistorie |
 | `GET /alarms/:id/assignments` | `alarm:read` | Einsatzkraft-Zuweisungen |
 | `POST /alarms/:id/assignments` | `alarm:assign` | Einsatzkraft zuweisen/entfernen |
 | `POST /alarms/:id/transitions` | `alarm:respond` | Status mit Begründung und `revisionVersion` ändern |
@@ -62,7 +62,7 @@ Alle Antworten verwenden den üblichen `{ success, data }`-Envelope. `POST /alar
 | `GET /alarm-escalation-status` | `alarm:notifications:read` | Job-, Stufen- und Zustellstatus |
 | `POST /alarm-notifications/:id/retry` | `alarm:escalation:manage` | Eine fehlgeschlagene, wiederholbare Zustellung erneut einreihen |
 
-`GET /alarms` akzeptiert `customerId`, `siteId`, `alarmTypeId`, `status`, `severity`, `assignedEmployeeId`, `dateFrom`, `dateUntil` und `overdue=true`. Statuswerte sind `neu`, `bestätigt`, `in_bearbeitung`, `eskaliert`, `einsatzkraefte_verstaendigt`, `massnahmen_eingeleitet`, `entwarnung`, `abgeschlossen` und `archiviert`.
+`GET /alarms` akzeptiert `customerId`, `siteId`, `alarmTypeId`, `status`, `severity`, `assignedEmployeeId`, `dateFrom`, `dateUntil`, `overdue=true`, `limit` (1–100, Standard 50) und einen opaken `cursor`. Das Dashboard überträgt diese Filter an den Server, sodass sie für alle Seiten gelten. Paginationsantworten enthalten `data.items` und `data.page` (`hasMore`, `nextCursor`, `limit`). Cursor bilden stabile Schlüsselpositionen aus Serverzeitstempel und ID und gelten nur zusammen mit den ursprünglichen Filtern; „Weitere Alarmvorfälle laden“ ruft die Folgeseiten ab. Plan-/Vorfallereignisse, Maßnahmen und Statusverläufe verwenden dasselbe `limit`-/`cursor`-Verfahren. `GET /alarms/recent-events` ist bewusst eine begrenzte Momentaufnahme der jüngsten Ereignisse, kein Archiv. Statuswerte sind `neu`, `bestätigt`, `in_bearbeitung`, `eskaliert`, `einsatzkraefte_verstaendigt`, `massnahmen_eingeleitet`, `entwarnung`, `abgeschlossen` und `archiviert`.
 
 ## Plan- und Vorfallintegrität
 
@@ -72,9 +72,9 @@ Statusübergänge werden mit authentifiziertem Akteur, serverseitigem Zeitstempe
 
 ## Eskalation und Benachrichtigung
 
-Der Backendprozess startet einen Worker, der fällige PostgreSQL-Jobs mit Sperren und Leases verarbeitet. Regeln definieren minimale Priorität, optional Site/Alarmart sowie zeitversetzte Schritte an eine Rolle oder Einsatzkraft. Wiederholungen verwenden exponentielle Verzögerung und enden nach fünf Versuchen mit sichtbarem `blocked`-Status. Wird ein Vorfall nicht mehr als `neu` geführt, werden nicht ausgeführte Eskalationsjobs abgebrochen.
+Der Backendprozess startet einen Worker, der fällige PostgreSQL-Jobs mit `FOR UPDATE SKIP LOCKED` und Leases verarbeitet. Dadurch können mehrere Backend-Instanzen dieselbe Datenbank-Queue verwenden, ohne denselben aktiven Job zu claimen; abgelaufene Processing-Leases sind erneut auswählbar. Jobclaim und In-App-Zustellung laufen in derselben Tenant-Transaktion. Ein Prozessabbruch vor Commit rollt Änderungen zurück, sodass der Job nach dem Lease-Ablauf erneut versucht werden kann. Regeln definieren minimale Priorität, optional Site/Alarmart sowie zeitversetzte Schritte an eine Rolle oder Einsatzkraft. Wiederholungen verwenden exponentielle Verzögerung und enden nach fünf Versuchen mit sichtbarem `blocked`-Status. Wird ein Vorfall nicht mehr als `neu` geführt, werden nicht ausgeführte Eskalationsjobs abgebrochen.
 
-In-App-Benachrichtigungen werden tenantgebunden gespeichert und nur bei Zuordnung eines aktiven Benutzerkontos als `delivered` markiert. E-Mail und Push haben derzeit keinen Provider und bleiben ehrlich `not_configured`; sie werden nicht als zugestellt behandelt. Die API enthält zwar Fehler-/Retry-Status, aber ein externer Versandprovider ist eine noch offene Integration.
+In-App-Benachrichtigungen werden mandantengebunden gespeichert und nur bei Zuordnung eines aktiven Benutzerkontos als `delivered` markiert. E-Mail und Push haben derzeit keinen Provider und bleiben `not_configured`; sie werden nicht als zugestellt behandelt. Das Dashboard aktualisiert über das vorhandene Polling (30 Sekunden). SSE/WebSockets wurden nicht ergänzt, da keine Stream-Infrastruktur existiert und Polling bereits implementiert und getestet ist. Die API enthält Fehler-/Retry-Status; ein externer Versandprovider ist weiterhin eine offene Integration.
 
 ## Offline-Synchronisation
 
@@ -87,5 +87,5 @@ Plan-/Alarmtypen/Sites werden pro Tenant und Benutzer gecacht; der Cache entfern
 - E-Mail-/Push-Zustellung, externe Leitstellen- und Telefonieintegration sind nicht konfiguriert.
 - Die Oberfläche kann vorhandene DMS-Dokumente referenzieren, aber keine Alarmfotos/Dateien offline vormerken oder hochladen.
 - Eskalationsregeln unterstützen Rolle oder Einsatzkraft als Empfänger, aber keine direkte Benachrichtigung an externe Kundenkontakte.
-- Vorfallliste und Verlaufsendpunkte haben feste Höchstgrenzen statt cursorbasierter Pagination.
+- Kontakte-, Benachrichtigungs- und Eskalationsstatus-Endpunkte verwenden weiterhin feste Höchstgrenzen; Alarmvorfälle und Ereignis-/Maßnahmen-/Statusverläufe unterstützen cursorbasierte Pagination.
 - Die Migration und Tests belegen Datenbank-/API-Sicherheit lokal; Produktionsbetrieb und Hochverfügbarkeit des Workers sind nicht freigegeben.

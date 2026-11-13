@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   changeAlarmStatus: vi.fn(),
   addAlarmAction: vi.fn(),
   loadTenantData: vi.fn(),
+  loadAlarmIncidents: vi.fn(),
   state: {
     emergencyPlans: [] as any[],
     alarmIncidents: [] as any[],
@@ -22,7 +23,8 @@ const mocks = vi.hoisted(() => ({
     isOnline: true,
     sites: [] as any[],
     authUser: { permissions: ['alarm:read', 'alarm:manage', 'alarm:report', 'alarm:respond'], tenantId: 'tenant-a' },
-    loadTenantData: vi.fn()
+    loadTenantData: vi.fn(),
+    loadAlarmIncidents: vi.fn()
   }
 }));
 
@@ -85,12 +87,14 @@ describe('AlarmsModule', () => {
       tenantId: 'tenant-a'
     };
     mocks.state.loadTenantData = mocks.loadTenantData;
+    mocks.state.loadAlarmIncidents = mocks.loadAlarmIncidents;
     mocks.get.mockResolvedValue([]);
     mocks.post.mockResolvedValue({});
     mocks.reportAlarmIncident.mockResolvedValue({ state: 'confirmed' });
     mocks.changeAlarmStatus.mockResolvedValue({ state: 'confirmed' });
     mocks.addAlarmAction.mockResolvedValue({ state: 'confirmed' });
     mocks.loadTenantData.mockResolvedValue(undefined);
+    mocks.loadAlarmIncidents.mockResolvedValue(undefined);
   });
 
   afterEach(async () => {
@@ -150,5 +154,20 @@ describe('AlarmsModule', () => {
 
     expect(container.textContent).toContain('Bitte einen zulässigen Zielstatus und eine Begründung auswählen.');
     expect(mocks.changeAlarmStatus).not.toHaveBeenCalled();
+  });
+
+  test('dashboard filters are requested from the server with the active criteria', async () => {
+    await act(async () => root.render(<AlarmsModule />));
+    const priority = Array.from(container.querySelectorAll('select'))
+      .find(select => Array.from(select.options).some(option => option.textContent === 'Alle Prioritäten'));
+    if (!priority) throw new Error('Prioritätsfilter fehlt');
+    await act(async () => {
+      priority.value = 'Kritisch';
+      priority.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    expect(mocks.loadAlarmIncidents).toHaveBeenLastCalledWith(expect.objectContaining({
+      severity: 'Kritisch'
+    }));
   });
 });

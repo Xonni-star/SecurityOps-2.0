@@ -45,6 +45,10 @@ type EventItem = {
   occurred_at: string;
   actor_name: string;
 };
+type EventPage = {
+  items: EventItem[];
+  page: { hasMore: boolean; nextCursor: string | null };
+};
 type RecentEvent = EventItem & {
   site_name: string;
   title?: string | null;
@@ -131,9 +135,13 @@ export const AlarmsModule: React.FC = () => {
   const employees = useSecurityStore(state => state.employees);
   const documents = useSecurityStore(state => state.documents);
   const pendingMutations = useSecurityStore(state => state.pendingAlarmMutations);
+  const hasMoreAlarmIncidents = useSecurityStore(state => state.hasMoreAlarmIncidents);
+  const isLoadingMoreAlarmIncidents = useSecurityStore(state => state.isLoadingMoreAlarmIncidents);
   const authUser = useSecurityStore(state => state.authUser);
   const isOnline = useSecurityStore(state => state.isOnline);
   const loadTenantData = useSecurityStore(state => state.loadTenantData);
+  const loadAlarmIncidents = useSecurityStore(state => state.loadAlarmIncidents);
+  const loadMoreAlarmIncidents = useSecurityStore(state => state.loadMoreAlarmIncidents);
   const reportAlarmIncident = useSecurityStore(state => state.reportAlarmIncident);
   const addAlarmAction = useSecurityStore(state => state.addAlarmAction);
   const changeAlarmStatus = useSecurityStore(state => state.changeAlarmStatus);
@@ -159,7 +167,13 @@ export const AlarmsModule: React.FC = () => {
   const [selectedStatuses, setSelectedStatuses] = useState<Record<string, AlarmIncidentStatus>>({});
   const [actionForms, setActionForms] = useState<Record<string, { description: string; result: string; documentId: string }>>({});
   const [assignments, setAssignments] = useState<Record<string, string>>({});
-  const [activity, setActivity] = useState<{ targetId: string; events: EventItem[] } | null>(null);
+  const [activity, setActivity] = useState<{
+    targetId: string;
+    kind: 'alarms' | 'emergency-plans';
+    events: EventItem[];
+    nextCursor: string | null;
+  } | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [contactForm, setContactForm] = useState({ siteId: '', contactType: 'site_manager', role: '', name: '', phone: '', email: '' });
   const [typeForm, setTypeForm] = useState({ code: '', label: '' });
@@ -212,6 +226,13 @@ export const AlarmsModule: React.FC = () => {
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [busy, loadTenantData]);
+
+  useEffect(() => {
+    if (!canRead) return;
+    void loadAlarmIncidents(filters).catch(reason => {
+      setError(reason instanceof Error ? reason.message : 'Alarmfilter konnten nicht geladen werden.');
+    });
+  }, [canRead, filters, loadAlarmIncidents]);
 
   useEffect(() => {
     if (view === 'contacts' && canReadContacts) {
@@ -332,6 +353,15 @@ export const AlarmsModule: React.FC = () => {
     }
   };
 
+  const loadMoreIncidents = async () => {
+    setError('');
+    try {
+      await loadMoreAlarmIncidents();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Weitere Alarmvorfälle konnten nicht geladen werden.');
+    }
+  };
+
   const changeStatus = (incident: AlarmIncident) => {
     const status = selectedStatuses[incident.id] ?? transitions[incident.status][0];
     const note = transitionNotes[incident.id]?.trim();
@@ -377,10 +407,33 @@ export const AlarmsModule: React.FC = () => {
     }
     setError('');
     try {
-      const events = await apiClient.get<EventItem[]>(`/${kind}/${id}/events`);
-      setActivity({ targetId: id, events });
+      const page = await apiClient.get<EventPage>(`/${kind}/${id}/events?limit=50`);
+      setActivity({ targetId: id, kind, events: page.items, nextCursor: page.page.nextCursor });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Der Verlauf konnte nicht geladen werden.');
+    }
+  };
+
+  const loadMoreActivity = async () => {
+    if (!activity?.nextCursor || activityLoading) return;
+    setActivityLoading(true);
+    setError('');
+    try {
+      const cursor = encodeURIComponent(activity.nextCursor);
+      const page = await apiClient.get<EventPage>(
+        `/${activity.kind}/${activity.targetId}/events?limit=50&cursor=${cursor}`
+      );
+      setActivity(current => current && current.targetId === activity.targetId
+        ? {
+          ...current,
+          events: [...current.events, ...page.items],
+          nextCursor: page.page.nextCursor
+        }
+        : current);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Weitere Verlaufseinträge konnten nicht geladen werden.');
+    } finally {
+      setActivityLoading(false);
     }
   };
 
@@ -644,10 +697,23 @@ export const AlarmsModule: React.FC = () => {
                     <button type="button" disabled={busy} onClick={() => addAction(incident)} className="self-end rounded-lg border border-emerald-500/40 px-3 py-2 text-xs text-emerald-200 disabled:opacity-50">Maßnahme protokollieren</button>
                   </div>
                 )}
-                {activity?.targetId === incident.id && <ActivityTimeline events={activity.events} />}
+                {activity?.targetId === incident.id && <ActivityTimeline
+                  events={activity.events}
+                  hasMore={Boolean(activity.nextCursor)}
+                  isLoading={activityLoading}
+                  onLoadMore={() => void loadMoreActivity()}
+                />}
               </article>
             );
           })}
+          {hasMoreAlarmIncidents && (
+            <div className="flex justify-center">
+              <button type="button" onClick={() => void loadMoreIncidents()} disabled={isLoadingMoreAlarmIncidents}
+                className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-200 disabled:opacity-50">
+                {isLoadingMoreAlarmIncidents ? 'Wird geladen…' : 'Weitere Alarmvorfälle laden'}
+              </button>
+            </div>
+          )}
         </section>
       )}
 
@@ -689,7 +755,12 @@ export const AlarmsModule: React.FC = () => {
                 {canManage && plan.publicationStatus === 'published' && <button type="button" onClick={() => recordDrill(plan)} disabled={busy} className="rounded-lg border border-emerald-500/40 px-3 py-2 text-xs text-emerald-200 disabled:opacity-50"><Radio className="mr-1 inline h-3.5 w-3.5" />Übung dokumentieren</button>}
                 {canManage && <button type="button" onClick={() => archivePlan(plan)} disabled={busy} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-300 disabled:opacity-50"><Archive className="mr-1 inline h-3.5 w-3.5" />Archivieren</button>}
               </div>
-              {activity?.targetId === plan.id && <ActivityTimeline events={activity.events} />}
+              {activity?.targetId === plan.id && <ActivityTimeline
+                events={activity.events}
+                hasMore={Boolean(activity.nextCursor)}
+                isLoading={activityLoading}
+                onLoadMore={() => void loadMoreActivity()}
+              />}
             </article>
           ))}
         </section>
@@ -824,7 +895,12 @@ const SyncBadge: React.FC<{ status: 'pending' | 'conflict' | 'confirmed' }> = ({
   </span>
 );
 
-const ActivityTimeline: React.FC<{ events: EventItem[] }> = ({ events }) => (
+const ActivityTimeline: React.FC<{
+  events: EventItem[];
+  hasMore: boolean;
+  isLoading: boolean;
+  onLoadMore: () => void;
+}> = ({ events, hasMore, isLoading, onLoadMore }) => (
   <div className="space-y-2 border-t border-slate-800 pt-3">
     <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">Chronologisches Ereignisprotokoll</h3>
     {events.length === 0 ? <p className="text-xs text-slate-500">Noch keine Ereignisse.</p> : [...events].reverse().map(item => (
@@ -833,5 +909,9 @@ const ActivityTimeline: React.FC<{ events: EventItem[] }> = ({ events }) => (
         <p className="mt-1 text-slate-400">{item.actor_name}{typeof item.details?.note === 'string' ? ` · ${item.details.note}` : ''}{typeof item.details?.drillDate === 'string' ? ` · Übung am ${item.details.drillDate}` : ''}</p>
       </div>
     ))}
+    {hasMore && <button type="button" onClick={onLoadMore} disabled={isLoading}
+      className="rounded border border-slate-700 px-3 py-1.5 text-xs text-slate-300 disabled:opacity-50">
+      {isLoading ? 'Wird geladen…' : 'Weitere Ereignisse laden'}
+    </button>}
   </div>
 );

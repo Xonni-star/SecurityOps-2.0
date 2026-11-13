@@ -8,6 +8,25 @@ const MAX_ATTEMPTS = 5;
 let timer: NodeJS.Timeout | null = null;
 let running = false;
 
+const CLAIM_DUE_JOBS_SQL = `
+  SELECT j.id,j.alarm_incident_id,j.rule_id,j.step_id,j.attempt_count,a.status AS incident_status
+  FROM alarm_escalation_jobs j
+  JOIN alarm_incidents a ON a.id=j.alarm_incident_id AND a.tenant_id=j.tenant_id
+  WHERE j.tenant_id=$1 AND (
+    (j.status='pending' AND COALESCE(j.retry_at,j.scheduled_at)<=CURRENT_TIMESTAMP)
+    OR (j.status='processing' AND j.lease_until<=CURRENT_TIMESTAMP)
+  )
+  ORDER BY COALESCE(j.retry_at,j.scheduled_at),j.created_at
+  FOR UPDATE OF j SKIP LOCKED LIMIT $2`;
+
+export async function claimDueAlarmEscalationJobs(
+  db: PoolClient,
+  tenantId: string
+): Promise<any[]> {
+  const result = await db.query(CLAIM_DUE_JOBS_SQL, [tenantId, BATCH_SIZE]);
+  return result.rows;
+}
+
 async function deliverJob(db: PoolClient, tenantId: string, job: any): Promise<boolean> {
   const step = await db.query(
     `SELECT channel,recipient_role_id,recipient_employee_id
@@ -75,20 +94,9 @@ async function deliverJob(db: PoolClient, tenantId: string, job: any): Promise<b
 
 async function processTenant(tenantId: string): Promise<number> {
   return withTenantTransaction(tenantId, async db => {
-    const jobs = await db.query(
-      `SELECT j.id,j.alarm_incident_id,j.rule_id,j.step_id,j.attempt_count,a.status AS incident_status
-       FROM alarm_escalation_jobs j
-       JOIN alarm_incidents a ON a.id=j.alarm_incident_id AND a.tenant_id=j.tenant_id
-       WHERE j.tenant_id=$1 AND (
-         (j.status='pending' AND COALESCE(j.retry_at,j.scheduled_at)<=CURRENT_TIMESTAMP)
-         OR (j.status='processing' AND j.lease_until<=CURRENT_TIMESTAMP)
-       )
-       ORDER BY COALESCE(j.retry_at,j.scheduled_at),j.created_at
-       FOR UPDATE OF j SKIP LOCKED LIMIT $2`,
-      [tenantId, BATCH_SIZE]
-    );
+    const jobs = await claimDueAlarmEscalationJobs(db, tenantId);
     let processed = 0;
-    for (const job of jobs.rows) {
+    for (const job of jobs) {
       const attempts = job.attempt_count + 1;
       await db.query(
         `UPDATE alarm_escalation_jobs SET status='processing',attempt_count=$1,
