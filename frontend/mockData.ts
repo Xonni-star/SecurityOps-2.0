@@ -546,7 +546,9 @@ export const initialEmergencyPlans: EmergencyPlan[] = [
       { role: 'Feuerwehr Leitstelle', name: 'Notruf 112', phone: '112' },
       { role: 'Einsatzleiter vom Dienst', name: 'Alexander Schmidt', phone: '+49 171 4455881' }
     ],
-    lastDrillDate: '2024-03-12'
+    lastDrillDate: '2024-03-12',
+    isActive: true,
+    revisionVersion: 1
   }
 ];
 

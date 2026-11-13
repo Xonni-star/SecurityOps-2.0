@@ -117,20 +117,130 @@ describe('handover API invariants', () => {
     expect((next as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409 }));
   });
 
-  test('a confirmation is accepted only from the assigned employee identity', async () => {
+  const confirmationBody = {
+    clientMutationId: 'handover-confirm-0001',
+    capturedAt: '2026-11-13T06:01:00.000Z'
+  };
+  const confirmationPayloadHash = computePayloadHash({
+    actorUserId: userId,
+    action: 'handover',
+    handoverId,
+    revisionVersion: 1,
+    capturedAt: confirmationBody.capturedAt
+  });
+
+  test('a confirmation requires the stable account-to-employee mapping', async () => {
     transaction.query
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ id: handoverId, status: 'pending_handover_confirmation', revision_version: 1 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = response();
+
+    await confirmHandover(request({ body: confirmationBody }), res, next);
+
+    expect((next as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }));
+    expect(transaction.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO handover_confirmations'))).toBe(false);
+    expect(transaction.query.mock.calls[2][0]).toContain('e.account_user_id=$4');
+    expect(transaction.query.mock.calls.some(([sql]) => String(sql).includes('FROM handover_confirmations WHERE tenant_id=$1 AND client_mutation_id=$2'))).toBe(false);
+    expect(res.json).not.toHaveBeenCalled();
+  });
+
+  test('accepts a confirmation only for the mapped account and persists its payload binding', async () => {
+    transaction.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: handoverId, status: 'pending_handover_confirmation', revision_version: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ employee_id: outgoingEmployeeId }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{
+        id: '88888888-8888-4888-8888-888888888888',
+        revision_version: 1,
+        captured_at: confirmationBody.capturedAt,
+        server_received_at: confirmationBody.capturedAt
+      }] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
     const res = response();
 
-    await confirmHandover(request({
-      body: { clientMutationId: 'handover-confirm-0001', capturedAt: '2026-11-13T06:01:00.000Z' }
-    }), res, next);
+    await confirmHandover(request({ body: confirmationBody }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.body.data).toMatchObject({ status: 'pending_takeover_acknowledgement', repeated: false });
+    const insert = transaction.query.mock.calls.find(([sql]) => String(sql).includes('INSERT INTO handover_confirmations'));
+    expect(insert?.[0]).toContain('payload_hash');
+    expect(insert?.[1]).toEqual([
+      tenantId, handoverId, outgoingEmployeeId, userId, 'handover', 1,
+      confirmationBody.clientMutationId, confirmationBody.capturedAt, confirmationPayloadHash
+    ]);
+  });
+
+  test('replays an exact authorized confirmation idempotently', async () => {
+    transaction.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: handoverId, status: 'pending_takeover_acknowledgement', revision_version: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ employee_id: outgoingEmployeeId }] })
+      .mockResolvedValueOnce({ rows: [{
+        id: '88888888-8888-4888-8888-888888888888',
+        handover_id: handoverId,
+        employee_id: outgoingEmployeeId,
+        actor_user_id: userId,
+        confirmation_type: 'handover',
+        revision_version: 1,
+        payload_hash: confirmationPayloadHash
+      }] });
+    const res = response();
+
+    await confirmHandover(request({ body: confirmationBody }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.body.data).toEqual({
+      id: '88888888-8888-4888-8888-888888888888',
+      revisionVersion: 1,
+      repeated: true
+    });
+    expect(transaction.query.mock.calls).toHaveLength(4);
+  });
+
+  test('does not disclose or replay a prior confirmation to an unauthorized participant', async () => {
+    transaction.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: handoverId, status: 'pending_takeover_acknowledgement', revision_version: 1 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = response();
+
+    await confirmHandover(request({ body: confirmationBody }), res, next);
 
     expect((next as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 403 }));
-    expect(transaction.query.mock.calls.some(([sql]) => String(sql).includes('INSERT INTO handover_confirmations'))).toBe(false);
+    expect(transaction.query.mock.calls).toHaveLength(3);
+    expect(res.json).not.toHaveBeenCalled();
+  });
+
+  test('rejects a confirmation mutation ID reused with a different payload', async () => {
+    transaction.query
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: handoverId, status: 'pending_handover_confirmation', revision_version: 1 }] })
+      .mockResolvedValueOnce({ rows: [{ employee_id: outgoingEmployeeId }] })
+      .mockResolvedValueOnce({ rows: [{
+        id: '88888888-8888-4888-8888-888888888888',
+        handover_id: handoverId,
+        employee_id: outgoingEmployeeId,
+        actor_user_id: userId,
+        confirmation_type: 'handover',
+        revision_version: 1,
+        payload_hash: computePayloadHash({
+          actorUserId: userId,
+          action: 'handover',
+          handoverId,
+          revisionVersion: 1,
+          capturedAt: '2026-11-13T06:02:00.000Z'
+        })
+      }] });
+    const res = response();
+
+    await confirmHandover(request({ body: confirmationBody }), res, next);
+
+    expect((next as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409 }));
+    expect(transaction.query.mock.calls).toHaveLength(4);
     expect(res.json).not.toHaveBeenCalled();
   });
 

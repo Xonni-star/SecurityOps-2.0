@@ -3,7 +3,7 @@
 // Behandelt transaction.onerror und transaction.onabort als echte Fehler. Keine verschluckten Fehler!
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export interface OutboxMutation {
   id: string; // Eindeutige client_mutation_id (UUID v4)
@@ -49,6 +49,29 @@ export interface StoredSOPAcknowledgement {
   version: string;
   capturedAt: string;
   status: 'pending' | 'stale';
+}
+
+export interface StoredAlarmMutation {
+  clientMutationId: string;
+  tenantId: string;
+  userId: string;
+  type: 'incident_report' | 'action_create' | 'status_change';
+  payload: Record<string, unknown>;
+  capturedAt: string;
+  status: 'pending' | 'confirmed' | 'conflict';
+  serverId?: string;
+  errorMessage?: string;
+  updatedAt: string;
+}
+
+interface StoredAlarmPlanCache {
+  cacheKey: string;
+  tenantId: string;
+  userId: string;
+  plans: any[];
+  types: any[];
+  sites: any[];
+  cachedAt: string;
 }
 
 class IndexedDbService {
@@ -115,6 +138,18 @@ class IndexedDbService {
           const sopStore = db.createObjectStore('sopAcknowledgements', { keyPath: 'clientMutationId' });
           sopStore.createIndex('tenantUser', ['tenantId', 'userId'], { unique: false });
           sopStore.createIndex('acknowledgementKey', 'acknowledgementKey', { unique: true });
+        }
+
+        if (!db.objectStoreNames.contains('alarmMutations')) {
+          const alarmStore = db.createObjectStore('alarmMutations', { keyPath: 'clientMutationId' });
+          alarmStore.createIndex('tenantUser', ['tenantId', 'userId'], { unique: false });
+          alarmStore.createIndex('status', 'status', { unique: false });
+          alarmStore.createIndex('capturedAt', 'capturedAt', { unique: false });
+        }
+
+        if (!db.objectStoreNames.contains('alarmPlanCache')) {
+          const planCache = db.createObjectStore('alarmPlanCache', { keyPath: 'cacheKey' });
+          planCache.createIndex('tenantUser', ['tenantId', 'userId'], { unique: true });
         }
       };
 
@@ -353,6 +388,105 @@ class IndexedDbService {
       tx.onerror = () => reject(tx.error || new Error(`Löschen der SOP-Kenntnahme ${clientMutationId} fehlgeschlagen`));
       tx.onabort = () => reject(tx.error || new Error(`SOP-Kenntnahme-Transaktion ${clientMutationId} abgebrochen`));
       tx.objectStore('sopAcknowledgements').delete(clientMutationId);
+    });
+  }
+
+  async enqueueAlarmMutation(
+    mutation: Omit<StoredAlarmMutation, 'status' | 'updatedAt'>
+  ): Promise<StoredAlarmMutation> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('alarmMutations', 'readwrite');
+      const store = tx.objectStore('alarmMutations');
+      let result: StoredAlarmMutation;
+      tx.oncomplete = () => resolve(result);
+      tx.onerror = () => reject(tx.error || new Error('Speichern der Alarmmutation fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Alarmmutation-Transaktion abgebrochen'));
+      const existing = store.get(mutation.clientMutationId);
+      existing.onsuccess = () => {
+        if (existing.result) {
+          result = existing.result as StoredAlarmMutation;
+          return;
+        }
+        result = {
+          ...mutation,
+          status: 'pending',
+          updatedAt: new Date().toISOString()
+        };
+        store.add(result);
+      };
+      existing.onerror = () => tx.abort();
+    });
+  }
+
+  async getAlarmMutations(tenantId: string, userId: string): Promise<StoredAlarmMutation[]> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('alarmMutations', 'readonly');
+      const request = tx.objectStore('alarmMutations').index('tenantUser')
+        .getAll(IDBKeyRange.only([tenantId, userId]));
+      request.onsuccess = () => resolve((request.result || []) as StoredAlarmMutation[]);
+      request.onerror = () => reject(request.error || new Error('Lesen der Alarmmutationen fehlgeschlagen'));
+    });
+  }
+
+  async updateAlarmMutation(
+    clientMutationId: string,
+    updates: Partial<Pick<StoredAlarmMutation, 'status' | 'serverId' | 'errorMessage'>>
+  ): Promise<void> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('alarmMutations', 'readwrite');
+      const store = tx.objectStore('alarmMutations');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Aktualisieren der Alarmmutation fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Alarmmutations-Transaktion abgebrochen'));
+      const request = store.get(clientMutationId);
+      request.onsuccess = () => {
+        if (!request.result) {
+          tx.abort();
+          reject(new Error(`Alarmmutation ${clientMutationId} wurde nicht gefunden`));
+          return;
+        }
+        store.put({ ...request.result, ...updates, updatedAt: new Date().toISOString() });
+      };
+      request.onerror = () => tx.abort();
+    });
+  }
+
+  async saveEmergencyPlanCache(
+    tenantId: string,
+    userId: string,
+    plans: any[],
+    types: any[] = [],
+    sites: any[] = []
+  ): Promise<void> {
+    const db = await this.init();
+    const cache: StoredAlarmPlanCache = {
+      cacheKey: `${tenantId}:${userId}`,
+      tenantId,
+      userId,
+      plans: plans.map(plan => ({ ...plan, contacts: [] })),
+      types,
+      sites,
+      cachedAt: new Date().toISOString()
+    };
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('alarmPlanCache', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Speichern des Offline-Notfallplancaches fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Offline-Notfallplancache-Transaktion abgebrochen'));
+      tx.objectStore('alarmPlanCache').put(cache);
+    });
+  }
+
+  async getEmergencyPlanCache(tenantId: string, userId: string): Promise<StoredAlarmPlanCache | null> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('alarmPlanCache', 'readonly');
+      const request = tx.objectStore('alarmPlanCache').get(`${tenantId}:${userId}`);
+      request.onsuccess = () => resolve((request.result as StoredAlarmPlanCache) ?? null);
+      request.onerror = () => reject(request.error || new Error('Lesen des Offline-Notfallplancaches fehlgeschlagen'));
     });
   }
 

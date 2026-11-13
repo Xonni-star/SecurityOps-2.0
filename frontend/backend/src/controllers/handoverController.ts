@@ -12,6 +12,7 @@ import {
   HandoverConflictError,
   updateHandoverTask
 } from '../services/handoverService';
+import { computePayloadHash } from '../services/syncHash';
 
 const uuid = z.string().uuid();
 const confirmationSchema = z.object({
@@ -305,18 +306,7 @@ async function recordConfirmation(
     const input = confirmationSchema.parse(req.body);
     const { tenantId, userId } = req.user!;
     const result = await withTenantTransaction(tenantId, async db => {
-      const priorMutation = await db.query(
-        `SELECT id, handover_id, confirmation_type, revision_version
-         FROM handover_confirmations WHERE tenant_id=$1 AND client_mutation_id=$2`,
-        [tenantId, input.clientMutationId]
-      );
-      if (priorMutation.rows.length) {
-        const prior = priorMutation.rows[0];
-        if (prior.handover_id !== handoverId || prior.confirmation_type !== confirmationType) {
-          throw statusError(409, 'Die Bestätigungs-ID wurde bereits für einen anderen Vorgang verwendet.');
-        }
-        return { id: prior.id, revisionVersion: prior.revision_version, repeated: true };
-      }
+      await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${tenantId}:handover-confirmation:${input.clientMutationId}`]);
 
       const handover = await db.query(
         'SELECT id, status, revision_version FROM handovers WHERE tenant_id=$1 AND id=$2 FOR UPDATE',
@@ -328,39 +318,67 @@ async function recordConfirmation(
       const expectedStatus = confirmationType === 'handover'
         ? 'pending_handover_confirmation'
         : 'pending_takeover_acknowledgement';
+      const participant = await db.query(
+        `SELECT hp.employee_id FROM handover_participants hp
+         JOIN employees e ON e.id=hp.employee_id AND e.tenant_id=hp.tenant_id
+         WHERE hp.tenant_id=$1 AND hp.handover_id=$2 AND hp.participant_role=$3
+           AND e.account_user_id=$4`,
+        [tenantId, handoverId, participantRole, userId]
+      );
+      if (!participant.rows.length) {
+        throw statusError(403, 'Nur die dem Teilnehmerkonto zugeordnete übergebende beziehungsweise übernehmende Person kann bestätigen.');
+      }
+
+      const revisionVersion = Number(row.revision_version);
+      const payloadHash = computePayloadHash({
+        actorUserId: userId,
+        action: confirmationType,
+        handoverId,
+        revisionVersion,
+        capturedAt: input.capturedAt ?? null
+      });
+      const priorMutation = await db.query(
+        `SELECT id, handover_id, employee_id, actor_user_id, confirmation_type,
+                revision_version, payload_hash
+         FROM handover_confirmations WHERE tenant_id=$1 AND client_mutation_id=$2`,
+        [tenantId, input.clientMutationId]
+      );
+      if (priorMutation.rows.length) {
+        const prior = priorMutation.rows[0];
+        if (
+          prior.handover_id !== handoverId ||
+          prior.employee_id !== participant.rows[0].employee_id ||
+          prior.actor_user_id !== userId ||
+          prior.confirmation_type !== confirmationType ||
+          Number(prior.revision_version) !== revisionVersion ||
+          prior.payload_hash !== payloadHash
+        ) {
+          throw statusError(409, 'Die Bestätigungs-ID wurde mit einem anderen Konto, Vorgang, Revisionsstand oder Inhalt verwendet.');
+        }
+        return { id: prior.id, revisionVersion: prior.revision_version, repeated: true };
+      }
+
       const existing = await db.query(
-        `SELECT id, revision_version FROM handover_confirmations
+        `SELECT id FROM handover_confirmations
          WHERE tenant_id=$1 AND handover_id=$2 AND revision_version=$3 AND confirmation_type=$4`,
-        [tenantId, handoverId, row.revision_version, confirmationType]
+        [tenantId, handoverId, revisionVersion, confirmationType]
       );
       if (existing.rows.length) {
-        return { id: existing.rows[0].id, revisionVersion: existing.rows[0].revision_version, repeated: true };
+        throw statusError(409, 'Diese Bestätigung wurde bereits mit einer anderen Mutations-ID gespeichert.');
       }
       if (row.status !== expectedStatus) {
         throw statusError(409, 'Die Übergabe befindet sich nicht im erwarteten Bestätigungsstatus.');
       }
 
-      const participant = await db.query(
-        `SELECT hp.employee_id FROM handover_participants hp
-         JOIN employees e ON e.id=hp.employee_id AND e.tenant_id=hp.tenant_id
-         JOIN users u ON u.id=$4
-         WHERE hp.tenant_id=$1 AND hp.handover_id=$2 AND hp.participant_role=$3
-           AND lower(e.email)=lower(u.email)`,
-        [tenantId, handoverId, participantRole, userId]
-      );
-      if (!participant.rows.length) {
-        throw statusError(403, 'Nur die zugeordnete übergebende beziehungsweise übernehmende Person kann bestätigen.');
-      }
-
       const confirmation = await db.query(
         `INSERT INTO handover_confirmations
           (tenant_id,handover_id,employee_id,actor_user_id,confirmation_type,revision_version,
-           client_mutation_id,captured_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+           client_mutation_id,captured_at,payload_hash)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
          RETURNING id, revision_version, captured_at, server_received_at`,
         [
           tenantId, handoverId, participant.rows[0].employee_id, userId, confirmationType,
-          row.revision_version, input.clientMutationId, input.capturedAt || new Date().toISOString()
+          revisionVersion, input.clientMutationId, input.capturedAt || new Date().toISOString(), payloadHash
         ]
       );
       const nextStatus = confirmationType === 'handover'

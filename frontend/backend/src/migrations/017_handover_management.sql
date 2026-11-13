@@ -1,4 +1,4 @@
--- Version 017 leaves 015/016 available for the still-open alarm PR #12.
+-- Handover management follows the merged alarm migrations 015/016.
 CREATE TABLE handovers (
     id UUID NOT NULL DEFAULT uuid_generate_v4(),
     tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,

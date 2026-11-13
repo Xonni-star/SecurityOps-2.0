@@ -6,11 +6,13 @@ const API_BASE = '/api/v1';
 export class ApiError extends Error {
   status: number;
   errors?: string[];
+  isNetworkError: boolean;
 
-  constructor(status: number, message: string, errors?: string[]) {
+  constructor(status: number, message: string, errors?: string[], isNetworkError = false) {
     super(message);
     this.status = status;
     this.errors = errors;
+    this.isNetworkError = isNetworkError;
   }
 }
 
@@ -90,7 +92,7 @@ class ApiClient {
       if (err instanceof ApiError) {
         throw err;
       }
-      throw new ApiError(500, err?.message || 'Verbindung zum Backend-Server fehlgeschlagen.');
+      throw new ApiError(500, err?.message || 'Verbindung zum Backend-Server fehlgeschlagen.', undefined, true);
     }
   }
 

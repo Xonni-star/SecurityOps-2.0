@@ -15,12 +15,10 @@ chmod +x deploy/install.sh
 
 Der Installer prüft automatisch Systemressourcen, erzeugt kryptografische Geheimnisse in `.env`, startet die Container-Topologie und wendet die versionierten SQL-Migrationen des Backends an.
 
+## Alarm-Eskalationsworker
+
+Der Alarm-Eskalationsworker ist Bestandteil des Backend-Prozesses und wird beim Serverstart automatisch aktiviert. Er verarbeitet tenantgebundene PostgreSQL-Jobs mit Sperren, Ablauf-Leases und begrenzten Wiederholungen; ein separater Scheduler oder zusätzlicher Container ist nicht erforderlich. In-App-Zustellungen werden in PostgreSQL protokolliert. E-Mail und Push bleiben `not_configured`, bis ein Versandprovider implementiert und konfiguriert wurde; Installation oder Migration allein richtet keinen externen Versand ein. Siehe [Alarm-API und Einschränkungen](./ALARM_EMERGENCY_API.md).
+
 ## Übergabemanagement
 
-Die PostgreSQL-API führt beim normalen Migrationslauf zusätzlich `017_handover_management.sql` aus. Die Versionslücke 015/016 ist absichtlich für die entsprechenden Migrationen des noch offenen Alarm-PR #12 freigehalten; der PR ist nicht Bestandteil dieses Feature-Branches. Die Migration trägt die Handover-Berechtigungen direkt in die vorhandenen Rollen ein:
-
-```bash
-npm --prefix frontend/backend run migrate
-```
-
-Die Oberfläche benötigt eine angemeldete Sitzung mit `handovers:read`; Aktionen werden zusätzlich serverseitig über `handovers:*` und gegebenenfalls `documents:read` geprüft. Es ist kein externer E-Mail-/Push-Anbieter eingerichtet. Das Modul bestätigt deshalb ausschließlich den tatsächlich in PostgreSQL gespeicherten Zustand. Produktionsbereitstellung oder Betriebsfreigabe sind nicht Teil dieser Migration.
+Die PostgreSQL-API führt beim normalen Migrationslauf `017_handover_management.sql` nach den Alarmmigrationen 015/016 aus. Die Migration trägt die Handover-Berechtigungen direkt in die vorhandenen Rollen ein. Die Oberfläche benötigt eine angemeldete Sitzung mit `handovers:read`; Aktionen werden serverseitig über `handovers:*` und gegebenenfalls `documents:read` geprüft. Es ist kein externer E-Mail-/Push-Anbieter eingerichtet. Das Modul bestätigt ausschließlich den tatsächlich in PostgreSQL gespeicherten Zustand. Der offene Feature-PR ist nicht produktiv deployed.
