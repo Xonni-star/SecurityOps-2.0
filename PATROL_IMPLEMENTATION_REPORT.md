@@ -38,7 +38,7 @@ The full acceptance brief therefore remains only partially satisfied. The passin
 
 ### Local worktree
 
-The local changes are currently uncommitted on branch `xonni-star-feature-patrol-management`. The local `HEAD` is `52e7ab05e04476d06e92547753dd759b24fd8a37`; GitHub CI listed below is for that pushed commit, not for the additional uncommitted changes.
+The changes are committed and pushed on branch `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) is open against `main`. The verified base is `5608b9010096ebac06a000ed2a2870dadd66ab60`; the current PR head is `5a4e77678022b7de6cf199f50e8822913d05f3b3` (following `52e7ab05e04476d06e92547753dd759b24fd8a37`). No merge was performed.
 
 - Backend TypeScript build: passed.
 - Backend Jest: 20 suites, 219 tests passed.
@@ -51,16 +51,16 @@ The local changes are currently uncommitted on branch `xonni-star-feature-patrol
 - Production Compose backend and frontend/proxy image builds: passed. These are build checks only; no production deployment or runtime readiness was established.
 - `git diff --check`: passed.
 
-### GitHub CI (pushed head at time of check)
+### GitHub CI (current pushed head)
 
-PR #14 was open against `main`. All checks passed for the then-pushed `52e7ab05e04476d06e92547753dd759b24fd8a37`:
+At the last live check, all four checks were pending for current head `5a4e77678022b7de6cf199f50e8822913d05f3b3`:
 
-- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43415507503/job/131852257837)
-- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43415507503/job/131852257762)
-- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43415507503/job/131852257370)
-- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43415507503/job/131852257875)
+- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966780) — pending
+- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966174) — pending
+- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966704) — pending
+- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966664) — pending
 
-These are not CI results for the current uncommitted worktree. CI must be refreshed after the changes are committed and pushed.
+An earlier run on `52e7ab0` is historical and is not used as evidence for this head. No merge or production-readiness claim is made.
 
 ## Required follow-up
 
