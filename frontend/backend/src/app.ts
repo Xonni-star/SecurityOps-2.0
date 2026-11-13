@@ -6,6 +6,7 @@ import { env } from './config/env';
 import { pool } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 import { createApiRateLimiter } from './middleware/apiRateLimit';
+import { configureTrustedProxies } from './middleware/trustedProxies';
 import { authenticateJwt, requireAnyPermission, requirePermission } from './middleware/auth';
 import * as authController from './controllers/authController';
 import * as clientController from './controllers/clientController';
@@ -21,6 +22,7 @@ import * as patrolController from './controllers/patrolController';
 import * as planningController from './controllers/planningController';
 
 export const app = express();
+configureTrustedProxies(app, env.TRUST_PROXY);
 
 app.use(helmet());
 
@@ -147,6 +149,12 @@ app.post('/api/v1/planning/shifts/:id/actual-time',
   authenticateJwt, requirePermission('planning:actuals:manage'), planningController.recordActualTime);
 app.get('/api/v1/planning/shifts/:id/actual-time',
   authenticateJwt, requirePermission('planning:read'), planningController.getActualTime);
+app.post('/api/v1/planning/shifts/:id/actual-time/approve',
+  authenticateJwt, requirePermission('planning:actuals:approve'), planningController.approveActualTime);
+app.get('/api/v1/planning/notifications',
+  authenticateJwt, requirePermission('planning:read'), planningController.listPlanningNotifications);
+app.post('/api/v1/planning/notifications/:notificationId/read',
+  authenticateJwt, requirePermission('planning:read'), planningController.markPlanningNotificationRead);
 
 app.get('/api/v1/keys', authenticateJwt, requirePermission('keys:read'), resourceController.listKeys);
 app.post('/api/v1/keys', authenticateJwt, requirePermission('keys:manage'), resourceController.createKey);

@@ -148,13 +148,21 @@ const templateSchema = z.object({
   timeZone: timeZoneSchema.optional(),
   startTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/),
   endTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/),
+  breakMinutes: z.number().int().min(0).max(1440).default(0),
+  requiredStaffCount: z.number().int().min(1).max(500).default(1),
   requiredQualification: z.string().min(2).max(100),
+  effectiveFrom: dateSchema.optional(),
+  effectiveUntil: dateSchema.optional(),
   frequency: z.enum(['DAILY', 'WEEKLY']),
   interval: z.number().int().min(1).max(52).default(1),
   weekdays: z.array(z.number().int().min(0).max(6)).max(7).optional()
-}).strict().refine(value => value.frequency !== 'WEEKLY' || Boolean(value.weekdays?.length), {
-  path: ['weekdays'], message: 'Wöchentliche Vorlagen benötigen mindestens einen Wochentag.'
-});
+}).strict()
+  .refine(value => value.frequency !== 'WEEKLY' || Boolean(value.weekdays?.length), {
+    path: ['weekdays'], message: 'Wöchentliche Vorlagen benötigen mindestens einen Wochentag.'
+  })
+  .refine(value => !value.effectiveFrom || !value.effectiveUntil || value.effectiveUntil >= value.effectiveFrom, {
+    path: ['effectiveUntil'], message: 'effectiveUntil darf nicht vor effectiveFrom liegen.'
+  });
 
 const templateUpdateSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -163,7 +171,11 @@ const templateUpdateSchema = z.object({
   timeZone: timeZoneSchema.optional(),
   startTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
   endTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
+  breakMinutes: z.number().int().min(0).max(1440).optional(),
+  requiredStaffCount: z.number().int().min(1).max(500).optional(),
   requiredQualification: z.string().min(2).max(100).optional(),
+  effectiveFrom: dateSchema.nullable().optional(),
+  effectiveUntil: dateSchema.nullable().optional(),
   frequency: z.enum(['DAILY', 'WEEKLY']).optional(),
   interval: z.number().int().min(1).max(52).optional(),
   weekdays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
@@ -344,6 +356,76 @@ async function writeAudit(
      VALUES ($1,$2,$3,$4,$5,$6::jsonb)`,
     [tenantId, actorId, eventType, entityType, entityId, JSON.stringify(details)]
   );
+}
+
+async function createPlanningNotification(
+  client: PoolClient,
+  tenantId: string,
+  actorId: string,
+  recipientUserId: string | null | undefined,
+  eventType: string,
+  entityType: string,
+  entityId: string,
+  details: Record<string, unknown> = {}
+): Promise<void> {
+  if (!recipientUserId || recipientUserId === actorId) return;
+  await client.query(
+    `INSERT INTO planning_notifications
+      (tenant_id,recipient_user_id,event_type,entity_type,entity_id,details)
+     SELECT $1,$2,$3,$4,$5,$6::jsonb
+      WHERE EXISTS (
+        SELECT 1 FROM user_roles WHERE tenant_id=$1 AND user_id=$2
+      )`,
+    [tenantId, recipientUserId, eventType, entityType, entityId, JSON.stringify(details)]
+  );
+}
+
+async function notifyEmployeeAccount(
+  client: PoolClient,
+  tenantId: string,
+  actorId: string,
+  employeeId: string | null | undefined,
+  eventType: string,
+  entityType: string,
+  entityId: string,
+  details: Record<string, unknown> = {}
+): Promise<void> {
+  if (!employeeId) return;
+  const employee = await client.query(
+    'SELECT account_user_id FROM employees WHERE tenant_id=$1 AND id=$2',
+    [tenantId, employeeId]
+  );
+  await createPlanningNotification(
+    client, tenantId, actorId, employee.rows[0]?.account_user_id,
+    eventType, entityType, entityId, details
+  );
+}
+
+async function notifyPermissionHolders(
+  client: PoolClient,
+  tenantId: string,
+  actorId: string,
+  permissionCode: string,
+  eventType: string,
+  entityType: string,
+  entityId: string,
+  details: Record<string, unknown> = {}
+): Promise<void> {
+  const recipients = await client.query(
+    `SELECT DISTINCT ur.user_id
+       FROM user_roles ur
+       JOIN users u ON u.id=ur.user_id AND u.is_active=TRUE
+       JOIN role_permissions rp ON rp.role_id=ur.role_id
+       JOIN permissions p ON p.id=rp.permission_id AND p.code=$2
+      WHERE ur.tenant_id=$1 AND ur.user_id<>$3`,
+    [tenantId, permissionCode, actorId]
+  );
+  for (const recipient of recipients.rows) {
+    await createPlanningNotification(
+      client, tenantId, actorId, recipient.user_id,
+      eventType, entityType, entityId, details
+    );
+  }
 }
 
 function mutationPayloadHash(value: unknown): string {
@@ -722,6 +804,62 @@ export async function listStaffingSuggestions(req: Request, res: Response, next:
       );
       const candidatesByRequirement = await Promise.all(requirementResult.rows.map(async requirement => {
         const parameters = [tenantId, shift.site_id, requirement.qualification_type, shift.end_date] as const;
+        const excluded = await client.query(
+          `WITH candidate_state AS (
+             SELECT e.id,
+                    (e.archived_at IS NULL AND e.status='Aktiv') AS active,
+                    EXISTS (
+                      SELECT 1 FROM employee_site_assignments sa
+                       WHERE sa.tenant_id=e.tenant_id AND sa.employee_id=e.id AND sa.site_id=$2
+                    ) AS site_assigned,
+                    COALESCE(q.has_record, FALSE) AS has_qualification_record,
+                    COALESCE(q.has_verified, FALSE) AS has_verified_qualification,
+                    COALESCE(q.has_valid, FALSE) AS has_valid_qualification,
+                    COALESCE(q.is_qualified, FALSE) AS is_qualified
+               FROM employees e
+               LEFT JOIN LATERAL (
+                 SELECT count(*) > 0 AS has_record,
+                        bool_or(qual.verified) AS has_verified,
+                        bool_or(qual.verified AND qual.status='VALID') AS has_valid,
+                        bool_or(qual.verified AND qual.status='VALID'
+                          AND (qual.expiry_date IS NULL OR qual.expiry_date >= $4::date)) AS is_qualified
+                   FROM employee_qualifications qual
+                  WHERE qual.tenant_id=e.tenant_id AND qual.employee_id=e.id
+                    AND qual.qualification_type=$3
+               ) q ON TRUE
+              WHERE e.tenant_id=$1
+                AND NOT EXISTS (
+                  SELECT 1 FROM shift_staffing_assignments a
+                   WHERE a.tenant_id=e.tenant_id AND a.shift_id=$5 AND a.employee_id=e.id AND a.status='assigned'
+                  UNION
+                  SELECT 1 FROM shifts s
+                   WHERE s.tenant_id=e.tenant_id AND s.id=$5 AND s.employee_id=e.id
+                     AND NOT EXISTS (
+                       SELECT 1 FROM shift_staffing_assignments a
+                        WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id AND a.status='assigned'
+                     )
+                )
+           )
+           SELECT id,active,site_assigned,has_qualification_record,
+                  has_verified_qualification,has_valid_qualification,
+                  count(*) OVER()::int AS total
+             FROM candidate_state
+            WHERE NOT active OR NOT site_assigned OR NOT is_qualified
+            ORDER BY id
+            LIMIT 50`,
+          [tenantId, shift.site_id, requirement.qualification_type, shift.end_date, shiftId]
+        );
+        const excludedCandidates = excluded.rows.map(candidate => {
+          const reasons: string[] = [];
+          if (!candidate.active) reasons.push('inactive_or_archived');
+          if (!candidate.site_assigned) reasons.push('site_not_assigned');
+          if (!candidate.has_qualification_record) reasons.push('qualification_missing');
+          else if (!candidate.has_verified_qualification) reasons.push('qualification_unverified');
+          else if (!candidate.has_valid_qualification) reasons.push('qualification_invalid');
+          else if (!candidate.is_qualified) reasons.push('qualification_expired');
+          return { employeeId: candidate.id, reasons };
+        });
+        const excludedCandidateCount = excluded.rows.length ? Number(excluded.rows[0].total) : 0;
         const assignedCountResult = await client.query(
           `SELECT count(DISTINCT employee_id)::int AS count
              FROM (
@@ -848,6 +986,9 @@ export async function listStaffingSuggestions(req: Request, res: Response, next:
           assignedCount,
           shortfall: Math.max(0, Number(requirement.required_count) - assignedCount),
           candidates: suggestions,
+          excludedCandidates,
+          excludedCandidateCount,
+          excludedCandidatesTruncated: excludedCandidateCount > excludedCandidates.length,
           pagination: {
             page, pageSize, total: Number(count.rows[0].total),
             pages: Math.ceil(Number(count.rows[0].total) / pageSize)
@@ -959,6 +1100,8 @@ export async function assignEmployee(req: Request, res: Response, next: NextFunc
       await writeAudit(client, tenantId, actorId, 'shift.employee_assigned', 'shift', shiftId, {
         employeeId: input.employeeId, assignmentId: assigned.rows[0].id
       });
+      await notifyEmployeeAccount(client, tenantId, actorId, input.employeeId,
+        'shift.assignment.created', 'shift', shiftId, { shiftId, employeeId: input.employeeId });
       return { status: 200 as const, assignmentId: assigned.rows[0].id, revisionVersion: updated.rows[0].revision_version };
     });
     if (result.status === 404) {
@@ -1236,6 +1379,14 @@ export async function createShiftSwapRequest(req: Request, res: Response, next: 
         [tenantId, shiftId, input.requesterEmployeeId, input.proposedEmployeeId, actorId]
       );
       await writeAudit(client, tenantId, actorId, 'shift_swap.requested', 'shift_swap_request', created.rows[0].id, { reason: input.reason });
+      const notice = {
+        shiftId, requesterEmployeeId: input.requesterEmployeeId,
+        proposedEmployeeId: input.proposedEmployeeId
+      };
+      await notifyEmployeeAccount(client, tenantId, actorId, input.proposedEmployeeId,
+        'shift_swap.requested', 'shift_swap_request', created.rows[0].id, notice);
+      await notifyPermissionHolders(client, tenantId, actorId, 'planning:swaps:approve',
+        'shift_swap.requested', 'shift_swap_request', created.rows[0].id, notice);
       return { request: created.rows[0] };
     });
     if (!result) res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
@@ -1338,6 +1489,18 @@ export async function decideShiftSwap(req: Request, res: Response, next: NextFun
         [input.decision, actorId, input.decisionNote ?? null, tenantId, requestId, input.expectedVersion]
       );
       await writeAudit(client, tenantId, actorId, `shift_swap.${input.decision}`, 'shift_swap_request', requestId);
+      const notice = {
+        shiftId: row.shift_id, requesterEmployeeId: row.requester_employee_id,
+        proposedEmployeeId: row.proposed_employee_id
+      };
+      await notifyEmployeeAccount(client, tenantId, actorId, row.requester_employee_id,
+        `shift_swap.${input.decision}`, 'shift_swap_request', requestId, notice);
+      await notifyEmployeeAccount(client, tenantId, actorId, row.proposed_employee_id,
+        `shift_swap.${input.decision}`, 'shift_swap_request', requestId, notice);
+      if (input.decision === 'approved') {
+        await notifyEmployeeAccount(client, tenantId, actorId, row.proposed_employee_id,
+          'shift.assignment.created', 'shift', row.shift_id, notice);
+      }
       return { status: 200 as const, request: changed.rows[0] };
     });
     if (result.status === 404) res.status(404).json({ success: false, message: 'Diensttausch-Antrag oder Schicht nicht gefunden.' });
@@ -1430,6 +1593,15 @@ export async function createCoverRequest(req: Request, res: Response, next: Next
       await writeAudit(client, tenantId, actorId, 'shift_cover.requested', 'shift_cover_request', response.id, {
         shiftId, requestedEmployeeId: input.requestedEmployeeId ?? null
       });
+      const notice = {
+        coverRequestId: response.id, shiftId, requestedEmployeeId: input.requestedEmployeeId ?? null
+      };
+      if (input.requestedEmployeeId) {
+        await notifyEmployeeAccount(client, tenantId, actorId, input.requestedEmployeeId,
+          'shift_cover.requested', 'shift_cover_request', response.id, notice);
+      }
+      await notifyPermissionHolders(client, tenantId, actorId, 'planning:covers:approve',
+        'shift_cover.requested', 'shift_cover_request', response.id, notice);
       return { status: 201 as const, request: response };
     });
     if (result.status === 404) res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
@@ -1603,6 +1775,13 @@ export async function decideCoverRequest(req: Request, res: Response, next: Next
       await writeAudit(client, tenantId, actorId, `shift_cover.${input.decision}`, 'shift_cover_request', requestId, {
         shiftId: cover.shift_id, employeeId, decisionNote: input.decisionNote ?? null
       });
+      const notice = { coverRequestId: requestId, shiftId: cover.shift_id, decision: input.decision, employeeId };
+      await createPlanningNotification(client, tenantId, actorId, cover.requested_by,
+        `shift_cover.${input.decision}`, 'shift_cover_request', requestId, notice);
+      if (input.decision === 'approved' && employeeId) {
+        await notifyEmployeeAccount(client, tenantId, actorId, employeeId,
+          'shift.assignment.created', 'shift', cover.shift_id, notice);
+      }
       return { status: 200 as const, request: response };
     });
     if (result.status === 404) res.status(404).json({ success: false, message: 'Vertretungsantrag nicht gefunden.' });
@@ -1656,7 +1835,8 @@ export async function recordActualTime(req: Request, res: Response, next: NextFu
       );
       if (!assignment.rows.length) return { status: 403 as const };
       const current = await client.query(
-        `SELECT id,actual_start_at,actual_end_at,break_minutes,revision_version,notes
+        `SELECT id,actual_start_at,actual_end_at,break_minutes,revision_version,notes,
+                approval_status,approved_by,approved_at,approved_revision_version
            FROM shift_actual_times WHERE tenant_id=$1 AND shift_id=$2 AND employee_id=$3 FOR UPDATE`,
         [tenantId, shiftId, input.employeeId]
       );
@@ -1669,10 +1849,12 @@ export async function recordActualTime(req: Request, res: Response, next: NextFu
         ? await client.query(
           `UPDATE shift_actual_times
               SET actual_start_at=$1,actual_end_at=$2,break_minutes=$3,notes=$4,
-                  revision_version=revision_version+1,recorded_by=$5,recorded_at=CURRENT_TIMESTAMP
+                  revision_version=revision_version+1,recorded_by=$5,recorded_at=CURRENT_TIMESTAMP,
+                  approval_status='pending',approved_by=NULL,approved_at=NULL,approved_revision_version=NULL
             WHERE tenant_id=$6 AND id=$7 AND revision_version=$8
             RETURNING id,shift_id,employee_id,actual_start_at,actual_end_at,break_minutes,
-                      revision_version,recorded_by,recorded_at,notes`,
+                      revision_version,recorded_by,recorded_at,notes,approval_status,
+                      approved_by,approved_at,approved_revision_version`,
           [start.toISOString(), end.toISOString(), input.breakMinutes, input.notes ?? null,
             actorId, tenantId, previous.id, input.expectedVersion]
         )
@@ -1681,7 +1863,8 @@ export async function recordActualTime(req: Request, res: Response, next: NextFu
             (tenant_id,shift_id,employee_id,actual_start_at,actual_end_at,break_minutes,recorded_by,notes)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
            RETURNING id,shift_id,employee_id,actual_start_at,actual_end_at,break_minutes,
-                     revision_version,recorded_by,recorded_at,notes`,
+                     revision_version,recorded_by,recorded_at,notes,approval_status,
+                     approved_by,approved_at,approved_revision_version`,
           [tenantId, shiftId, input.employeeId, start.toISOString(), end.toISOString(),
             input.breakMinutes, actorId, input.notes ?? null]
         );
@@ -1694,12 +1877,74 @@ export async function recordActualTime(req: Request, res: Response, next: NextFu
           shiftId, employeeId: input.employeeId, previous, actualStartAt: start.toISOString(),
           actualEndAt: end.toISOString(), breakMinutes: input.breakMinutes, revisionVersion: response.revision_version
         });
+      await notifyPermissionHolders(client, tenantId, actorId, 'planning:actuals:approve',
+        previous ? 'shift.actual_time.corrected' : 'shift.actual_time.recorded',
+        'shift_actual_time', response.id, {
+          shiftId, employeeId: input.employeeId, revisionVersion: response.revision_version
+        });
       return { status: previous ? 200 as const : 201 as const, actualTime: response };
     });
     if (result.status === 404) res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
     else if (result.status === 403) res.status(403).json({ success: false, message: 'Mitarbeiter ist dieser Schicht nicht zugewiesen.' });
     else if (result.status === 409) res.status(409).json({ success: false, ...result });
     else res.status(result.status).json({ success: true, data: result.actualTime });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function approveActualTime(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const shiftId = uuidSchema.parse(req.params.id);
+    const input = z.object({
+      employeeId: uuidSchema,
+      expectedVersion: z.number().int().positive()
+    }).strict().parse(req.body);
+    const tenantId = req.user!.tenantId;
+    const actorId = req.user!.userId;
+    const result = await withTenantTransaction(tenantId, async client => {
+      const current = await client.query(
+        `SELECT id,shift_id,employee_id,actual_start_at,actual_end_at,break_minutes,
+                revision_version,recorded_by,recorded_at,notes,approval_status,
+                approved_by,approved_at,approved_revision_version
+           FROM shift_actual_times
+          WHERE tenant_id=$1 AND shift_id=$2 AND employee_id=$3
+          FOR UPDATE`,
+        [tenantId, shiftId, input.employeeId]
+      );
+      if (!current.rows.length) return { status: 404 as const };
+      const row = current.rows[0];
+      if (Number(row.revision_version) !== input.expectedVersion) {
+        return { status: 409 as const, code: 'REVISION_CONFLICT', currentVersion: Number(row.revision_version) };
+      }
+      if (row.recorded_by === actorId) return { status: 403 as const };
+      if (row.approval_status === 'approved') return { status: 200 as const, actualTime: row };
+      const updated = await client.query(
+        `UPDATE shift_actual_times
+            SET approval_status='approved',approved_by=$1,approved_at=CURRENT_TIMESTAMP,
+                approved_revision_version=revision_version
+          WHERE tenant_id=$2 AND id=$3 AND revision_version=$4 AND approval_status='pending'
+          RETURNING id,shift_id,employee_id,actual_start_at,actual_end_at,break_minutes,
+                    revision_version,recorded_by,recorded_at,notes,approval_status,
+                    approved_by,approved_at,approved_revision_version`,
+        [actorId, tenantId, row.id, input.expectedVersion]
+      );
+      if (!updated.rows.length) return { status: 409 as const, code: 'REVISION_CONFLICT' };
+      const approved = updated.rows[0];
+      await writeAudit(client, tenantId, actorId, 'shift.actual_time.approved',
+        'shift_actual_time', approved.id, {
+          shiftId, employeeId: input.employeeId, revisionVersion: approved.revision_version
+        });
+      await createPlanningNotification(client, tenantId, actorId, approved.recorded_by,
+        'shift.actual_time.approved', 'shift_actual_time', approved.id, {
+          shiftId, employeeId: input.employeeId, revisionVersion: approved.revision_version
+        });
+      return { status: 200 as const, actualTime: approved };
+    });
+    if (result.status === 404) res.status(404).json({ success: false, message: 'Ist-Zeit nicht gefunden.' });
+    else if (result.status === 403) res.status(403).json({ success: false, code: 'ACTUAL_TIME_SELF_APPROVAL_FORBIDDEN' });
+    else if (result.status === 409) res.status(409).json({ success: false, ...result });
+    else res.status(200).json({ success: true, data: result.actualTime });
   } catch (error) {
     next(error);
   }
@@ -1718,12 +1963,13 @@ export async function getActualTime(req: Request, res: Response, next: NextFunct
       if (!shift.rows.length) return undefined;
       const actual = await client.query(
         `SELECT id,shift_id,employee_id,actual_start_at,actual_end_at,break_minutes,
-                revision_version,recorded_by,recorded_at,notes
+                revision_version,recorded_by,recorded_at,notes,approval_status,
+                approved_by,approved_at,approved_revision_version
            FROM shift_actual_times
           WHERE tenant_id=$1 AND shift_id=$2 AND employee_id=$3`,
         [tenantId, shiftId, employeeId]
       );
-      if (!actual.rows.length) return { current: null, history: [] };
+      if (!actual.rows.length) return { current: null, history: [], revisions: [] };
       const history = await client.query(
         `SELECT id,actor_user_id,event_type,details,created_at
            FROM planning_audit_events
@@ -1731,10 +1977,72 @@ export async function getActualTime(req: Request, res: Response, next: NextFunct
           ORDER BY created_at,id`,
         [tenantId, actual.rows[0].id]
       );
-      return { current: actual.rows[0], history: history.rows };
+      const revisions = await client.query(
+        `SELECT id,revision_version,previous_values,created_at
+           FROM shift_actual_time_revisions
+          WHERE tenant_id=$1 AND actual_time_id=$2
+          ORDER BY created_at,id`,
+        [tenantId, actual.rows[0].id]
+      );
+      return { current: actual.rows[0], history: history.rows, revisions: revisions.rows };
     });
     if (!result) res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
     else res.json({ success: true, data: result });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listPlanningNotifications(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const userId = req.user!.userId;
+    const input = z.object({
+      page: z.coerce.number().int().min(1).default(1),
+      pageSize: z.coerce.number().int().min(1).max(100).default(50),
+      unreadOnly: z.enum(['true', 'false']).optional().transform(value => value === 'true')
+    }).parse(req.query);
+    const result = await withTenantTransaction(tenantId, async client => {
+      const count = await client.query(
+        `SELECT count(*)::int AS total FROM planning_notifications
+          WHERE tenant_id=$1 AND recipient_user_id=$2 AND (NOT $3::boolean OR read_at IS NULL)`,
+        [tenantId, userId, input.unreadOnly]
+      );
+      const rows = await client.query(
+        `SELECT id,event_type,entity_type,entity_id,details,created_at,read_at
+           FROM planning_notifications
+          WHERE tenant_id=$1 AND recipient_user_id=$2 AND (NOT $3::boolean OR read_at IS NULL)
+          ORDER BY created_at DESC,id LIMIT $4 OFFSET $5`,
+        [tenantId, userId, input.unreadOnly, input.pageSize, (input.page - 1) * input.pageSize]
+      );
+      return { rows: rows.rows, total: Number(count.rows[0].total) };
+    });
+    res.json({
+      success: true,
+      data: result.rows,
+      pagination: {
+        page: input.page, pageSize: input.pageSize, total: result.total,
+        pages: Math.ceil(result.total / input.pageSize)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function markPlanningNotificationRead(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const notificationId = uuidSchema.parse(req.params.notificationId);
+    const tenantId = req.user!.tenantId;
+    const userId = req.user!.userId;
+    const updated = await withTenantTransaction(tenantId, client => client.query(
+      `UPDATE planning_notifications SET read_at=COALESCE(read_at,CURRENT_TIMESTAMP)
+        WHERE tenant_id=$1 AND recipient_user_id=$2 AND id=$3
+        RETURNING id,event_type,entity_type,entity_id,details,created_at,read_at`,
+      [tenantId, userId, notificationId]
+    ));
+    if (!updated.rows.length) res.status(404).json({ success: false, message: 'Benachrichtigung nicht gefunden.' });
+    else res.json({ success: true, data: updated.rows[0] });
   } catch (error) {
     next(error);
   }
@@ -1754,12 +2062,17 @@ export async function createShiftTemplate(req: Request, res: Response, next: Nex
       }, zone);
       const row = await client.query(
         `INSERT INTO schedule_templates
-          (tenant_id,site_id,name,time_zone,local_start_time,local_end_time,required_qualification,recurrence,created_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
+          (tenant_id,site_id,name,time_zone,local_start_time,local_end_time,break_minutes,
+           required_staff_count,required_qualification,effective_from,effective_until,recurrence,created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13)
          RETURNING id,name,site_id,time_zone,local_start_time,local_end_time,
-                   required_qualification,recurrence,active,revision_version,created_at,updated_at`,
+                   break_minutes,required_staff_count,required_qualification,
+                   effective_from::text AS effective_from,effective_until::text AS effective_until,
+                   recurrence,active,revision_version,created_at,updated_at`,
         [tenantId, input.siteId, input.name, time.timeZone, input.startTime, input.endTime,
-          input.requiredQualification, JSON.stringify({ frequency: input.frequency, interval: input.interval, weekdays: input.weekdays ?? [] }), actorId]
+          input.breakMinutes, input.requiredStaffCount, input.requiredQualification,
+          input.effectiveFrom ?? null, input.effectiveUntil ?? null,
+          JSON.stringify({ frequency: input.frequency, interval: input.interval, weekdays: input.weekdays ?? [] }), actorId]
       );
       await writeAudit(client, tenantId, actorId, 'template.created', 'schedule_template', row.rows[0].id);
       return row.rows[0];
@@ -1791,7 +2104,9 @@ export async function listShiftTemplates(req: Request, res: Response, next: Next
       );
       const rows = await client.query(
         `SELECT t.id,t.site_id,s.name AS site_name,t.name,t.time_zone,
-                t.local_start_time,t.local_end_time,t.required_qualification,
+                t.local_start_time,t.local_end_time,t.break_minutes,t.required_staff_count,
+                t.required_qualification,t.effective_from::text AS effective_from,
+                t.effective_until::text AS effective_until,
                 t.recurrence,t.active,t.revision_version,t.created_at,t.updated_at
            FROM schedule_templates t
            JOIN sites s ON s.tenant_id=t.tenant_id AND s.id=t.site_id
@@ -1819,8 +2134,9 @@ export async function updateShiftTemplate(req: Request, res: Response, next: Nex
     const actorId = req.user!.userId;
     const result = await withTenantTransaction(tenantId, async client => {
       const current = await client.query(
-        `SELECT id,site_id,name,time_zone,local_start_time,local_end_time,
-                required_qualification,recurrence,active,revision_version
+        `SELECT id,site_id,name,time_zone,local_start_time,local_end_time,break_minutes,
+                required_staff_count,required_qualification,effective_from,effective_until,
+                recurrence,active,revision_version
            FROM schedule_templates WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
         [tenantId, templateId]
       );
@@ -1845,7 +2161,15 @@ export async function updateShiftTemplate(req: Request, res: Response, next: Nex
         timeZone: input.timeZone ?? (input.siteId ? siteTimeZone : row.time_zone),
         startTime: input.startTime ?? String(row.local_start_time).slice(0, 8),
         endTime: input.endTime ?? String(row.local_end_time).slice(0, 8),
+        breakMinutes: input.breakMinutes ?? Number(row.break_minutes),
+        requiredStaffCount: input.requiredStaffCount ?? Number(row.required_staff_count),
         requiredQualification: input.requiredQualification ?? row.required_qualification,
+        effectiveFrom: input.effectiveFrom === undefined
+          ? (row.effective_from ? dateOnly(row.effective_from) : undefined)
+          : input.effectiveFrom ?? undefined,
+        effectiveUntil: input.effectiveUntil === undefined
+          ? (row.effective_until ? dateOnly(row.effective_until) : undefined)
+          : input.effectiveUntil ?? undefined,
         frequency: input.frequency ?? previousRecurrence.frequency,
         interval: input.interval ?? previousRecurrence.interval,
         weekdays: input.weekdays ?? previousRecurrence.weekdays
@@ -1858,13 +2182,17 @@ export async function updateShiftTemplate(req: Request, res: Response, next: Nex
       const updated = await client.query(
         `UPDATE schedule_templates
             SET site_id=$1,name=$2,time_zone=$3,local_start_time=$4,local_end_time=$5,
-                required_qualification=$6,recurrence=$7::jsonb,active=$8,
+                break_minutes=$6,required_staff_count=$7,required_qualification=$8,
+                effective_from=$9,effective_until=$10,recurrence=$11::jsonb,active=$12,
                 revision_version=revision_version+1,updated_at=CURRENT_TIMESTAMP
-          WHERE tenant_id=$9 AND id=$10 AND revision_version=$11
+          WHERE tenant_id=$13 AND id=$14 AND revision_version=$15
           RETURNING id,site_id,name,time_zone,local_start_time,local_end_time,
-                    required_qualification,recurrence,active,revision_version,created_at,updated_at`,
+                    break_minutes,required_staff_count,required_qualification,
+                    effective_from::text AS effective_from,effective_until::text AS effective_until,
+                    recurrence,active,revision_version,created_at,updated_at`,
         [merged.siteId, merged.name, time.timeZone, merged.startTime, merged.endTime,
-          merged.requiredQualification,
+          merged.breakMinutes, merged.requiredStaffCount, merged.requiredQualification,
+          merged.effectiveFrom ?? null, merged.effectiveUntil ?? null,
           JSON.stringify({ frequency: merged.frequency, interval: merged.interval, weekdays: merged.weekdays ?? [] }),
           input.active ?? row.active, tenantId, templateId, input.expectedVersion]
       );
@@ -1909,7 +2237,9 @@ export async function applyShiftTemplate(req: Request, res: Response, next: Next
         : { replayed: true as const, response: prior.response };
       let periodRange: { dateFrom: string; dateTo: string } | undefined;
       const template = await client.query(
-        `SELECT id,site_id,name,time_zone,local_start_time,local_end_time,required_qualification,recurrence,active,revision_version
+        `SELECT id,site_id,name,time_zone,local_start_time,local_end_time,break_minutes,
+                required_staff_count,required_qualification,effective_from::text,effective_until::text,
+                recurrence,active,revision_version
            FROM schedule_templates WHERE tenant_id=$1 AND id=$2 FOR SHARE`,
         [tenantId, templateId]
       );
@@ -1945,6 +2275,15 @@ export async function applyShiftTemplate(req: Request, res: Response, next: Next
             Math.floor((cursor.getTime() - start.getTime()) / 604800000) % recurrence.interval === 0;
         if (!eligible) continue;
         if (results.length >= 366) return { tooLarge: true as const };
+        if ((value.effective_from && date < value.effective_from) ||
+            (value.effective_until && date > value.effective_until)) {
+          results.push({ date, status: 'REJECTED', findings: [{
+            code: 'TEMPLATE_OUTSIDE_VALIDITY', severity: 'blocking',
+            message: 'Das Vorlagenvorkommen liegt außerhalb des Gültigkeitszeitraums.',
+            details: { effectiveFrom: value.effective_from, effectiveUntil: value.effective_until, occurrenceDate: date }
+          }] });
+          continue;
+        }
         let resolved: ReturnType<typeof resolveShiftTime>;
         try {
           resolved = resolveShiftTime({
@@ -1969,17 +2308,17 @@ export async function applyShiftTemplate(req: Request, res: Response, next: Next
         const created = await client.query(
           `INSERT INTO shifts
             (tenant_id,site_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
-             type,status,planning_status,required_qualification,schedule_period_id)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'Tagdienst','Offen','draft',$10,$11)
+             break_minutes,type,status,planning_status,required_qualification,schedule_period_id)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Tagdienst','Offen','draft',$11,$12)
            RETURNING id`,
           [tenantId, value.site_id, date, resolved.endDate, value.local_start_time, value.local_end_time,
-            resolved.startsAt, resolved.endsAt, resolved.timeZone, value.required_qualification,
-            input.schedulePeriodId ?? null]
+            resolved.startsAt, resolved.endsAt, resolved.timeZone, value.break_minutes,
+            value.required_qualification, input.schedulePeriodId ?? null]
         );
         await client.query(
           `INSERT INTO shift_staffing_requirements (tenant_id,shift_id,qualification_type,required_count)
-           VALUES ($1,$2,$3,1)`,
-          [tenantId, created.rows[0].id, value.required_qualification]
+           VALUES ($1,$2,$3,$4)`,
+          [tenantId, created.rows[0].id, value.required_qualification, value.required_staff_count]
         );
         results.push({ date, status: 'draft', shiftId: created.rows[0].id });
       }
@@ -2037,7 +2376,8 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
          SELECT s.id AS shift_id,s.site_id,si.time_zone,s.shift_date::text AS shift_date,
                 s.starts_at,s.ends_at,s.break_minutes,a.employee_id,
                 e.personnel_number,e.first_name,e.last_name,
-                t.actual_start_at,t.actual_end_at,t.break_minutes AS actual_break_minutes
+                t.actual_start_at,t.actual_end_at,t.break_minutes AS actual_break_minutes,
+                t.approval_status,t.approved_revision_version
            FROM shifts s
            JOIN sites si ON si.tenant_id=s.tenant_id AND si.id=s.site_id
            JOIN assigned a ON a.tenant_id=s.tenant_id AND a.shift_id=s.id
@@ -2061,9 +2401,9 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
       };
       type EmployeeTrack = {
         employee_id: string; personnel_number: string; first_name: string; last_name: string;
-        assigned_shifts: number; actual_shift_count: number;
+        assigned_shifts: number; captured_actual_shift_count: number; approved_actual_shift_count: number;
         overtimeBreakAmbiguous: boolean;
-        plannedMinutes: number; actualMinutes: number;
+        plannedMinutes: number; capturedActualMinutes: number; actualMinutes: number;
         calendar: Record<'weekend' | 'holiday' | 'night', MetricTrack>;
         weeks: Map<string, WeekTrack>;
       };
@@ -2079,9 +2419,11 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
           first_name: shift.first_name,
           last_name: shift.last_name,
           assigned_shifts: 0,
-          actual_shift_count: 0,
+          captured_actual_shift_count: 0,
+          approved_actual_shift_count: 0,
           overtimeBreakAmbiguous: false,
           plannedMinutes: 0,
+          capturedActualMinutes: 0,
           actualMinutes: 0,
           calendar: {
             weekend: { plannedConfigured: 0, plannedCount: 0, actualConfigured: 0, actualCount: 0, ambiguous: false, sources: new Set<string>() },
@@ -2112,14 +2454,20 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
         const actual = hasActual
           ? summarizeInterval(shift.actual_start_at, shift.actual_end_at, shift.time_zone, calendar)
           : undefined;
-        const actualWeekMinutes = actual ? new Map(actual.weekMinutes) : new Map<string, number>();
+        const approvedActual = actual && shift.approval_status === 'approved' &&
+          Number(shift.approved_revision_version) > 0;
+        const actualWeekMinutes = approvedActual ? new Map(actual.weekMinutes) : new Map<string, number>();
         if (actual) {
-          employee.actual_shift_count += 1;
-          employee.actualMinutes += Math.max(0, actual.minutes - Number(shift.actual_break_minutes ?? 0));
+          employee.captured_actual_shift_count += 1;
+          employee.capturedActualMinutes += Math.max(0, actual.minutes - Number(shift.actual_break_minutes ?? 0));
           const breakMinutes = Number(shift.actual_break_minutes ?? 0);
-          if (actualWeekMinutes.size > 1 && breakMinutes > 0) {
+          if (approvedActual) {
+            employee.approved_actual_shift_count += 1;
+            employee.actualMinutes += Math.max(0, actual.minutes - breakMinutes);
+          }
+          if (approvedActual && actualWeekMinutes.size > 1 && breakMinutes > 0) {
             employee.overtimeBreakAmbiguous = true;
-          } else if (actualWeekMinutes.size === 1 && breakMinutes > 0) {
+          } else if (approvedActual && actualWeekMinutes.size === 1 && breakMinutes > 0) {
             const [week, minutes] = [...actualWeekMinutes.entries()][0];
             actualWeekMinutes.set(week, Math.max(0, minutes - breakMinutes));
           }
@@ -2139,7 +2487,7 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
             track.plannedConfigured += 1;
             if (plan[summaryKey] > 0) track.plannedCount += 1;
             addSource(track.sources, ruleSource);
-            if (actual) {
+            if (approvedActual) {
               track.actualConfigured += 1;
               if (actual[summaryKey] > 0) track.actualCount += 1;
             }
@@ -2157,8 +2505,8 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
           };
           if (profileSelection.ambiguous) track.ambiguous = true;
           if (plan.weekMinutes.has(week)) track.expectedShifts += 1;
-          if (plan.weekMinutes.has(week) && !actual) track.missingActual = true;
-          if (actual) track.actualMinutes += actualWeekMinutes.get(week) ?? 0;
+          if (plan.weekMinutes.has(week) && !approvedActual) track.missingActual = true;
+          if (approvedActual) track.actualMinutes += actualWeekMinutes.get(week) ?? 0;
           if (thresholdValue !== undefined) {
             track.thresholds.add(thresholdValue);
             addSource(track.sources, thresholdSource);
@@ -2174,9 +2522,9 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
         const calendarReport = Object.fromEntries(metrics.map(metric => {
           const track = employee.calendar[metric];
           const plannedStatus = track.ambiguous ? 'ambiguous' : metricStatus(track.plannedConfigured, employee.assigned_shifts);
-          const actualStatus = track.ambiguous ? 'ambiguous' : employee.actual_shift_count === 0 ? 'unavailable'
+          const actualStatus = track.ambiguous ? 'ambiguous' : employee.approved_actual_shift_count === 0 ? 'unavailable'
             : track.actualConfigured === 0 ? 'unconfigured'
-              : employee.actual_shift_count < employee.assigned_shifts || track.actualConfigured < employee.actual_shift_count
+              : employee.approved_actual_shift_count < employee.assigned_shifts || track.actualConfigured < employee.approved_actual_shift_count
                 ? 'partial' : 'available';
           const label = metric === 'weekend' ? 'weekend' : metric === 'holiday' ? 'holiday' : 'night';
           return [label, {
@@ -2191,7 +2539,7 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
           actualShifts: number | null; actualStatus: string; sources: unknown[];
         }>;
         const weekTracks = [...employee.weeks.values()];
-        const overtimeStatus = employee.actual_shift_count === 0 ? 'unavailable'
+        const overtimeStatus = employee.approved_actual_shift_count === 0 ? 'unavailable'
           : weekTracks.some(week => week.missingActual) ? 'partial'
             : weekTracks.some(week => week.ambiguous) ? 'ambiguous'
             : weekTracks.some(week => week.unconfigured || week.thresholds.size === 0) ? 'unconfigured'
@@ -2201,6 +2549,17 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
           ? weekTracks.reduce((sum, week) => sum + Math.max(0, week.actualMinutes - [...week.thresholds][0]), 0)
           : null;
         const overtimeSources = [...new Set(weekTracks.flatMap(week => [...week.sources]))].map(value => JSON.parse(value));
+        const actualComplete = employee.approved_actual_shift_count === employee.assigned_shifts;
+        const capturedStatus = employee.captured_actual_shift_count === 0 ? 'unavailable'
+          : employee.captured_actual_shift_count < employee.assigned_shifts ? 'partial' : 'complete';
+        const actualApprovalStatus = employee.captured_actual_shift_count === 0 ? 'unavailable'
+          : employee.approved_actual_shift_count === 0 ? 'pending'
+            : employee.approved_actual_shift_count < employee.assigned_shifts ? 'partial' : 'approved';
+        const varianceStatus = actualComplete ? 'available'
+          : employee.captured_actual_shift_count === 0 ? 'unavailable'
+            : employee.captured_actual_shift_count < employee.assigned_shifts ? 'partial' : 'pending_approval';
+        const hoursVariance = actualComplete ? (employee.actualMinutes - employee.plannedMinutes) / 60 : null;
+        const minusHours = actualComplete ? Math.max(0, employee.plannedMinutes - employee.actualMinutes) / 60 : null;
         return {
           employee_id: employee.employee_id,
           personnel_number: employee.personnel_number,
@@ -2208,9 +2567,18 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
           last_name: employee.last_name,
           assigned_shifts: employee.assigned_shifts,
           planned_hours: Number((employee.plannedMinutes / 60).toFixed(2)),
-          actual_hours: employee.actual_shift_count ? Number((employee.actualMinutes / 60).toFixed(2)) : null,
-          actual_status: employee.actual_shift_count === 0 ? 'unavailable'
-            : employee.actual_shift_count < employee.assigned_shifts ? 'partial' : 'complete',
+          captured_actual_hours: employee.captured_actual_shift_count
+            ? Number((employee.capturedActualMinutes / 60).toFixed(2)) : null,
+          captured_actual_status: capturedStatus,
+          actual_hours: actualComplete ? Number((employee.actualMinutes / 60).toFixed(2)) : null,
+          actual_status: employee.approved_actual_shift_count === 0
+            ? employee.captured_actual_shift_count === 0 ? 'unavailable' : 'pending'
+            : actualComplete ? 'complete' : 'partial',
+          actual_approval_status: actualApprovalStatus,
+          hours_variance: hoursVariance === null ? null : Number(hoursVariance.toFixed(2)),
+          minus_hours: minusHours === null ? null : Number(minusHours.toFixed(2)),
+          hours_variance_status: varianceStatus,
+          hours_variance_source: 'approved_actual_hours_minus_planned_hours',
           overtime_hours: overtimeMinutes === null ? null : Number((overtimeMinutes / 60).toFixed(2)),
           overtime_status: overtimeStatus,
           overtime_sources: overtimeSources,
@@ -2230,15 +2598,19 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
         ['employeeId', 'personnelNumber', 'firstName', 'lastName', 'assignedShifts', 'plannedHours',
           'actualHours', 'actualStatus', 'overtimeHours', 'overtimeStatus', 'plannedWeekendShifts',
           'actualWeekendShifts', 'plannedHolidayShifts', 'actualHolidayShifts', 'plannedNightShifts',
-          'actualNightShifts'].map(value => escapeCsvCell(value)).join(','),
+          'actualNightShifts', 'capturedActualHours', 'capturedActualStatus', 'actualApprovalStatus',
+          'hoursVariance', 'minusHours', 'hoursVarianceStatus', 'hoursVarianceSource']
+          .map(value => escapeCsvCell(value)).join(','),
         ...rows.map(row => {
           const values = [
           row.employee_id, row.personnel_number, row.first_name, row.last_name, row.assigned_shifts,
           row.planned_hours, row.actual_hours, row.actual_status, row.overtime_hours, row.overtime_status,
           row.planned_weekend_shifts, row.actual_weekend_shifts, row.planned_holiday_shifts,
-          row.actual_holiday_shifts, row.planned_night_shifts, row.actual_night_shifts
+          row.actual_holiday_shifts, row.planned_night_shifts, row.actual_night_shifts,
+          row.captured_actual_hours, row.captured_actual_status, row.actual_approval_status,
+          row.hours_variance, row.minus_hours, row.hours_variance_status, row.hours_variance_source
           ];
-          const textColumns = new Set([0, 1, 2, 3, 7, 9]);
+          const textColumns = new Set([0, 1, 2, 3, 7, 9, 17, 18, 21, 22]);
           return values.map((value, index) => escapeCsvCell(value, textColumns.has(index))).join(',');
         })
       ].join('\r\n');

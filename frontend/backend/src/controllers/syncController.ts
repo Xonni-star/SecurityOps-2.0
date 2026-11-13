@@ -42,6 +42,33 @@ function dateOnly(value: string | Date): string {
   return `${String(value.getFullYear()).padStart(4, '0')}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
 }
 
+function canonicalShiftSnapshot(row: any): Record<string, unknown> {
+  const staffingRequirements = row.staffing_requirements ?? [];
+  return {
+    id: row.id,
+    siteId: row.site_id,
+    employeeId: row.employee_id,
+    date: dateOnly(row.shift_date),
+    endDate: dateOnly(row.end_date),
+    startTime: String(row.start_time).slice(0, 8),
+    endTime: String(row.end_time).slice(0, 8),
+    startsAt: row.starts_at,
+    endsAt: row.ends_at,
+    timeZone: row.time_zone,
+    breakMinutes: row.break_minutes,
+    type: row.type,
+    status: row.status,
+    planningStatus: row.planning_status,
+    requiredQualification: row.required_qualification,
+    conflictReason: row.conflict_reason,
+    schedulePeriodId: row.schedule_period_id,
+    revisionVersion: Number(row.revision_version),
+    staffingRequirements: staffingRequirements.length
+      ? staffingRequirements
+      : [{ qualificationType: row.required_qualification, requiredCount: 1 }]
+  };
+}
+
 const conflictResolveSchema = z.object({
   clientUuid: z.string().min(8).max(64),
   entityType: z.enum(['task', 'shift', 'key', 'guardbook', 'patrol']),
@@ -391,7 +418,12 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
             } else {
               const current = await client.query(
                 `SELECT id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
-                        break_minutes,type,status,planning_status,required_qualification,conflict_reason,schedule_period_id,revision_version
+                        break_minutes,type,status,planning_status,required_qualification,conflict_reason,schedule_period_id,revision_version,
+                        COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                          'qualificationType',qualification_type,'requiredCount',required_count
+                        ) ORDER BY qualification_type)
+                          FROM shift_staffing_requirements r
+                         WHERE r.tenant_id=shifts.tenant_id AND r.shift_id=shifts.id), '[]'::jsonb) AS staffing_requirements
                    FROM shifts WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
                 [tenantId, shiftId.data]
               );
@@ -401,13 +433,18 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 itemResult = {
                   clientUuid: mut.clientUuid, serverId: shiftId.data, status: 'CONFLICT',
                   serverVersion: current.rows[0].revision_version,
-                  conflictData: { serverStatus: current.rows[0].status, serverVersion: current.rows[0].revision_version },
+                  conflictData: {
+                    serverStatus: current.rows[0].status,
+                    serverVersion: current.rows[0].revision_version,
+                    serverSnapshot: canonicalShiftSnapshot(current.rows[0])
+                  },
                   message: 'Atomarer Versionskonflikt bei Schichtaktualisierung.'
                 };
               } else if (current.rows[0].planning_status === 'published') {
                 itemResult = {
                   clientUuid: mut.clientUuid, serverId: shiftId.data, status: 'CONFLICT',
                   serverVersion: current.rows[0].revision_version,
+                  conflictData: { serverSnapshot: canonicalShiftSnapshot(current.rows[0]) },
                   message: 'Veröffentlichte Schichten müssen über einen neuen Dienstplanvorgang geändert werden.'
                 };
               } else {
@@ -1253,7 +1290,12 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
         const shiftId = z.string().guid().parse(body.localPayload?.id || body.clientUuid);
         const shiftCheck = await client.query(
           `SELECT id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
-                  break_minutes,type,status,required_qualification,conflict_reason,schedule_period_id,revision_version
+                  break_minutes,type,status,planning_status,required_qualification,conflict_reason,schedule_period_id,revision_version,
+                  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                    'qualificationType',qualification_type,'requiredCount',required_count
+                  ) ORDER BY qualification_type)
+                    FROM shift_staffing_requirements r
+                   WHERE r.tenant_id=shifts.tenant_id AND r.shift_id=shifts.id), '[]'::jsonb) AS staffing_requirements
              FROM shifts WHERE id=$1 AND tenant_id=$2 FOR UPDATE`,
           [shiftId, tenantId]
         );
@@ -1266,7 +1308,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
 
         if (body.strategy === 'USE_LOCAL') {
           if (Number(currentShift.revision_version) !== body.expectedVersion) {
-            throw new ConflictError(`Versionskonflikt: Server-Version (${currentShift.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+            conflictResponseData = {
+              applied: false,
+              code: 'REVISION_CONFLICT',
+              clientUuid: body.clientUuid,
+              entityType: body.entityType,
+              strategy: body.strategy,
+              serverState: canonicalShiftSnapshot(currentShift),
+              serverVersion: Number(currentShift.revision_version)
+            };
+            return;
           }
           const local = z.object({
             employeeId: z.string().guid().nullable().optional(),
@@ -1330,7 +1381,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
               clientUuid: body.clientUuid,
               entityType: body.entityType,
               strategy: body.strategy,
-              serverState: currentShift,
+              serverState: canonicalShiftSnapshot(currentShift),
               validationRunId: stored.runId,
               findings: stored.findings
             };
@@ -1388,10 +1439,10 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
              VALUES ($1,$2,'shift.conflict_resolution','shift',$3,$4::jsonb)`,
             [tenantId, userId, shiftId, JSON.stringify({ clientUuid: body.clientUuid, validationRunId: stored.runId })]
           );
-          actualServerData = updRes.rows[0];
+          actualServerData = canonicalShiftSnapshot(updRes.rows[0]);
           updated = true;
         } else if (body.strategy === 'USE_SERVER') {
-          actualServerData = currentShift;
+          actualServerData = canonicalShiftSnapshot(currentShift);
           updated = true;
         }
       }
@@ -1523,8 +1574,9 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     });
 
     if (conflictResponseData?.applied === false) {
-    res.status(422).json({ success: false, ...conflictResponseData });
-    return;
+      res.status(conflictResponseData.code === 'REVISION_CONFLICT' ? 409 : 422)
+        .json({ success: false, ...conflictResponseData });
+      return;
     }
 
     res.json({
