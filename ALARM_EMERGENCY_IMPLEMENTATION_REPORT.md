@@ -29,7 +29,7 @@ Die Umsetzung folgt der angehängten Master-Brief-Anforderung zum mandantenfähi
 | Frische PostgreSQL-16-Migration bis Version 016 und Seed auf isolierter Testdatenbank | erfolgreich; aktuelle Quellen bis einschließlich Migration 016 |
 | Produktions-Compose-Konfiguration | erfolgreich mit ausschließlich test-only Pflichtvariablen |
 | Produktions-Backend- und Frontend-Container-Images | lokale Builds erfolgreich |
-| PR-CI für Implementierungsstand `d6d0741` und Reportstand `3daeb34` | Jeweils 4 von 4 Jobs bestanden (Backend, Frontend, Produktions-Docker und Root) |
+| PR-CI für Stände `d6d0741`, `c89d121` und `efe8a71` | Jeweils 4 von 4 Jobs bestanden (Backend, Frontend, Produktions-Docker und Root) |
 | `git diff --check` | ohne Beanstandungen |
 
 Der Frontend-Build meldet bestehende Vite-Konfigurations- und Bundlegrößen-Warnungen, endet aber erfolgreich. Die Container wurden gebaut, nicht gestartet. Es fand keine Bereitstellung statt.
@@ -41,4 +41,4 @@ Der Frontend-Build meldet bestehende Vite-Konfigurations- und Bundlegrößen-War
 - Kontakt-, Benachrichtigungs- und Eskalationsstatus-Endpunkte verwenden weiterhin feste Höchstgrenzen; Alarmvorfälle und Ereignis-/Maßnahmen-/Statusverläufe sind cursor-paginiert.
 - Die lokale Worker-Implementierung verwendet PostgreSQL-Jobs und Leases; Hochverfügbarkeit und Produktionsbetrieb des Workers sind nicht durch einen Produktiv-Deployment-Test belegt.
 - Keine Produktionsdatenbank wurde verwendet und keine Produktion wurde geändert.
-- PR [#12](https://github.com/Xonni-star/SecurityOps-2.0/pull/12) bleibt geöffnet und wird nicht gemergt. Lokale Prüfungen und alle vier CI-Jobs für die Implementierungs- und Reportstände sind bestanden.
+- PR [#12](https://github.com/Xonni-star/SecurityOps-2.0/pull/12) bleibt geöffnet und wird nicht gemergt. Lokale Prüfungen und alle vier CI-Jobs für die dokumentierten Stände sind bestanden.
