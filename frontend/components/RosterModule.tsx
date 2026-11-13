@@ -1,4 +1,4 @@
-import React, { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Copy, Download,
   FileText, LoaderCircle, Plus, Printer, RefreshCw, ShieldCheck, Users, X
@@ -150,6 +150,9 @@ function reportSources(sources: unknown[] | undefined): string {
 export const RosterModule: React.FC = () => {
   const store = useSecurityStore();
   const { currentTenantId, currentUserId, authUser, sites, clients, employees, isOnline, syncQueue, isSyncing, lastSyncTime } = store;
+  const identityKey = JSON.stringify([currentTenantId, currentUserId]);
+  const identityKeyRef = useRef(identityKey);
+  const isCurrentIdentity = (requestIdentity: string) => identityKeyRef.current === requestIdentity;
   const permissions = authUser?.permissions ?? [];
   const canRead = permissions.includes('planning:read');
   const canManage = permissions.includes('planning:manage');
@@ -247,14 +250,97 @@ export const RosterModule: React.FC = () => {
   const [ruleProfilesError, setRuleProfilesError] = useState('');
   const [ruleProfilesMessage, setRuleProfilesMessage] = useState('');
 
+  useLayoutEffect(() => {
+    identityKeyRef.current = identityKey;
+    setShifts([]);
+    setPeriods([]);
+    setCoverage([]);
+    setOutbox([]);
+    setUsingCache(false);
+    setCachedAt(undefined);
+    setLoadError('');
+    setCacheWarning('');
+    setActionError('');
+    setActionMessage('');
+    setSelectedPeriodId('');
+    setFilterSiteId('');
+    setFilterClientId('');
+    setFilterEmployeeId('');
+    setFilterStatus('');
+    setSearch('');
+    setEditor(null);
+    setForm(defaultForm(localDate(new Date())));
+    setSaving(false);
+    setPeriodFormOpen(false);
+    setPeriodForm({
+      name: '',
+      dateFrom: range.from,
+      dateTo: range.to,
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Berlin'
+    });
+    setTemplateOpen(false);
+    setTemplates([]);
+    setTemplatesLoading(false);
+    setSelectedTemplateId('');
+    setTemplateForm({
+      name: '',
+      frequency: 'WEEKLY',
+      interval: 1,
+      weekdays: [1, 2, 3, 4, 5],
+      siteId: '',
+      startTime: '',
+      endTime: '',
+      requiredQualification: ''
+    });
+    setDetailsShift(null);
+    setAssignments([]);
+    setFindings([]);
+    setSwaps([]);
+    setShiftCoverRequests([]);
+    setDetailsLoading(false);
+    setAssignmentEmployeeId('');
+    setSwapEmployeeId('');
+    setSwapReason('');
+    setCoverEmployeeId('');
+    setCoverReason('');
+    setCoverDecisionEmployeeIds({});
+    setCoverRequestMutationIds({});
+    setCoverDecisionMutationIds({});
+    setCoverListOpen(false);
+    setAllCoverRequests([]);
+    setCoverListLoading(false);
+    setActualForm({
+      employeeId: '',
+      actualStartAt: '',
+      actualEndAt: '',
+      breakMinutes: 0,
+      expectedVersion: 0,
+      notes: ''
+    });
+    setActualSavedRevision(null);
+    setActualMutationIds({});
+    setReportOpen(false);
+    setWorkHours([]);
+    setReportCoverage([]);
+    setReportQualifications([]);
+    setReportAbsences([]);
+    setReportLoading(false);
+    setRuleProfilesOpen(false);
+    setRuleProfiles([]);
+    setRuleProfilesLoading(false);
+    setRuleProfilesError('');
+    setRuleProfilesMessage('');
+  }, [identityKey]);
+
   const loadOutbox = useCallback(async () => {
     const items = await offlineVault.getOutbox(currentTenantId, 'shift');
     const userItems = items.filter(item => item.userId === currentUserId);
-    setOutbox(userItems);
+    if (identityKeyRef.current === identityKey) setOutbox(userItems);
     return userItems;
-  }, [currentTenantId, currentUserId]);
+  }, [currentTenantId, currentUserId, identityKey]);
 
   const refresh = useCallback(async () => {
+    const requestIdentity = identityKey;
     if (!canRead) {
       setLoadError('Für die Dienstplanung fehlt die Berechtigung „planning:read“.');
       setShifts([]);
@@ -273,11 +359,14 @@ export const RosterModule: React.FC = () => {
           planningApi.listShifts(range.from, range.to),
           planningApi.listPeriods()
         ]);
+        if (!isCurrentIdentity(requestIdentity)) return;
         if (canReport) {
           try {
             const report = await planningApi.coverage(range.from, range.to);
+            if (!isCurrentIdentity(requestIdentity)) return;
             setCoverage(report);
           } catch (error) {
+            if (!isCurrentIdentity(requestIdentity)) return;
             setCoverage([]);
             setCacheWarning(`Besetzungsbedarf konnte über coverage nicht geladen werden: ${error instanceof Error ? error.message : 'unbekannter Fehler'}`);
           }
@@ -287,14 +376,18 @@ export const RosterModule: React.FC = () => {
         const mapped = rawShifts.map(row => mapPlanningShift(row, currentTenantId, employees));
         try {
           await offlineVault.savePlanningCache(currentTenantId, currentUserId, mapped, loadedPeriods);
+          if (!isCurrentIdentity(requestIdentity)) return;
           setCachedAt(new Date().toISOString());
         } catch (error) {
+          if (!isCurrentIdentity(requestIdentity)) return;
           setCacheWarning(`Der Onlineplan ist geladen, konnte aber nicht offline gespeichert werden: ${error instanceof Error ? error.message : 'Speicherfehler'}`);
         }
+        if (!isCurrentIdentity(requestIdentity)) return;
         setPeriods(loadedPeriods);
         setUsingCache(false);
       } else {
         const cached = await offlineVault.getPlanningCache(currentTenantId, currentUserId);
+        if (!isCurrentIdentity(requestIdentity)) return;
         if (!cached) throw new Error('Für diesen Benutzer und Mandanten ist noch kein Dienstplancache vorhanden.');
         rawShifts = cached.shifts;
         loadedPeriods = cached.periods;
@@ -305,6 +398,7 @@ export const RosterModule: React.FC = () => {
       }
 
       const queued = await loadOutbox();
+      if (!isCurrentIdentity(requestIdentity)) return;
       const mapped = rawShifts.map(row =>
         'planningStatus' in row ? row as PlanningShift : mapPlanningShift(row, currentTenantId, employees)
       );
@@ -325,14 +419,17 @@ export const RosterModule: React.FC = () => {
       }
       setLoadError('');
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       if (isOnline) {
         try {
           const cached = await offlineVault.getPlanningCache(currentTenantId, currentUserId);
+          if (!isCurrentIdentity(requestIdentity)) return;
           if (cached) {
             const mapped = cached.shifts.map(row =>
               'planningStatus' in row ? row as PlanningShift : mapPlanningShift(row, currentTenantId, employees)
             ).filter(shift => shift.date >= range.from && shift.date <= range.to);
             const queued = await loadOutbox();
+            if (!isCurrentIdentity(requestIdentity)) return;
             setShifts(mergeOutboxShifts(mapped, queued, currentTenantId, employees, sites));
             setPeriods(cached.periods);
             setCachedAt(cached.cachedAt);
@@ -342,15 +439,16 @@ export const RosterModule: React.FC = () => {
             setLoadError(error instanceof Error ? error.message : 'Dienstplandaten konnten nicht geladen werden.');
           }
         } catch (cacheError) {
+          if (!isCurrentIdentity(requestIdentity)) return;
           setLoadError(`${error instanceof Error ? error.message : 'Dienstplandaten konnten nicht geladen werden.'} Offline-Cache: ${cacheError instanceof Error ? cacheError.message : 'Lesefehler'}`);
         }
       } else {
         setLoadError(error instanceof Error ? error.message : 'Dienstplan-Cache konnte nicht geladen werden.');
       }
     } finally {
-      setLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setLoading(false);
     }
-  }, [canRead, canReport, currentTenantId, currentUserId, employees, isOnline, loadOutbox, range.from, range.to, selectedPeriodId, sites]);
+  }, [canRead, canReport, currentTenantId, currentUserId, employees, identityKey, isOnline, loadOutbox, range.from, range.to, selectedPeriodId, sites]);
 
   useEffect(() => {
     void refresh();
@@ -361,6 +459,7 @@ export const RosterModule: React.FC = () => {
   }, [isOnline]);
 
   const loadRuleProfiles = async () => {
+    const requestIdentity = identityKey;
     if (!canRead) return;
     if (!isOnline) {
       setRuleProfilesError('Regelprofile werden aus Sicherheitsgründen nicht offline gespeichert oder freigegeben.');
@@ -369,11 +468,14 @@ export const RosterModule: React.FC = () => {
     setRuleProfilesLoading(true);
     setRuleProfilesError('');
     try {
-      setRuleProfiles(await planningApi.listRuleProfiles());
+      const profiles = await planningApi.listRuleProfiles();
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setRuleProfiles(profiles);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setRuleProfilesError(planningErrorDetails(error).message);
     } finally {
-      setRuleProfilesLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setRuleProfilesLoading(false);
     }
   };
 
@@ -468,6 +570,7 @@ export const RosterModule: React.FC = () => {
   const handleSaveShift = async (event: FormEvent) => {
     event.preventDefault();
     if (!canManage || !editor) return;
+    const requestIdentity = identityKey;
     setSaving(true);
     setActionError('');
     setActionMessage('');
@@ -512,6 +615,7 @@ export const RosterModule: React.FC = () => {
             payload,
             baseVersion: shift.revisionVersion ?? 1
           });
+          if (!isCurrentIdentity(requestIdentity)) return;
           const updatedShift: PlanningShift = {
             ...shift,
             siteId: form.siteId,
@@ -530,6 +634,7 @@ export const RosterModule: React.FC = () => {
             shifts: state.shifts.map(item => item.id === shift.id ? updatedShift : item)
           }));
           await loadOutbox();
+          if (!isCurrentIdentity(requestIdentity)) return;
           setActionMessage('Änderung lokal vorgemerkt. Sie ist noch nicht servergeprüft oder veröffentlicht.');
           setEditor(null);
           return;
@@ -555,6 +660,7 @@ export const RosterModule: React.FC = () => {
           payload,
           baseVersion: 1
         });
+        if (!isCurrentIdentity(requestIdentity)) return;
         const site = sites.find(item => item.id === form.siteId);
         const localShift: PlanningShift = {
           id: mutationId,
@@ -577,6 +683,7 @@ export const RosterModule: React.FC = () => {
         setShifts(current => [...current.filter(shift => shift.id !== mutationId), localShift]);
         useSecurityStore.setState(state => ({ shifts: [localShift, ...state.shifts] }));
         await loadOutbox();
+        if (!isCurrentIdentity(requestIdentity)) return;
         setActionMessage('Entwurf lokal vorgemerkt. Noch nicht servergeprüft, zugewiesen oder veröffentlicht.');
         setEditor(null);
         return;
@@ -594,6 +701,7 @@ export const RosterModule: React.FC = () => {
             employeeId: form.employeeId || undefined,
             clientMutationId: crypto.randomUUID()
           });
+          if (!isCurrentIdentity(requestIdentity)) return;
           const mapped = mapPlanningShift(result.shift, currentTenantId, employees);
           const site = sites.find(item => item.id === mapped.siteId);
           created.push({ ...mapped, siteName: site?.name ?? mapped.siteName });
@@ -606,6 +714,7 @@ export const RosterModule: React.FC = () => {
           ...toShiftFormPayload(form),
           revisionVersion: editor.shift.revisionVersion ?? 1
         });
+        if (!isCurrentIdentity(requestIdentity)) return;
         const updated = mapPlanningShift(result.shift, currentTenantId, employees);
         setShifts(current => current.map(shift => shift.id === updated.id ? updated : shift));
         useSecurityStore.setState(state => ({ shifts: state.shifts.map(shift => shift.id === updated.id ? updated : shift) }));
@@ -614,25 +723,29 @@ export const RosterModule: React.FC = () => {
       setEditor(null);
       void refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setFindings(detail.findings);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
   const deleteShift = async (shift: PlanningShift) => {
     if (!canManage || !isOnline || shift.planningStatus === 'published') return;
+    const requestIdentity = identityKey;
     if (!window.confirm(`Schicht ${shift.date} ${shift.startTime}–${shift.endTime} endgültig löschen?`)) return;
     setActionError('');
     try {
       await planningApi.deleteShift(shift.id, shift.revisionVersion ?? 1);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setShifts(current => current.filter(item => item.id !== shift.id));
       useSecurityStore.setState(state => ({ shifts: state.shifts.filter(item => item.id !== shift.id) }));
       setActionMessage('Schicht wurde gelöscht.');
       void refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
     }
@@ -641,42 +754,49 @@ export const RosterModule: React.FC = () => {
   const createPeriod = async (event: FormEvent) => {
     event.preventDefault();
     if (!canManage || !isOnline) return;
+    const requestIdentity = identityKey;
     setSaving(true);
     setActionError('');
     try {
       const period = await planningApi.createPeriod(periodForm);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setPeriods(current => [period, ...current]);
       setSelectedPeriodId(period.id);
       setPeriodFormOpen(false);
       setActionMessage('Dienstplanperiode als Entwurf angelegt.');
       void refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
   const publishPeriod = async () => {
     if (!canPublish || !activePeriod || !isOnline) return;
+    const requestIdentity = identityKey;
     if (!window.confirm(`Periode „${activePeriod.name}“ serverseitig neu prüfen und veröffentlichen? Die Veröffentlichung ist verbindlich und nicht offline verfügbar.`)) return;
     setActionError('');
     setFindings([]);
     setSaving(true);
     try {
       await planningApi.publishPeriod(activePeriod.id, activePeriod.revision_version);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionMessage('Periode wurde serverseitig validiert und veröffentlicht.');
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
   const loadTemplates = async () => {
+    const requestIdentity = identityKey;
     if (!canRead || !isOnline) {
       setTemplates([]);
       return;
@@ -685,19 +805,22 @@ export const RosterModule: React.FC = () => {
     setActionError('');
     try {
       const rows = await planningApi.listTemplates();
+      if (!isCurrentIdentity(requestIdentity)) return;
       setTemplates(rows);
       setSelectedTemplateId(current => current && rows.some(template => template.id === current)
         ? current : rows[0]?.id ?? '');
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setTemplatesLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setTemplatesLoading(false);
     }
   };
 
   const createTemplate = async (event: FormEvent) => {
     event.preventDefault();
     if (!canManage || !isOnline || !templateForm.siteId) return;
+    const requestIdentity = identityKey;
     if (templateForm.frequency === 'WEEKLY' && templateForm.weekdays.length === 0) {
       setActionError('Wöchentliche Vorlagen benötigen mindestens einen Wochentag.');
       return;
@@ -715,18 +838,21 @@ export const RosterModule: React.FC = () => {
         interval: templateForm.interval,
         weekdays: templateForm.frequency === 'WEEKLY' ? templateForm.weekdays : undefined
       });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionMessage('Vorlage serverseitig erstellt. Wählen Sie eine Vorlage aus der Liste aus, um sie auf eine Entwurfsperiode anzuwenden.');
       await loadTemplates();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
   const applyTemplateById = async (templateId: string) => {
     if (!canManage || !isOnline || !activePeriod || !templateId) return;
+    const requestIdentity = identityKey;
     setSaving(true);
     setActionError('');
     try {
@@ -735,19 +861,22 @@ export const RosterModule: React.FC = () => {
         dateTo: activePeriod.date_to.slice(0, 10),
         schedulePeriodId: activePeriod.id
       });
+      if (!isCurrentIdentity(requestIdentity)) return;
       const created = applied.occurrences.filter(item => item.shiftId).length;
       const rejected = applied.occurrences.filter(item => item.status === 'REJECTED').length;
       setActionMessage(`${created} Schichtentwurf/Entwürfe erstellt; ${rejected} Vorkommen serverseitig abgelehnt. Die endgültige Prüfung bleibt der Veröffentlichung vorbehalten.`);
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
   const openDetails = async (shift: PlanningShift) => {
+    const requestIdentity = identityKey;
     setDetailsShift(shift);
     setAssignments([]);
     setFindings([]);
@@ -780,6 +909,7 @@ export const RosterModule: React.FC = () => {
         planningApi.listSwaps(),
         planningApi.coverRequests(undefined, shift.id)
       ]);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setAssignments(assignmentRows);
       const currentActualEmployee = assignmentRows.some(item =>
         item.status === 'assigned' && item.employee_id === shift.employeeId
@@ -789,22 +919,26 @@ export const RosterModule: React.FC = () => {
       setSwaps(swapRows.filter(item => item.shift_id === shift.id));
       setShiftCoverRequests(coverRows);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setDetailsLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setDetailsLoading(false);
     }
   };
 
   const assignEmployee = async (employeeId: string) => {
     if (!detailsShift || !canManage || !isOnline) return;
+    const requestIdentity = identityKey;
     setActionError('');
     setFindings([]);
     try {
       const result = await planningApi.assignEmployee(detailsShift.id, employeeId, detailsShift.revisionVersion ?? 1);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionMessage('Zuweisung serverseitig geprüft und gespeichert.');
       await openDetails({ ...detailsShift, revisionVersion: result.revisionVersion });
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
@@ -814,6 +948,7 @@ export const RosterModule: React.FC = () => {
   const requestSwap = async (event: FormEvent) => {
     event.preventDefault();
     if (!detailsShift || !canRequestSwap || !isOnline || !swapEmployeeId) return;
+    const requestIdentity = identityKey;
     const requesterId = detailsShift.employeeId || assignments.find(item => item.status === 'assigned')?.employee_id;
     if (!requesterId) {
       setActionError('Ein Diensttausch setzt eine bestehende Zuweisung voraus.');
@@ -826,11 +961,13 @@ export const RosterModule: React.FC = () => {
         expectedShiftVersion: detailsShift.revisionVersion ?? 1,
         reason: swapReason
       });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setSwapReason('');
       setSwapEmployeeId('');
       setActionMessage('Diensttausch wurde zur Entscheidung eingereicht.');
       await openDetails(detailsShift);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
@@ -839,13 +976,16 @@ export const RosterModule: React.FC = () => {
 
   const decideSwap = async (swap: ShiftSwap, decision: 'approved' | 'rejected') => {
     if (!canDecideSwap || !isOnline) return;
+    const requestIdentity = identityKey;
     if (!window.confirm(`Diensttausch ${decision === 'approved' ? 'genehmigen' : 'ablehnen'}?`)) return;
     try {
       await planningApi.decideSwap(swap.id, { decision, expectedVersion: swap.revision_version });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionMessage(`Diensttausch ${decision === 'approved' ? 'genehmigt' : 'abgelehnt'}.`);
       if (detailsShift) await openDetails(detailsShift);
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
@@ -855,19 +995,22 @@ export const RosterModule: React.FC = () => {
   const requestCover = async (event: FormEvent) => {
     event.preventDefault();
     if (!detailsShift || !canRequestCover || !isOnline) return;
+    const requestIdentity = identityKey;
+    const shiftId = detailsShift.id;
     setActionError('');
     try {
-      const mutationId = coverRequestMutationIds[detailsShift.id] ?? newClientMutationId();
-      setCoverRequestMutationIds(current => ({ ...current, [detailsShift.id]: mutationId }));
-      await planningApi.createCoverRequest(detailsShift.id, {
+      const mutationId = coverRequestMutationIds[shiftId] ?? newClientMutationId();
+      setCoverRequestMutationIds(current => ({ ...current, [shiftId]: mutationId }));
+      await planningApi.createCoverRequest(shiftId, {
         requestedEmployeeId: coverEmployeeId || undefined,
         expectedShiftVersion: detailsShift.revisionVersion ?? 1,
         clientMutationId: mutationId,
         reason: coverReason.trim()
       });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setCoverRequestMutationIds(current => {
         const next = { ...current };
-        delete next[detailsShift.id];
+        delete next[shiftId];
         return next;
       });
       setCoverEmployeeId('');
@@ -875,10 +1018,11 @@ export const RosterModule: React.FC = () => {
       setActionMessage('Vertretungsbedarf wurde serverseitig eingereicht.');
       await openDetails(detailsShift);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       if (!(error instanceof ApiError) || !error.isNetworkError) {
         setCoverRequestMutationIds(current => {
           const next = { ...current };
-          delete next[detailsShift.id];
+          delete next[shiftId];
           return next;
         });
       }
@@ -889,6 +1033,7 @@ export const RosterModule: React.FC = () => {
 
   const decideCover = async (request: CoverRequest, decision: 'approved' | 'rejected') => {
     if (!canDecideCover || !isOnline) return;
+    const requestIdentity = identityKey;
     const employeeId = request.requested_employee_id ?? coverDecisionEmployeeIds[request.id];
     if (decision === 'approved' && !employeeId) {
       setActionError('Für die Genehmigung muss eine Vertretung ausgewählt werden.');
@@ -904,6 +1049,7 @@ export const RosterModule: React.FC = () => {
         employeeId: decision === 'approved' ? employeeId : undefined,
         clientMutationId: mutationId
       });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setCoverDecisionMutationIds(current => {
         const next = { ...current };
         delete next[request.id];
@@ -911,10 +1057,12 @@ export const RosterModule: React.FC = () => {
       });
       setActionMessage(`Vertretungsantrag ${decision === 'approved' ? 'genehmigt' : 'abgelehnt'}.`);
       const refreshed = await planningApi.coverRequests();
+      if (!isCurrentIdentity(requestIdentity)) return;
       setAllCoverRequests(refreshed);
       if (detailsShift?.id === request.shift_id) await openDetails(detailsShift);
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       if (!(error instanceof ApiError) || !error.isNetworkError) {
         setCoverDecisionMutationIds(current => {
           const next = { ...current };
@@ -928,22 +1076,27 @@ export const RosterModule: React.FC = () => {
   };
 
   const loadCoverRequests = async () => {
+    const requestIdentity = identityKey;
     if (!canRead || !isOnline) return;
     setCoverListLoading(true);
     setActionError('');
     try {
-      setAllCoverRequests(await planningApi.coverRequests());
+      const requests = await planningApi.coverRequests();
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setAllCoverRequests(requests);
       setCoverListOpen(true);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setCoverListLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setCoverListLoading(false);
     }
   };
 
   const recordActualTime = async (event: FormEvent) => {
     event.preventDefault();
     if (!detailsShift || !canManageActuals || !isOnline) return;
+    const requestIdentity = identityKey;
     setActionError('');
     try {
       const actualKey = `${detailsShift.id}:${actualForm.employeeId}`;
@@ -958,6 +1111,7 @@ export const RosterModule: React.FC = () => {
         clientMutationId: mutationId,
         notes: actualForm.notes.trim() || undefined
       });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActualSavedRevision(saved.revision_version);
       setActualMutationIds(current => {
         const next = { ...current };
@@ -967,6 +1121,7 @@ export const RosterModule: React.FC = () => {
       setActualForm(current => ({ ...current, expectedVersion: saved.revision_version }));
       setActionMessage(`Ist-Zeit gespeichert (Revision ${saved.revision_version}). Weitere Korrekturen müssen diese aktuelle Revision angeben.`);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       if (!(error instanceof ApiError) || !error.isNetworkError) {
         const actualKey = `${detailsShift.id}:${actualForm.employeeId}`;
         setActualMutationIds(current => {
@@ -981,6 +1136,7 @@ export const RosterModule: React.FC = () => {
   };
 
   const loadReports = async () => {
+    const requestIdentity = identityKey;
     if (!canReport || !isOnline) return;
     setReportLoading(true);
     setActionError('');
@@ -991,15 +1147,17 @@ export const RosterModule: React.FC = () => {
         planningApi.qualifications(range.from, range.to),
         planningApi.absences(range.from, range.to)
       ]);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setWorkHours(hours);
       setReportCoverage(cover);
       setReportQualifications(qualifications);
       setReportAbsences(absences);
       setReportOpen(true);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setReportLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setReportLoading(false);
     }
   };
 
