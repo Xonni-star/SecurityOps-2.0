@@ -480,7 +480,8 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       .send({
         dateFrom: '2027-01-10',
         dateTo: '2027-01-10',
-        schedulePeriodId: period.body.data.id
+        schedulePeriodId: period.body.data.id,
+        clientMutationId: `template-boundary-${Date.now()}`
       });
     expect(applied.status).toBe(201);
     expect(applied.body.data.occurrences).toEqual([
@@ -495,6 +496,129 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       [testTenantA, period.body.data.id]
     ));
     expect(shifts.rows).toHaveLength(0);
+  });
+
+  test('Planning templates support revisioned edits, deactivation, and reactivation', async () => {
+    const template = await request(app).post('/api/v1/planning/templates').set(authHeaders(testTokenA)).send({
+      siteId: siteAId,
+      name: `Lifecycle ${Date.now()}`,
+      startTime: '08:00',
+      endTime: '16:00',
+      requiredQualification: 'Sachkunde',
+      frequency: 'WEEKLY',
+      interval: 1,
+      weekdays: [1, 3, 5]
+    });
+    expect(template.status).toBe(201);
+    expect(template.body.data).toMatchObject({ active: true, revision_version: 1 });
+
+    const deactivated = await request(app)
+      .patch(`/api/v1/planning/templates/${template.body.data.id}`)
+      .set(authHeaders(testTokenA))
+      .send({ expectedVersion: 1, active: false });
+    expect(deactivated.status).toBe(200);
+    expect(deactivated.body.data).toMatchObject({ active: false, revision_version: 2 });
+
+    const stale = await request(app)
+      .patch(`/api/v1/planning/templates/${template.body.data.id}`)
+      .set(authHeaders(testTokenA))
+      .send({ expectedVersion: 1, name: 'Stale template edit' });
+    expect(stale.status).toBe(409);
+    expect(stale.body.currentVersion).toBe(2);
+
+    const inactiveApply = await request(app)
+      .post(`/api/v1/planning/templates/${template.body.data.id}/apply`)
+      .set(authHeaders(testTokenA))
+      .send({
+        dateFrom: '2027-01-11', dateTo: '2027-01-11',
+        clientMutationId: `inactive-template-${Date.now()}`
+      });
+    expect(inactiveApply.status).toBe(404);
+
+    const reactivated = await request(app)
+      .patch(`/api/v1/planning/templates/${template.body.data.id}`)
+      .set(authHeaders(testTokenA))
+      .send({
+        expectedVersion: 2,
+        active: true,
+        startTime: '09:00',
+        endTime: '17:00',
+        weekdays: [2, 4]
+      });
+    expect(reactivated.status).toBe(200);
+    expect(reactivated.body.data).toMatchObject({
+      active: true,
+      revision_version: 3,
+      local_start_time: '09:00:00',
+      recurrence: { frequency: 'WEEKLY', interval: 1, weekdays: [2, 4] }
+    });
+    const application = {
+      dateFrom: '2027-01-12',
+      dateTo: '2027-01-12',
+      clientMutationId: `template-apply-${Date.now()}`
+    };
+    const applied = await request(app)
+      .post(`/api/v1/planning/templates/${template.body.data.id}/apply`)
+      .set(authHeaders(testTokenA)).send(application);
+    expect(applied.status).toBe(201);
+    const replay = await request(app)
+      .post(`/api/v1/planning/templates/${template.body.data.id}/apply`)
+      .set(authHeaders(testTokenA)).send(application);
+    expect(replay.status).toBe(200);
+    expect(replay.body.data).toMatchObject({ replayed: true });
+    const changedReuse = await request(app)
+      .post(`/api/v1/planning/templates/${template.body.data.id}/apply`)
+      .set(authHeaders(testTokenA))
+      .send({ ...application, dateTo: '2027-01-14' });
+    expect(changedReuse.status).toBe(409);
+    const generated = await withTenantTransaction(testTenantA, tx => tx.query(
+      `SELECT count(*)::int AS count FROM shifts
+        WHERE tenant_id=$1 AND site_id=$2 AND shift_date='2027-01-12' AND start_time='09:00:00'`,
+      [testTenantA, siteAId]
+    ));
+    expect(generated.rows[0].count).toBe(1);
+    const audit = await withTenantTransaction(testTenantA, tx => tx.query(
+      `SELECT event_type,entity_id FROM planning_audit_events
+        WHERE tenant_id=$1 AND entity_type='schedule_template' AND entity_id=$2
+        ORDER BY created_at,id`,
+      [testTenantA, template.body.data.id]
+    ));
+    expect(audit.rows.map(row => row.event_type)).toEqual([
+      'template.created', 'template.updated', 'template.updated', 'template.applied'
+    ]);
+  });
+
+  test('Overlapping approved rule profiles block validation instead of selecting one silently', async () => {
+    for (const [suffix, threshold] of [['one', 600], ['two', 540]] as const) {
+      const profile = await request(app).post('/api/v1/planning/rule-profiles')
+        .set(authHeaders(testTokenA)).send({
+          name: `Ambiguous ${suffix} ${Date.now()}`,
+          scope: { siteId: siteAId },
+          effectiveFrom: '2027-02-10',
+          effectiveUntil: '2027-02-20',
+          sourceName: `Test-ambiguous-${suffix}`,
+          sourceReference: `fixture:ambiguous-${suffix}`,
+          rules: [{ code: 'maximum_shift_minutes', value: threshold, source: `fixture:${suffix}` }]
+        });
+      expect(profile.status).toBe(201);
+      const approved = await request(app)
+        .post(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}/versions/${profile.body.data.version.id}/approve`)
+        .set(authHeaders(planningApproverToken)).send({});
+      expect(approved.status).toBe(200);
+    }
+
+    const shift = await request(app).post('/api/v1/planning/shifts').set(authHeaders(testTokenA)).send({
+      siteId: siteAId,
+      date: '2027-02-10',
+      startTime: '08:00',
+      endTime: '16:00',
+      requiredQualification: 'Sachkunde',
+      clientMutationId: `ambiguous-profile-shift-${Date.now()}`
+    });
+    expect(shift.status).toBe(422);
+    expect(shift.body.data.findings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'RULE_PROFILE_AMBIGUOUS', severity: 'blocking' })
+    ]));
   });
 
   test('Planning templates, approved sourced rules, cover approval, actuals and configured reports', async () => {
@@ -514,6 +638,32 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     expect(templates.body.data).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: template.body.data.id, active: true })
     ]));
+    const suggestionShift = await request(app).post('/api/v1/planning/shifts')
+      .set(authHeaders(testTokenA)).send({
+        siteId: siteAId, date: '2027-01-15', startTime: '08:00', endTime: '16:00',
+        requiredQualification: 'Sachkunde', clientMutationId: `suggestion-shift-${Date.now()}`
+      });
+    expect(suggestionShift.status).toBe(201);
+    const suggestions = await request(app)
+      .get(`/api/v1/planning/shifts/${suggestionShift.body.data.shift.id}/staffing-suggestions`)
+      .set(authHeaders(testTokenA));
+    expect(suggestions.status).toBe(200);
+    expect(suggestions.body.data).toMatchObject({ finalAssignmentRequiresConfirmation: true });
+    expect(suggestions.body.data.requirements).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        qualificationType: 'Sachkunde',
+        candidates: expect.arrayContaining([
+          expect.objectContaining({
+            employeeId: guardAId, eligible: true,
+            reasons: expect.arrayContaining(['active', 'site_assigned', 'qualified'])
+          })
+        ])
+      })
+    ]));
+    const unauthorizedSuggestions = await request(app)
+      .get(`/api/v1/planning/shifts/${suggestionShift.body.data.shift.id}/staffing-suggestions`)
+      .set(authHeaders(planningDeniedToken));
+    expect(unauthorizedSuggestions.status).toBe(403);
 
     const profile = await request(app).post('/api/v1/planning/rule-profiles')
       .set(authHeaders(testTokenA)).send({
@@ -559,6 +709,37 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       .set(authHeaders(testTokenA))
       .send({ employeeId: guardAId, expectedVersion: actualShift.body.data.shift.revision_version });
     expect(assigned.status).toBe(200);
+    const emptyActual = await request(app)
+      .get(`/api/v1/planning/shifts/${actualShift.body.data.shift.id}/actual-time`)
+      .query({ employeeId: guardAId }).set(authHeaders(testTokenA));
+    expect(emptyActual.status).toBe(200);
+    expect(emptyActual.body.data).toEqual({ current: null, history: [] });
+    const foreignShiftId = await withTenantTransaction(testTenantB, async tx => {
+      const client = await tx.query(
+        `INSERT INTO clients
+          (tenant_id,client_number,company_name,contact_person,email,phone,address,contract_start,contract_end)
+         VALUES ($1,$2,'Foreign actuals','Contact','foreign.actuals@example.test','030','Address','2025-01-01','2028-01-01')
+         RETURNING id`,
+        [testTenantB, `FOREIGN-ACTUALS-${Date.now()}`]
+      );
+      const site = await tx.query(
+        `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+         VALUES ($1,$2,$3,'Foreign site','Address') RETURNING id`,
+        [testTenantB, client.rows[0].id, `SITE-${Date.now()}`]
+      );
+      const foreignShift = await tx.query(
+        `INSERT INTO shifts
+          (tenant_id,site_id,shift_date,end_date,start_time,end_time,type,status,required_qualification)
+         VALUES ($1,$2,'2027-01-11','2027-01-11','08:00','16:00','Tagdienst','Offen','Sachkunde')
+         RETURNING id`,
+        [testTenantB, site.rows[0].id]
+      );
+      return foreignShift.rows[0].id as string;
+    });
+    const foreignActualRead = await request(app)
+      .get(`/api/v1/planning/shifts/${foreignShiftId}/actual-time`)
+      .query({ employeeId: guardAId }).set(authHeaders(testTokenA));
+    expect(foreignActualRead.status).toBe(404);
 
     const actualPayload = {
       employeeId: guardAId,
@@ -584,6 +765,24 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       });
     expect(corrected.status).toBe(200);
     expect(corrected.body.data.revision_version).toBe(2);
+    const currentActual = await request(app)
+      .get(`/api/v1/planning/shifts/${actualShift.body.data.shift.id}/actual-time`)
+      .query({ employeeId: guardAId }).set(authHeaders(testTokenA));
+    expect(currentActual.status).toBe(200);
+    expect(currentActual.body.data.current).toMatchObject({
+      id: actual.body.data.id, employee_id: guardAId, revision_version: 2
+    });
+    expect(currentActual.body.data.history).toHaveLength(2);
+    const actualHistory = await withTenantTransaction(testTenantA, tx => tx.query(
+      `SELECT event_type,details FROM planning_audit_events
+        WHERE tenant_id=$1 AND entity_type='shift_actual_time' AND entity_id=$2
+        ORDER BY created_at,id`,
+      [testTenantA, actual.body.data.id]
+    ));
+    expect(actualHistory.rows.map(row => row.event_type)).toEqual([
+      'shift.actual_time.recorded', 'shift.actual_time.corrected'
+    ]);
+    expect(actualHistory.rows[1].details.previous).toMatchObject({ revision_version: 1 });
     const staleActual = await request(app).post(`/api/v1/planning/shifts/${actualShift.body.data.shift.id}/actual-time`)
       .set(authHeaders(testTokenA)).send({
         ...actualPayload, expectedVersion: 1, clientMutationId: `actual-stale-${Date.now()}`
@@ -599,6 +798,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       .post(`/api/v1/planning/shifts/${actualShift.body.data.shift.id}/actual-time`)
       .set(authHeaders(planningDeniedToken)).send(actualPayload);
     expect(unauthorizedActual.status).toBe(403);
+    const unauthorizedActualRead = await request(app)
+      .get(`/api/v1/planning/shifts/${actualShift.body.data.shift.id}/actual-time`)
+      .query({ employeeId: guardAId }).set(authHeaders(planningDeniedToken));
+    expect(unauthorizedActualRead.status).toBe(403);
 
     const coverEmployeeId = await withTenantTransaction(testTenantA, async tx => {
       const employee = await tx.query(
@@ -671,6 +874,17 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
         planned_night_shifts: 1, actual_night_shifts: 1
       })
     ]));
+    await withTenantTransaction(testTenantA, tx => tx.query(
+      'UPDATE employees SET first_name=$1,last_name=$2 WHERE tenant_id=$3 AND id=$4',
+      [' \t=1+1', '@SUM(1,1)', testTenantA, guardAId]
+    ));
+    const csv = await request(app)
+      .get('/api/v1/planning/reports/work-hours?from=2027-01-11&to=2027-01-11&format=csv')
+      .set(authHeaders(testTokenA));
+    expect(csv.status).toBe(200);
+    expect(csv.headers['content-type']).toContain('text/csv');
+    expect(csv.text).toContain(`"' \t=1+1"`);
+    expect(csv.text).toContain(`"'@SUM(1,1)"`);
     expect(workHours.body.data[0].calendar.night.sources).toEqual(expect.arrayContaining([
       expect.objectContaining({
         nightWindowStart: expect.objectContaining({ profileVersionId: versionId, ruleSource: 'fixture:night-window' })

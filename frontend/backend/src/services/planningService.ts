@@ -15,6 +15,7 @@ export interface ShiftCandidate extends LocalShiftTime {
   tenantId: string;
   siteId: string;
   employeeId?: string | null;
+  lockEmployee?: boolean;
   requiredQualification: string;
   breakMinutes?: number;
   excludeShiftId?: string;
@@ -252,7 +253,7 @@ export async function validateShiftCandidate(
   const findings: PlanningFinding[] = [];
   let profileVersionId: string | undefined;
   const profile = await client.query(
-    `SELECT v.id, v.source_name, v.rules
+    `SELECT v.id, p.scope, v.source_name, v.rules
        FROM schedule_rule_profile_versions v
        JOIN schedule_rule_profiles p ON p.id=v.profile_id AND p.tenant_id=v.tenant_id
       WHERE v.tenant_id=$1 AND p.active=TRUE
@@ -261,12 +262,25 @@ export async function validateShiftCandidate(
         AND v.effective_from <= $2::date
         AND (v.effective_until IS NULL OR v.effective_until >= $2::date)
       ORDER BY v.effective_from DESC, v.version_number DESC
-      LIMIT 1`,
+      `,
     [candidate.tenantId, candidate.date, candidate.siteId]
   );
-  const rules = profile.rows[0]?.rules;
-  profileVersionId = profile.rows[0]?.id;
-  const ruleSource = profile.rows[0]?.source_name as string | undefined;
+  const siteSpecificProfiles = profile.rows.filter(row => row.scope?.siteId === candidate.siteId);
+  const applicableProfiles = siteSpecificProfiles.length
+    ? siteSpecificProfiles
+    : profile.rows.filter(row => typeof row.scope?.siteId !== 'string');
+  const selectedProfile = applicableProfiles.length === 1 ? applicableProfiles[0] : undefined;
+  const rules = selectedProfile?.rules;
+  profileVersionId = selectedProfile?.id;
+  const ruleSource = selectedProfile?.source_name as string | undefined;
+  if (applicableProfiles.length > 1) {
+    findings.push({
+      code: 'RULE_PROFILE_AMBIGUOUS',
+      severity: 'blocking',
+      message: 'Mehrere aktive, freigegebene Regelprofilrevisionen gelten gleichzeitig für diesen Einsatz.',
+      details: { profileVersionIds: applicableProfiles.map(row => row.id) }
+    });
+  }
   const addRuleFinding = (
     code: string,
     message: string,
@@ -343,7 +357,9 @@ export async function validateShiftCandidate(
   }
   if (!candidate.employeeId) return { resolved, findings, profileVersionId };
 
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${candidate.tenantId}:employee-shift:${candidate.employeeId}`]);
+  if (candidate.lockEmployee !== false) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${candidate.tenantId}:employee-shift:${candidate.employeeId}`]);
+  }
   const employee = await client.query(
     `SELECT status, archived_at
        FROM employees WHERE tenant_id=$1 AND id=$2`,

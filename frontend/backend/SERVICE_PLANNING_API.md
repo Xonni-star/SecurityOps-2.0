@@ -10,12 +10,14 @@ This document is the stable backend contract for the Phase 2 frontend integratio
 | `POST /planning/shifts` | `planning:manage` | Create a server-validated draft shift, optionally linked to a draft period. |
 | `GET /planning/shifts/:id/assignments` | `planning:read` | List current and released staffing assignments. |
 | `POST /planning/shifts/:id/assignments` | `planning:manage` | Assign an employee after full server-side revalidation. |
+| `GET /planning/shifts/:id/staffing-suggestions` | `planning:read` | Explainable, non-binding qualified candidate suggestions; supports `page`, `pageSize` (1–50, default 20). |
 | `GET /planning/periods` | `planning:read` | Paginated schedule periods. |
 | `POST /planning/periods` | `planning:manage` | Create a draft schedule period. |
 | `POST /planning/periods/:id/publish` | `planning:publish` | Revalidate and publish a period atomically. |
 | `GET /planning/findings` | `planning:read` | Paginated stored findings; optional `shiftId`. |
 | `GET /planning/templates` | `planning:read` | Paginated recurring templates; optional `siteId`, `includeInactive=true`. |
 | `POST /planning/templates` | `planning:manage` | Create a daily or weekly local-time template. |
+| `PATCH /planning/templates/:templateId` | `planning:manage` | Revision-checked template edit or activation/deactivation. |
 | `POST /planning/templates/:templateId/apply` | `planning:manage` | Generate draft occurrences across a bounded date range. |
 | `GET /planning/rule-profiles` | `planning:read` | Paginated profiles with version summaries. |
 | `GET /planning/rule-profiles/:profileId/versions` | `planning:read` | Paginated profile revisions. |
@@ -31,6 +33,7 @@ This document is the stable backend contract for the Phase 2 frontend integratio
 | `POST /planning/shifts/:id/cover-requests` | `planning:covers:manage` | Request coverage for an unfilled shift. |
 | `GET /planning/cover-requests` | `planning:read` | Paginated cover requests; optional `status`, `shiftId`. |
 | `POST /planning/cover-requests/:requestId/decision` | `planning:covers:approve` | Approve/reject coverage; approval validates and assigns the employee. |
+| `GET /planning/shifts/:id/actual-time` | `planning:read` | Read the current actual-time record/version and its audit history for `employeeId`. |
 | `POST /planning/shifts/:id/actual-time` | `planning:actuals:manage` | Record or correct an assigned employee's actual time, with audit and optimistic versioning. |
 | `GET /planning/reports/work-hours` | `planning:reports:read` | Planned/actual work hours and configured calendar/overtime summaries; optional `format=csv`. |
 | `GET /planning/reports/coverage` | `planning:reports:read` | Shift staffing demand and qualified coverage. |
@@ -77,6 +80,14 @@ Success response: `{ "success": true, "data": { "replayed": false, "shift": { "i
 
 Assign with `{ "employeeId": "uuid", "expectedVersion": 1, "breakMinutes": 30 }`. A success response has `data.assignmentId` and the incremented `data.revisionVersion`. A stale version returns 409 `REVISION_CONFLICT`; a blocking validation result returns 409 `PLANNING_VALIDATION_FAILED` with `data.findings[]` and `data.validationRunId`.
 
+Get non-binding staffing suggestions with:
+
+```http
+GET /planning/shifts/:id/staffing-suggestions?page=1&pageSize=20
+```
+
+The response is `{ "success": true, "data": { "shiftId": "uuid", "requirements": [{ "qualificationType", "requiredCount", "assignedCount", "shortfall", "candidates": [{ "employeeId", "firstName", "lastName", "eligible", "scheduledMinutesThisWeek", "reasons": [], "findings": [] }], "pagination": { "page", "pageSize", "total", "pages" } }], "finalAssignmentRequiresConfirmation": true } }`. Candidates are active, site-assigned employees with the required verified qualification valid through the shift's end date. Each is rechecked for approved absences, overlapping work, configured work/rest rules, and current availability. Eligible candidates are ordered by scheduled minutes in their local Monday–Sunday week, then name and ID; this is a deterministic workload ordering, not a legal or fairness guarantee. Blocking findings make a candidate ineligible. Suggestions do not assign staff; use the assignment endpoint to revalidate and commit a selection.
+
 Publish with `{ "expectedVersion": 1 }`. It returns `{ "success": true, "data": { "period": { "id", "status", "revision_version", "published_at" }, "runIds": [] } }`. It locks and revalidates all non-cancelled shifts and assignments, including the complete persisted interval and period boundaries; any blocking finding leaves the period unpublished and returns 422. Successful publication increments period and shift revisions. Published schedules cannot be directly changed or deleted.
 
 ## Templates
@@ -99,7 +110,15 @@ Create:
 
 `timeZone`, `interval` and `weekdays` are optional; frequency is `DAILY` or `WEEKLY`; weekly templates require weekday integers 0–6 (Sunday=0). Create returns 201 and a row with template ID, site, local times, recurrence, active flag, and revision. Listing returns the same rows plus pagination.
 
-Apply with `{ "dateFrom": "2027-01-01", "dateTo": "2027-01-31", "schedulePeriodId": "uuid" }`; the period ID is optional. The range is at most 366 days. Response: `{ "success": true, "data": { "occurrences": [{ "date", "status", "shiftId?", "findings?" }], "finalValidationRequired": true } }`. Valid occurrences are `draft`; nonexistent/ambiguous local times and occurrences whose end date exceeds the selected period are `REJECTED` with blocking findings and are not inserted. An out-of-range request or non-draft period is rejected at request level.
+Apply with `{ "dateFrom": "2027-01-01", "dateTo": "2027-01-31", "schedulePeriodId?": "uuid", "clientMutationId": "key" }`; the period ID is optional. The range is at most 366 days. Response: `{ "success": true, "data": { "occurrences": [{ "date", "status", "shiftId?", "findings?" }], "finalValidationRequired": true, "replayed?": true } }`. Valid occurrences are `draft`; nonexistent/ambiguous local times and occurrences whose end date exceeds the selected period are `REJECTED` with blocking findings and are not inserted. An out-of-range request or non-draft period is rejected at request level. An identical mutation retry returns 200 with `replayed: true`; reusing the key with a different template/range/period returns 409 `IDEMPOTENCY_KEY_REUSED`.
+
+Edit, activate, or deactivate using a partial template body and the current `expectedVersion`:
+
+```json
+{ "expectedVersion": 2, "active": false }
+```
+
+Editable fields are `siteId`, `name`, `timeZone`, `startTime`, `endTime`, `requiredQualification`, `frequency`, `interval`, and `weekdays`; `active` toggles future use and provides archive/deactivation semantics. The response is `{ "success": true, "data": <template row with revision_version> }`. A stale version returns 409 `REVISION_CONFLICT` with `currentVersion`; malformed, empty, or incomplete weekly recurrence updates are rejected. Applying an inactive template returns 404. Template edits affect future applications only; shifts already generated remain unchanged. Apply locks the template for the duration of generation, while edits lock the template row, preventing mixed-revision occurrences. There is no hard-delete endpoint; copy by creating a new template with the desired fields (no separate copy operation exists).
 
 ## Rule profiles and exceptions
 
@@ -117,7 +136,7 @@ Create a profile (creates version 1 in `draft`):
 }
 ```
 
-Each rule is `{ "code", "value", "source", "severity?" }`; severity is `blocking` by default or `warning`. Supported codes: `minimum_rest_minutes`, `maximum_shift_minutes`, `maximum_weekly_minutes`, `overtime_threshold_weekly_minutes`, `minimum_break_minutes`, `break_after_minutes`, `disallowed_weekdays`, `weekend_weekdays`, `sunday_work_allowed`, `holiday_dates`, `night_window_start_minute`, `night_window_end_minute`, and `night_work_allowed`. Values are numbers, booleans, or arrays appropriate to the code (weekday numbers are 0–6; holiday dates are ISO local dates). The tenant supplies every threshold/calendar value and its source; the application does not assert legal or tariff compliance.
+Each rule is `{ "code", "value", "source", "severity?" }`; severity is `blocking` by default or `warning`. Supported codes: `minimum_rest_minutes`, `maximum_shift_minutes`, `maximum_weekly_minutes`, `overtime_threshold_weekly_minutes`, `minimum_break_minutes`, `break_after_minutes`, `disallowed_weekdays`, `weekend_weekdays`, `sunday_work_allowed`, `holiday_dates`, `night_window_start_minute`, `night_window_end_minute`, and `night_work_allowed`. Values are numbers, booleans, or arrays appropriate to the code (weekday numbers are 0–6; holiday dates are ISO local dates). Rule codes cannot be repeated within a version. The currently supported profile scope is tenant-wide `{}` or one site `{ "siteId": "uuid" }`; employee-group and employment-type scopes from the broader target specification are not implemented. Site-scoped profiles take precedence over tenant-wide profiles as a whole (rules are not merged). If multiple approved versions at the selected scope apply to the same date, scheduling validation blocks with `RULE_PROFILE_AMBIGUOUS` instead of silently selecting one. The tenant supplies every threshold/calendar value and its source; the application does not assert legal or tariff compliance.
 
 Create returns `{ "success": true, "data": { "profile": { "id", "name", "scope" }, "version": { "id", "profile_id", "version_number", "effective_from", "effective_until", "source_name", "source_reference", "rules", "status" } } }`. Profile listing includes `version_id`, `version_number`, source/effective dates, rules, draft/approved status, and approval metadata. Version listing returns those version fields in `data[]` plus pagination. Activate/deactivate with `{ "active": true }`. Approve with an empty JSON object; creator self-approval is forbidden (403), and only draft versions can be approved (409). Only active, approved, effective versions apply.
 
@@ -147,6 +166,10 @@ Record/correct actual time with:
 
 Timestamps must include an explicit offset and actual end must be after start; break cannot exceed elapsed duration. The employee must have an active assignment. Use version `0` to create the first record and the current `revision_version` to correct it. First save returns 201; a correction returns 200 with `data` containing actual ID, shift/employee IDs, timestamps, break, revision, recorder/time and notes. Identical retries return the saved response; key reuse with different content returns 409 `IDEMPOTENCY_KEY_REUSED`. Every create/correction writes an audit event.
 
+There is no separate actual-time approval workflow in this backend layer: `planning:actuals:manage` permits recording/correction, and captured actuals are immediately included in reports. Immutable `planning_audit_events` preserve each record/correction and the previous-value snapshot; read history with `GET /planning/audit?entityId=<actual-time-id>` under `planning:read`. Consumers must not treat a recorded value as an independently approved payroll result.
+
+Read the current record after reload with `GET /planning/shifts/:id/actual-time?employeeId=<uuid>`. It returns `{ "success": true, "data": { "current": actualTime|null, "history": [{ "id", "actor_user_id", "event_type", "details", "created_at" }] } }`. `current` contains the persisted `revision_version` needed as the next `expectedVersion`; when no record exists it is `null` and `history` is empty. The history is sourced from immutable audit events, including the previous snapshot on corrections. A foreign or missing shift returns 404.
+
 ## Reports and audit
 
 All reports require `from` and `to` ISO dates and allow at most 367 inclusive calendar days. Work-hours JSON is `{ "success": true, "data": [employeeSummary, ...], "range": { "from", "to" } }`. Each employee summary includes assigned shift count, `planned_hours`, nullable `actual_hours`, `actual_status` (`unavailable`, `partial`, `complete`), nullable `overtime_hours`, `overtime_status` (`unavailable`, `partial`, `unconfigured`, `ambiguous`, `available`), `overtime_sources`, and planned/actual weekend, holiday, and night shift summaries. The nested `calendar` object has per metric `{ "plannedShifts": number|null, "plannedStatus", "actualShifts": number|null, "actualStatus", "sources": [] }`. Missing actual records are never treated as zero. Overtime is calculated only with a unique, approved, effective source-tagged `overtime_threshold_weekly_minutes` profile and complete actuals; no configured value yields `null` and `unconfigured`. Weekend, holiday, and night values likewise require the relevant configured tenant calendar/window and report their sources/status. `format=csv` produces a downloadable CSV with these aggregate columns.
@@ -170,3 +193,5 @@ Revision mismatches return HTTP 409 `REVISION_CONFLICT`. All mutations use exact
 Legacy `/shifts` CRUD remains available under `shifts:read` / `shifts:manage`; updates require `revisionVersion` and use the same validation, full interval, and period-boundary checks. The backend reuses existing employee, qualification, absence, site-assignment, site, and client masters. It does not create duplicate personnel/site/customer records.
 
 Migration `030_service_planning.sql` and `031_planning_cover_actuals.sql` add the planning schema and actual/cover storage, site IANA time zone, persisted shift end date/instants, source/versioned rules, tenant-aware composite foreign keys, `ENABLE ROW LEVEL SECURITY` plus `FORCE ROW LEVEL SECURITY` on tenant tables, and least-privilege app-role grants. Local queued edits, drafts, validation findings and reports are not proof of legal compliance; values missing from tenant configuration or actual-time records remain explicitly unavailable/unconfigured.
+
+Planning mutations and reports do not currently create user-facing notifications; pending cover/swap requests and findings are retrieved through their list endpoints, and completed decisions are auditable. The API applies a global per-IP limit from `RATE_LIMIT_MAX` requests per minute (default 120). Its in-process store is not shared across backend replicas, so multi-instance production deployments should enforce a shared gateway limit, especially for candidate suggestions, template application, reports, and CSV export. The CSV export prefixes spreadsheet formula-leading text (including values with leading whitespace/control characters) with an apostrophe before quoting; this protects spreadsheet consumers while preserving the original value visibly.

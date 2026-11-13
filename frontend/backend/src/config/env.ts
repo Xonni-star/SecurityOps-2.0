@@ -18,7 +18,7 @@ const envSchema = z.object({
   // damit JWT-Ablauf und Sitzungs-Ablaufzeit garantiert identisch sind.
   JWT_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, 'JWT_EXPIRES_IN muss dem Format <Zahl><s|m|h|d> entsprechen (z. B. 8h).').default('8h'),
   CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss konfiguriert sein.'),
-  RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10))
+  RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10)).pipe(z.number().int().positive())
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

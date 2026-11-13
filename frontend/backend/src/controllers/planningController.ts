@@ -97,23 +97,49 @@ const ruleSchema = z.object({
   }
 });
 
-const ruleProfileFieldsSchema = z.object({
+const ruleProfileFieldsBaseSchema = z.object({
   name: z.string().min(2).max(160),
-  scope: z.record(z.string(), z.unknown()).default({}),
+  scope: z.object({ siteId: uuidSchema.optional() }).strict().default({}),
   effectiveFrom: dateSchema,
   effectiveUntil: dateSchema.nullable().optional(),
   sourceName: z.string().min(2).max(255),
   sourceReference: z.string().min(2).max(2000),
   rules: z.array(ruleSchema).min(1).max(100)
 }).strict();
+
+function requireUniqueRuleCodes(
+  value: { rules: Array<{ code: string }> },
+  ctx: z.RefinementCtx
+): void {
+  const seen = new Set<string>();
+  value.rules.forEach((rule, index) => {
+    if (seen.has(rule.code)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['rules', index, 'code'],
+        message: 'Ein Regelcode darf innerhalb einer Revision nur einmal vorkommen.'
+      });
+    }
+    seen.add(rule.code);
+  });
+}
+
+const ruleProfileFieldsSchema = ruleProfileFieldsBaseSchema.superRefine(requireUniqueRuleCodes);
 const ruleProfileSchema = ruleProfileFieldsSchema.refine(value =>
   !value.effectiveUntil || value.effectiveUntil >= value.effectiveFrom, {
   path: ['effectiveUntil'], message: 'effectiveUntil darf nicht vor effectiveFrom liegen.'
 });
-const ruleVersionSchema = ruleProfileFieldsSchema.omit({ name: true, scope: true }).refine(value =>
-  !value.effectiveUntil || value.effectiveUntil >= value.effectiveFrom, {
-  path: ['effectiveUntil'], message: 'effectiveUntil darf nicht vor effectiveFrom liegen.'
-});
+const ruleVersionSchema = ruleProfileFieldsBaseSchema.omit({ name: true, scope: true })
+  .superRefine((value, ctx) => {
+    requireUniqueRuleCodes(value, ctx);
+    if (value.effectiveUntil && value.effectiveUntil < value.effectiveFrom) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['effectiveUntil'],
+        message: 'effectiveUntil darf nicht vor effectiveFrom liegen.'
+      });
+    }
+  });
 
 const templateSchema = z.object({
   siteId: uuidSchema,
@@ -127,6 +153,22 @@ const templateSchema = z.object({
   weekdays: z.array(z.number().int().min(0).max(6)).max(7).optional()
 }).strict().refine(value => value.frequency !== 'WEEKLY' || Boolean(value.weekdays?.length), {
   path: ['weekdays'], message: 'Wöchentliche Vorlagen benötigen mindestens einen Wochentag.'
+});
+
+const templateUpdateSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  siteId: uuidSchema.optional(),
+  name: z.string().min(2).max(160).optional(),
+  timeZone: timeZoneSchema.optional(),
+  startTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
+  endTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
+  requiredQualification: z.string().min(2).max(100).optional(),
+  frequency: z.enum(['DAILY', 'WEEKLY']).optional(),
+  interval: z.number().int().min(1).max(52).optional(),
+  weekdays: z.array(z.number().int().min(0).max(6)).max(7).optional(),
+  active: z.boolean().optional()
+}).strict().refine(value => Object.keys(value).some(key => key !== 'expectedVersion'), {
+  message: 'Mindestens ein Vorlagenfeld muss geändert werden.'
 });
 
 const swapSchema = z.object({
@@ -173,13 +215,22 @@ function ruleFor(rules: unknown, code: string): { value: unknown; source?: strin
   return found;
 }
 
-function selectReportProfile(profiles: ReportRuleProfile[], siteId: string, date: string): ReportRuleProfile | undefined {
-  return profiles.find(profile => {
+function selectReportProfile(
+  profiles: ReportRuleProfile[],
+  siteId: string,
+  date: string
+): { profile?: ReportRuleProfile; ambiguous: boolean } {
+  const matching = profiles.filter(profile => {
     const scopeSite = profile.scope?.siteId;
     return dateOnly(profile.effective_from) <= date &&
       (!profile.effective_until || dateOnly(profile.effective_until) >= date) &&
       (typeof scopeSite !== 'string' || scopeSite === siteId);
   });
+  const siteSpecific = matching.filter(profile => profile.scope?.siteId === siteId);
+  const applicable = siteSpecific.length ? siteSpecific : matching.filter(profile => typeof profile.scope?.siteId !== 'string');
+  return applicable.length === 1
+    ? { profile: applicable[0], ambiguous: false }
+    : { ambiguous: applicable.length > 1 };
 }
 
 const calendarFormatters = new Map<string, Intl.DateTimeFormat>();
@@ -622,6 +673,195 @@ export async function listShiftAssignments(req: Request, res: Response, next: Ne
       [tenantId, shiftId]
     ));
     res.json({ success: true, data: result.rows });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listStaffingSuggestions(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const shiftId = uuidSchema.parse(req.params.id);
+    const page = z.coerce.number().int().min(1).default(1).parse(req.query.page);
+    const pageSize = z.coerce.number().int().min(1).max(50).default(20).parse(req.query.pageSize);
+    const tenantId = req.user!.tenantId;
+    const result = await withTenantTransaction(tenantId, async client => {
+      const shiftResult = await client.query(
+        `SELECT id,site_id,shift_date::text AS shift_date,end_date::text AS end_date,
+                start_time,end_time,starts_at,ends_at,time_zone,break_minutes,
+                required_qualification,planning_status
+           FROM shifts WHERE tenant_id=$1 AND id=$2`,
+        [tenantId, shiftId]
+      );
+      if (!shiftResult.rows.length) return undefined;
+      const shift = shiftResult.rows[0];
+      if (shift.planning_status === 'cancelled') return { cancelled: true as const };
+      const requirementResult = await client.query(
+        `SELECT qualification_type,required_count
+           FROM shift_staffing_requirements
+          WHERE tenant_id=$1 AND shift_id=$2
+          UNION ALL
+         SELECT s.required_qualification,1
+           FROM shifts s
+          WHERE s.tenant_id=$1 AND s.id=$2
+            AND NOT EXISTS (
+              SELECT 1 FROM shift_staffing_requirements r
+               WHERE r.tenant_id=s.tenant_id AND r.shift_id=s.id
+            )
+          ORDER BY qualification_type`,
+        [tenantId, shiftId]
+      );
+      const weekFrom = localWeekStart(shift.shift_date);
+      const weekEndDate = new Date(`${weekFrom}T12:00:00Z`);
+      weekEndDate.setUTCDate(weekEndDate.getUTCDate() + 7);
+      const weekTo = weekEndDate.toISOString().slice(0, 10);
+      const weekBounds = await client.query(
+        `SELECT ($1::date::timestamp AT TIME ZONE $3) AS starts_at,
+                ($2::date::timestamp AT TIME ZONE $3) AS ends_at`,
+        [weekFrom, weekTo, shift.time_zone]
+      );
+      const candidatesByRequirement = await Promise.all(requirementResult.rows.map(async requirement => {
+        const parameters = [tenantId, shift.site_id, requirement.qualification_type, shift.end_date] as const;
+        const assignedCountResult = await client.query(
+          `SELECT count(DISTINCT employee_id)::int AS count
+             FROM (
+               SELECT a.employee_id
+                 FROM shift_staffing_assignments a
+                 JOIN employee_qualifications q
+                   ON q.tenant_id=a.tenant_id AND q.employee_id=a.employee_id
+                  AND q.qualification_type=$2 AND q.verified=TRUE AND q.status='VALID'
+                  AND (q.expiry_date IS NULL OR q.expiry_date >= $3::date)
+                WHERE a.tenant_id=$1 AND a.shift_id=$4 AND a.status='assigned'
+               UNION
+               SELECT s.employee_id
+                 FROM shifts s
+                 JOIN employee_qualifications q
+                   ON q.tenant_id=s.tenant_id AND q.employee_id=s.employee_id
+                  AND q.qualification_type=$2 AND q.verified=TRUE AND q.status='VALID'
+                  AND (q.expiry_date IS NULL OR q.expiry_date >= $3::date)
+                WHERE s.tenant_id=$1 AND s.id=$4 AND s.employee_id IS NOT NULL
+                  AND NOT EXISTS (
+                    SELECT 1 FROM shift_staffing_assignments a
+                     WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id AND a.status='assigned'
+                  )
+             ) assigned`,
+          [tenantId, requirement.qualification_type, shift.end_date, shiftId]
+        );
+        const count = await client.query(
+          `SELECT count(DISTINCT e.id)::int AS total
+             FROM employees e
+             JOIN employee_site_assignments sa
+               ON sa.tenant_id=e.tenant_id AND sa.employee_id=e.id AND sa.site_id=$2
+             JOIN employee_qualifications q
+               ON q.tenant_id=e.tenant_id AND q.employee_id=e.id AND q.qualification_type=$3
+            WHERE e.tenant_id=$1 AND e.archived_at IS NULL AND e.status='Aktiv'
+              AND q.verified=TRUE AND q.status='VALID'
+              AND (q.expiry_date IS NULL OR q.expiry_date >= $4::date)
+              AND NOT EXISTS (
+                SELECT 1 FROM shift_staffing_assignments a
+                 WHERE a.tenant_id=e.tenant_id AND a.shift_id=$5 AND a.employee_id=e.id AND a.status='assigned'
+                UNION
+                SELECT 1 FROM shifts s
+                 WHERE s.tenant_id=e.tenant_id AND s.id=$5 AND s.employee_id=e.id
+                   AND NOT EXISTS (
+                     SELECT 1 FROM shift_staffing_assignments a
+                      WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id AND a.status='assigned'
+                   )
+              )`,
+          [...parameters, shiftId]
+        );
+        const candidates = await client.query(
+          `SELECT e.id,e.first_name,e.last_name,
+                  COALESCE(load.scheduled_minutes,0)::int AS scheduled_minutes_this_week
+             FROM employees e
+             JOIN employee_site_assignments sa
+               ON sa.tenant_id=e.tenant_id AND sa.employee_id=e.id AND sa.site_id=$2
+             JOIN employee_qualifications q
+               ON q.tenant_id=e.tenant_id AND q.employee_id=e.id AND q.qualification_type=$3
+             LEFT JOIN LATERAL (
+               SELECT COALESCE(SUM(EXTRACT(EPOCH FROM
+                 (LEAST(s.ends_at,$7::timestamptz)-GREATEST(s.starts_at,$6::timestamptz)))/60),0)::int AS scheduled_minutes
+                 FROM shifts s
+                WHERE s.tenant_id=e.tenant_id AND s.id IS DISTINCT FROM $5
+                  AND s.planning_status <> 'cancelled'
+                  AND s.starts_at < $7::timestamptz AND s.ends_at > $6::timestamptz
+                  AND (s.employee_id=e.id OR EXISTS (
+                    SELECT 1 FROM shift_staffing_assignments a
+                     WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id
+                       AND a.employee_id=e.id AND a.status='assigned'
+                  ))
+             ) load ON TRUE
+            WHERE e.tenant_id=$1 AND e.archived_at IS NULL AND e.status='Aktiv'
+              AND q.verified=TRUE AND q.status='VALID'
+              AND (q.expiry_date IS NULL OR q.expiry_date >= $4::date)
+              AND NOT EXISTS (
+                SELECT 1 FROM shift_staffing_assignments a
+                 WHERE a.tenant_id=e.tenant_id AND a.shift_id=$5 AND a.employee_id=e.id AND a.status='assigned'
+                UNION
+                SELECT 1 FROM shifts s
+                 WHERE s.tenant_id=e.tenant_id AND s.id=$5 AND s.employee_id=e.id
+                   AND NOT EXISTS (
+                     SELECT 1 FROM shift_staffing_assignments a
+                      WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id AND a.status='assigned'
+                   )
+              )
+            GROUP BY e.id,e.first_name,e.last_name,load.scheduled_minutes
+            ORDER BY load.scheduled_minutes,e.last_name,e.first_name,e.id
+            LIMIT $8 OFFSET $9`,
+          [...parameters, shiftId, weekBounds.rows[0].starts_at, weekBounds.rows[0].ends_at,
+            pageSize, (page - 1) * pageSize]
+        );
+        const suggestions = await Promise.all(candidates.rows.map(async candidate => {
+          const validation = await validateShiftCandidate(client, {
+            tenantId,
+            siteId: shift.site_id,
+            employeeId: candidate.id,
+            date: shift.shift_date,
+            endDate: shift.end_date,
+            startTime: String(shift.start_time).slice(0, 8),
+            endTime: String(shift.end_time).slice(0, 8),
+            timeZone: shift.time_zone,
+            storedStartsAt: shift.starts_at,
+            storedEndsAt: shift.ends_at,
+            requiredQualification: requirement.qualification_type,
+            breakMinutes: shift.break_minutes,
+            excludeShiftId: shiftId,
+            lockEmployee: false
+          });
+          const blockingFindings = validation.findings.filter(finding => finding.severity === 'blocking');
+          return {
+            employeeId: candidate.id,
+            firstName: candidate.first_name,
+            lastName: candidate.last_name,
+            eligible: blockingFindings.length === 0,
+            scheduledMinutesThisWeek: Number(candidate.scheduled_minutes_this_week),
+            reasons: blockingFindings.length === 0
+              ? ['active', 'site_assigned', 'qualified', 'no_blocking_planning_findings']
+              : validation.findings.map(finding => finding.code),
+            findings: validation.findings
+          };
+        }));
+        const assignedCount = Number(assignedCountResult.rows[0].count);
+        return {
+          qualificationType: requirement.qualification_type,
+          requiredCount: Number(requirement.required_count),
+          assignedCount,
+          shortfall: Math.max(0, Number(requirement.required_count) - assignedCount),
+          candidates: suggestions,
+          pagination: {
+            page, pageSize, total: Number(count.rows[0].total),
+            pages: Math.ceil(Number(count.rows[0].total) / pageSize)
+          }
+        };
+      }));
+      return {
+        shiftId,
+        requirements: candidatesByRequirement,
+        finalAssignmentRequiresConfirmation: true
+      };
+    });
+    if (!result) res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
+    else if ('cancelled' in result) res.status(409).json({ success: false, code: 'SHIFT_CANCELLED' });
+    else res.json({ success: true, data: result });
   } catch (error) {
     next(error);
   }
@@ -1464,6 +1704,41 @@ export async function recordActualTime(req: Request, res: Response, next: NextFu
   }
 }
 
+export async function getActualTime(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const shiftId = uuidSchema.parse(req.params.id);
+    const employeeId = uuidSchema.parse(req.query.employeeId);
+    const tenantId = req.user!.tenantId;
+    const result = await withTenantTransaction(tenantId, async client => {
+      const shift = await client.query(
+        'SELECT id FROM shifts WHERE tenant_id=$1 AND id=$2',
+        [tenantId, shiftId]
+      );
+      if (!shift.rows.length) return undefined;
+      const actual = await client.query(
+        `SELECT id,shift_id,employee_id,actual_start_at,actual_end_at,break_minutes,
+                revision_version,recorded_by,recorded_at,notes
+           FROM shift_actual_times
+          WHERE tenant_id=$1 AND shift_id=$2 AND employee_id=$3`,
+        [tenantId, shiftId, employeeId]
+      );
+      if (!actual.rows.length) return { current: null, history: [] };
+      const history = await client.query(
+        `SELECT id,actor_user_id,event_type,details,created_at
+           FROM planning_audit_events
+          WHERE tenant_id=$1 AND entity_type='shift_actual_time' AND entity_id=$2
+          ORDER BY created_at,id`,
+        [tenantId, actual.rows[0].id]
+      );
+      return { current: actual.rows[0], history: history.rows };
+    });
+    if (!result) res.status(404).json({ success: false, message: 'Schicht nicht gefunden.' });
+    else res.json({ success: true, data: result });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function createShiftTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const input = templateSchema.parse(req.body);
@@ -1480,7 +1755,8 @@ export async function createShiftTemplate(req: Request, res: Response, next: Nex
         `INSERT INTO schedule_templates
           (tenant_id,site_id,name,time_zone,local_start_time,local_end_time,required_qualification,recurrence,created_by)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)
-         RETURNING id,name,site_id,time_zone,local_start_time,local_end_time,required_qualification,recurrence,revision_version`,
+         RETURNING id,name,site_id,time_zone,local_start_time,local_end_time,
+                   required_qualification,recurrence,active,revision_version,created_at,updated_at`,
         [tenantId, input.siteId, input.name, time.timeZone, input.startTime, input.endTime,
           input.requiredQualification, JSON.stringify({ frequency: input.frequency, interval: input.interval, weekdays: input.weekdays ?? [] }), actorId]
       );
@@ -1534,23 +1810,106 @@ export async function listShiftTemplates(req: Request, res: Response, next: Next
   }
 }
 
+export async function updateShiftTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const templateId = uuidSchema.parse(req.params.templateId);
+    const input = templateUpdateSchema.parse(req.body);
+    const tenantId = req.user!.tenantId;
+    const actorId = req.user!.userId;
+    const result = await withTenantTransaction(tenantId, async client => {
+      const current = await client.query(
+        `SELECT id,site_id,name,time_zone,local_start_time,local_end_time,
+                required_qualification,recurrence,active,revision_version
+           FROM schedule_templates WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
+        [tenantId, templateId]
+      );
+      if (!current.rows.length) return { status: 404 as const };
+      const row = current.rows[0];
+      if (Number(row.revision_version) !== input.expectedVersion) {
+        return { status: 409 as const, currentVersion: Number(row.revision_version) };
+      }
+      let siteTimeZone: string | undefined;
+      if (input.siteId) {
+        const site = await client.query(
+          'SELECT time_zone FROM sites WHERE tenant_id=$1 AND id=$2 AND archived_at IS NULL',
+          [tenantId, input.siteId]
+        );
+        if (!site.rows.length) return { status: 404 as const };
+        siteTimeZone = site.rows[0].time_zone;
+      }
+      const previousRecurrence = row.recurrence as { frequency: 'DAILY' | 'WEEKLY'; interval: number; weekdays: number[] };
+      const merged = templateSchema.parse({
+        siteId: input.siteId ?? row.site_id,
+        name: input.name ?? row.name,
+        timeZone: input.timeZone ?? (input.siteId ? siteTimeZone : row.time_zone),
+        startTime: input.startTime ?? String(row.local_start_time).slice(0, 8),
+        endTime: input.endTime ?? String(row.local_end_time).slice(0, 8),
+        requiredQualification: input.requiredQualification ?? row.required_qualification,
+        frequency: input.frequency ?? previousRecurrence.frequency,
+        interval: input.interval ?? previousRecurrence.interval,
+        weekdays: input.weekdays ?? previousRecurrence.weekdays
+      });
+      const timeZone = merged.timeZone ?? siteTimeZone ?? row.time_zone as string;
+      const time = resolveShiftTime({
+        date: '2024-01-08', startTime: merged.startTime, endTime: merged.endTime,
+        timeZone
+      }, timeZone);
+      const updated = await client.query(
+        `UPDATE schedule_templates
+            SET site_id=$1,name=$2,time_zone=$3,local_start_time=$4,local_end_time=$5,
+                required_qualification=$6,recurrence=$7::jsonb,active=$8,
+                revision_version=revision_version+1,updated_at=CURRENT_TIMESTAMP
+          WHERE tenant_id=$9 AND id=$10 AND revision_version=$11
+          RETURNING id,site_id,name,time_zone,local_start_time,local_end_time,
+                    required_qualification,recurrence,active,revision_version,created_at,updated_at`,
+        [merged.siteId, merged.name, time.timeZone, merged.startTime, merged.endTime,
+          merged.requiredQualification,
+          JSON.stringify({ frequency: merged.frequency, interval: merged.interval, weekdays: merged.weekdays ?? [] }),
+          input.active ?? row.active, tenantId, templateId, input.expectedVersion]
+      );
+      if (!updated.rows.length) return { status: 409 as const, currentVersion: Number(row.revision_version) };
+      await writeAudit(client, tenantId, actorId, 'template.updated', 'schedule_template', templateId, {
+        expectedVersion: input.expectedVersion,
+        changedFields: Object.keys(input).filter(key => key !== 'expectedVersion')
+      });
+      return { status: 200 as const, template: updated.rows[0] };
+    });
+    if (result.status === 404) res.status(404).json({ success: false, message: 'Vorlage oder aktives Objekt nicht gefunden.' });
+    else if (result.status === 409) res.status(409).json({
+      success: false, code: 'REVISION_CONFLICT', currentVersion: result.currentVersion
+    });
+    else res.json({ success: true, data: result.template });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function applyShiftTemplate(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const templateId = uuidSchema.parse(req.params.templateId);
     const input = z.object({
       dateFrom: dateSchema,
       dateTo: dateSchema,
-      schedulePeriodId: uuidSchema.optional()
+      schedulePeriodId: uuidSchema.optional(),
+      clientMutationId: z.string().min(1).max(64)
     }).strict().refine(value => value.dateTo >= value.dateFrom, {
       path: ['dateTo'], message: 'dateTo darf nicht vor dateFrom liegen.'
     }).parse(req.body);
     const tenantId = req.user!.tenantId;
     const actorId = req.user!.userId;
+    const hash = mutationPayloadHash({ templateId, ...input });
     const result = await withTenantTransaction(tenantId, async client => {
+      await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${tenantId}:planning-mutation:${input.clientMutationId}`]);
+      const prior = await findMutationReceipt(
+        client, tenantId, input.clientMutationId, 'schedule_template', 'apply', hash
+      );
+      if (prior) return 'conflict' in prior
+        ? { idempotencyConflict: true as const }
+        : { replayed: true as const, response: prior.response };
       let periodRange: { dateFrom: string; dateTo: string } | undefined;
       const template = await client.query(
-        `SELECT id,site_id,name,time_zone,local_start_time,local_end_time,required_qualification,recurrence,active
-           FROM schedule_templates WHERE tenant_id=$1 AND id=$2`,
+        `SELECT id,site_id,name,time_zone,local_start_time,local_end_time,required_qualification,recurrence,active,revision_version
+           FROM schedule_templates WHERE tenant_id=$1 AND id=$2 FOR SHARE`,
         [tenantId, templateId]
       );
       if (!template.rows.length || !template.rows[0].active) return undefined;
@@ -1626,14 +1985,20 @@ export async function applyShiftTemplate(req: Request, res: Response, next: Next
       await writeAudit(client, tenantId, actorId, 'template.applied', 'schedule_template', templateId, {
         dateFrom: input.dateFrom, dateTo: input.dateTo, createdCount: results.filter(row => row.shiftId).length
       });
-      return { occurrences: results, finalValidationRequired: true };
+      const response = { occurrences: results, finalValidationRequired: true };
+      await saveMutationReceipt(client, tenantId, input.clientMutationId, 'schedule_template', 'apply',
+        hash, templateId, Number(value.revision_version), response);
+      return { replayed: false as const, response };
     });
     if (!result) res.status(404).json({ success: false, message: 'Vorlage nicht gefunden oder deaktiviert.' });
     else if ('periodMissing' in result) res.status(404).json({ success: false, message: 'Dienstplanperiode nicht gefunden.' });
     else if ('periodClosed' in result) res.status(409).json({ success: false, code: 'SCHEDULE_PERIOD_NOT_DRAFT' });
     else if ('periodOutOfRange' in result) res.status(422).json({ success: false, code: 'OUTSIDE_SCHEDULE_PERIOD' });
     else if ('tooLarge' in result) res.status(400).json({ success: false, message: 'Der Vorlagenzeitraum darf höchstens 366 Tage umfassen.' });
-    else res.status(201).json({ success: true, data: result });
+    else if ('idempotencyConflict' in result) res.status(409).json({ success: false, code: 'IDEMPOTENCY_KEY_REUSED' });
+    else res.status(result.replayed ? 200 : 201).json({
+      success: true, data: result.replayed ? { ...result.response as object, replayed: true } : result.response
+    });
   } catch (error) {
     next(error);
   }
@@ -1686,11 +2051,12 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
       type MetricTrack = {
         plannedConfigured: number; plannedCount: number;
         actualConfigured: number; actualCount: number;
+        ambiguous: boolean;
         sources: Set<string>;
       };
       type WeekTrack = {
         expectedShifts: number; missingActual: boolean; actualMinutes: number;
-        thresholds: Set<number>; unconfigured: boolean; sources: Set<string>;
+        thresholds: Set<number>; unconfigured: boolean; ambiguous: boolean; sources: Set<string>;
       };
       type EmployeeTrack = {
         employee_id: string; personnel_number: string; first_name: string; last_name: string;
@@ -1717,14 +2083,15 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
           plannedMinutes: 0,
           actualMinutes: 0,
           calendar: {
-            weekend: { plannedConfigured: 0, plannedCount: 0, actualConfigured: 0, actualCount: 0, sources: new Set<string>() },
-            holiday: { plannedConfigured: 0, plannedCount: 0, actualConfigured: 0, actualCount: 0, sources: new Set<string>() },
-            night: { plannedConfigured: 0, plannedCount: 0, actualConfigured: 0, actualCount: 0, sources: new Set<string>() }
+            weekend: { plannedConfigured: 0, plannedCount: 0, actualConfigured: 0, actualCount: 0, ambiguous: false, sources: new Set<string>() },
+            holiday: { plannedConfigured: 0, plannedCount: 0, actualConfigured: 0, actualCount: 0, ambiguous: false, sources: new Set<string>() },
+            night: { plannedConfigured: 0, plannedCount: 0, actualConfigured: 0, actualCount: 0, ambiguous: false, sources: new Set<string>() }
           },
           weeks: new Map<string, WeekTrack>()
         };
         employee.assigned_shifts += 1;
-        const profile = selectReportProfile(profiles, shift.site_id, dateOnly(shift.shift_date));
+        const profileSelection = selectReportProfile(profiles, shift.site_id, dateOnly(shift.shift_date));
+        const profile = profileSelection.profile;
         const calendar = configuredCalendar(profile);
         const weekendRule = ruleFor(profile?.rules, 'weekend_weekdays');
         const holidayRule = ruleFor(profile?.rules, 'holiday_dates');
@@ -1766,6 +2133,7 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
               : source(nightStartRule) && source(nightEndRule)
                 ? { nightWindowStart: source(nightStartRule), nightWindowEnd: source(nightEndRule) } : undefined;
           const track = employee.calendar[metric];
+          if (profileSelection.ambiguous) track.ambiguous = true;
           if (configured) {
             track.plannedConfigured += 1;
             if (plan[summaryKey] > 0) track.plannedCount += 1;
@@ -1784,8 +2152,9 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
         for (const week of weeksForShift) {
           const track = employee.weeks.get(week) ?? {
             expectedShifts: 0, missingActual: false, actualMinutes: 0,
-            thresholds: new Set<number>(), unconfigured: false, sources: new Set<string>()
+            thresholds: new Set<number>(), unconfigured: false, ambiguous: false, sources: new Set<string>()
           };
+          if (profileSelection.ambiguous) track.ambiguous = true;
           if (plan.weekMinutes.has(week)) track.expectedShifts += 1;
           if (plan.weekMinutes.has(week) && !actual) track.missingActual = true;
           if (actual) track.actualMinutes += actualWeekMinutes.get(week) ?? 0;
@@ -1803,16 +2172,16 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
       return [...employees.values()].map(employee => {
         const calendarReport = Object.fromEntries(metrics.map(metric => {
           const track = employee.calendar[metric];
-          const plannedStatus = metricStatus(track.plannedConfigured, employee.assigned_shifts);
-          const actualStatus = employee.actual_shift_count === 0 ? 'unavailable'
+          const plannedStatus = track.ambiguous ? 'ambiguous' : metricStatus(track.plannedConfigured, employee.assigned_shifts);
+          const actualStatus = track.ambiguous ? 'ambiguous' : employee.actual_shift_count === 0 ? 'unavailable'
             : track.actualConfigured === 0 ? 'unconfigured'
               : employee.actual_shift_count < employee.assigned_shifts || track.actualConfigured < employee.actual_shift_count
                 ? 'partial' : 'available';
           const label = metric === 'weekend' ? 'weekend' : metric === 'holiday' ? 'holiday' : 'night';
           return [label, {
-            plannedShifts: track.plannedConfigured ? track.plannedCount : null,
+            plannedShifts: track.plannedConfigured && !track.ambiguous ? track.plannedCount : null,
             plannedStatus,
-            actualShifts: track.actualConfigured ? track.actualCount : null,
+            actualShifts: track.actualConfigured && !track.ambiguous ? track.actualCount : null,
             actualStatus,
             sources: [...track.sources].map(value => JSON.parse(value))
           }];
@@ -1823,6 +2192,7 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
         const weekTracks = [...employee.weeks.values()];
         const overtimeStatus = employee.actual_shift_count === 0 ? 'unavailable'
           : weekTracks.some(week => week.missingActual) ? 'partial'
+            : weekTracks.some(week => week.ambiguous) ? 'ambiguous'
             : weekTracks.some(week => week.unconfigured || week.thresholds.size === 0) ? 'unconfigured'
               : employee.overtimeBreakAmbiguous || weekTracks.some(week => week.thresholds.size > 1) ? 'ambiguous'
                 : 'available';
@@ -1855,7 +2225,11 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
       });
     });
     if (req.query.format === 'csv') {
-      const escape = (value: unknown) => `"${String(value ?? '').replaceAll('"', '""')}"`;
+      const escape = (value: unknown) => {
+        let text = String(value ?? '');
+        if (/^[\s\u0000-\u001f\uFEFF]*[=+\-@]/.test(text)) text = `'${text}`;
+        return `"${text.replaceAll('"', '""')}"`;
+      };
       const csv = [
         ['employeeId', 'personnelNumber', 'firstName', 'lastName', 'assignedShifts', 'plannedHours',
           'actualHours', 'actualStatus', 'overtimeHours', 'overtimeStatus', 'plannedWeekendShifts',
