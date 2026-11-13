@@ -17,6 +17,8 @@ Migrations `frontend/backend/src/migrations/030_service_planning.sql` and `031_p
 
 The verified backend contract includes revisioned shift and period operations; template list/create/edit/activate/deactivate/apply; non-binding explainable staffing suggestions; cover and swap requests/decisions; actual-time create/correction plus current-record and audit-history reads; sourced rule-profile versions and approvals; audit and work-hours, coverage, qualification, and absence reports. Routes enforce their documented permissions, mutations use optimistic revisions and server-side validation, and idempotent operations use client mutation IDs where specified.
 
+The PR #16 CI-verified routes used by the newly added UI workflows are `GET /planning/shifts/:id/staffing-suggestions` (non-binding candidate explanations), `PATCH /planning/templates/:templateId` (revision-checked edit/activation), `GET /planning/shifts/:id/actual-time?employeeId=...` (current record, revision, and history), and `POST /planning/shifts/:id/actual-time` (audited, version-checked record/correction). The UI also consumes the documented work-hours, coverage, qualification, and absence report routes; there is no separate actual-time approval route.
+
 The frontend did not invent routes or change endpoint schemas. It consumes the routes documented by PR #16. Frontend-specific notes in `SERVICE_PLANNING_API.md` describe the online/offline boundary and the current UI use of those routes.
 
 ## Frontend behavior
