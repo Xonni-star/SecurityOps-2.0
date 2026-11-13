@@ -71,11 +71,11 @@ Die serverseitige Validierung prüft nur die implementierten Planungsregeln und 
 
 ## Verifikationsstatus (2026-11-13)
 
-- `cd frontend && npm test`: 14 Testdateien, 83 Tests bestanden.
+- `cd frontend && npm test`: 15 Testdateien, 90 Tests bestanden.
 - `cd frontend && npm run build`: erfolgreich; Vite meldet den bestehenden `__dirname`-Config-Hinweis und einen Chunk über 500 kB.
 - `cd frontend && npm audit`: 0 Vulnerabilities.
-- `cd frontend/backend && npm audit`: 7 Low-Severity-Befunde im Jest/`ts-jest`-Testwerkzeug-Dependency-Tree, einschließlich `deepmerge` GHSA-gcqx-w48m-w2h4; `npm audit --omit=dev`: 0 Vulnerabilities. Der vorgeschlagene `--force`-Fix wäre ein Jest-Downgrade mit Breaking Change und wurde nicht angewendet.
+- `cd frontend/backend && npm audit`: 7 Low-Severity-Befunde im Jest/`ts-jest`-Testwerkzeug-Dependency-Tree, einschließlich `deepmerge` GHSA-gcqx-w48m-w2h4; `cd frontend/backend && npm audit --omit=dev`: 0 Vulnerabilities. Der vorgeschlagene `--force`-Fix wäre ein Jest-Downgrade mit Breaking Change und wurde nicht angewendet.
 - PR #16 CI run `43487585461` passed all four jobs at head `c826460f0cc70e16031db93f8c5b0ccb8e3606da`.
-- PR #19 CI run `43489042661` passed all four jobs at head `aa45781f55db81bffd69e3557ea478dca36aa38d`.
+- PR #19 CI run `43492863751` passed all four jobs at head `594b09734751e32a267c70d9906066798e0156ea`.
 
 Diese Prüfungen enthalten keinen Geräte-/Browser-Kompatibilitätstest, Produktions-Rollout oder fachlich/rechtliche Abnahme.
