@@ -1525,7 +1525,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(17);
+    expect(await historyRows(db)).toHaveLength(18);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {
