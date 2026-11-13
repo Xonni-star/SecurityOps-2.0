@@ -368,6 +368,7 @@ export const HandoversModule: React.FC = () => {
     try {
       await apiClient.post(`/handovers/${selected.id}/${type}`, {
         clientMutationId: crypto.randomUUID(),
+        expectedRevisionVersion: selected.revisionVersion,
         capturedAt: new Date().toISOString()
       });
       setNotice(type === 'confirm' ? 'Übergabe wurde vom Server bestätigt.' : 'Übernahme wurde vom Server bestätigt.');

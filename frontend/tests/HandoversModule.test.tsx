@@ -110,4 +110,65 @@ describe('HandoversModule', () => {
     await act(async () => root.render(<HandoversModule />));
     expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Neue Übergabe'))).toBe(false);
   });
+
+  test('confirmation sends the displayed handover revision to the API', async () => {
+    const displayedHandover = {
+      id: 'handover-1',
+      siteId: 'site-1',
+      siteName: 'Objekt Nord',
+      occurredAt: '2026-11-13T06:00:00.000Z',
+      generalText: '',
+      incidents: '',
+      importantNotes: '',
+      safetyInformation: '',
+      status: 'pending_handover_confirmation',
+      revisionVersion: 7,
+      clientMutationId: 'handover-create-1',
+      createdByUserId: 'creator-1',
+      createdByName: 'Test',
+      outgoingEmployeeId: 'employee-1',
+      outgoingEmployeeName: 'Alex Alt',
+      incomingEmployeeId: 'employee-2',
+      incomingEmployeeName: 'Sam Neu',
+      openTasksCount: 0,
+      createdTasksCount: 0,
+      documentCount: 0
+    };
+    mocks.state.authUser = {
+      id: 'user-1', email: 'outgoing@example.test', tenantId: 'tenant-a',
+      permissions: ['handovers:read', 'handovers:confirm']
+    };
+    mocks.state.isOnline = true;
+    mocks.get.mockImplementation((path: string) => {
+      if (path.includes('/dashboard')) return Promise.resolve({
+        today: 0, waiting_handover_confirmation: 1, waiting_takeover_acknowledgement: 0,
+        open_handovers: 1, open_tasks: 0, overdue_tasks: 0
+      });
+      if (path.startsWith('/handovers?')) return Promise.resolve({
+        items: [displayedHandover], total: 1, limit: 50, offset: 0
+      });
+      if (path.endsWith('/tasks')) return Promise.resolve([]);
+      if (path.includes('/events')) return Promise.resolve({ items: [] });
+      return Promise.resolve([]);
+    });
+    mocks.post.mockResolvedValue({});
+
+    await act(async () => {
+      root.render(<HandoversModule />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const confirmButton = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Übergabe bestätigen'));
+    expect(confirmButton).toBeDefined();
+    await act(async () => {
+      confirmButton?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.post).toHaveBeenCalledWith('/handovers/handover-1/confirm', expect.objectContaining({
+      expectedRevisionVersion: 7
+    }));
+  });
 });

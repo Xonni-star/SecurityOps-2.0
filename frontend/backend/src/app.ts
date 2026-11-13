@@ -114,7 +114,7 @@ app.delete('/api/v1/tasks/:id', authenticateJwt, requirePermission('tasks:manage
 app.get('/api/v1/employees', authenticateJwt, requirePermission('employees:read'), employeeController.listEmployees);
 app.post('/api/v1/employees', authenticateJwt, requirePermission('employees:create'), employeeController.createEmployee);
 app.patch('/api/v1/employees/:id', authenticateJwt, requirePermission('employees:update'), employeeController.updateEmployee);
-app.patch('/api/v1/employees/:id/account', authenticateJwt, requirePermission('employees:update'), employeeController.linkEmployeeAccount);
+app.patch('/api/v1/employees/:id/account', authenticateJwt, requirePermission('employees:account:link'), employeeController.linkEmployeeAccount);
 app.post('/api/v1/employees/:id/archive', authenticateJwt, requirePermission('employees:archive'), employeeController.archiveEmployee);
 app.post('/api/v1/employees/:id/restore', authenticateJwt, requirePermission('employees:restore'), employeeController.restoreEmployee);
 app.post('/api/v1/employees/:id/qualifications', authenticateJwt, requirePermission('qualifications:manage'), employeeController.createQualification);

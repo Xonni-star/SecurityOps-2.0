@@ -119,6 +119,7 @@ describe('handover API invariants', () => {
 
   const confirmationBody = {
     clientMutationId: 'handover-confirm-0001',
+    expectedRevisionVersion: 1,
     capturedAt: '2026-11-13T06:01:00.000Z'
   };
   const confirmationPayloadHash = computePayloadHash({
@@ -126,6 +127,7 @@ describe('handover API invariants', () => {
     action: 'handover',
     handoverId,
     revisionVersion: 1,
+    expectedRevisionVersion: confirmationBody.expectedRevisionVersion,
     capturedAt: confirmationBody.capturedAt
   });
 
@@ -232,6 +234,7 @@ describe('handover API invariants', () => {
           action: 'handover',
           handoverId,
           revisionVersion: 1,
+          expectedRevisionVersion: confirmationBody.expectedRevisionVersion,
           capturedAt: '2026-11-13T06:02:00.000Z'
         })
       }] });

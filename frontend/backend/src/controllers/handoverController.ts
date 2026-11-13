@@ -17,6 +17,7 @@ import { computePayloadHash } from '../services/syncHash';
 const uuid = z.string().uuid();
 const confirmationSchema = z.object({
   clientMutationId: z.string().min(8).max(64).regex(/^[A-Za-z0-9_-]+$/),
+  expectedRevisionVersion: z.number().int().positive(),
   capturedAt: z.string().datetime({ offset: true }).optional()
 }).strict();
 const noteSchema = z.object({
@@ -330,11 +331,15 @@ async function recordConfirmation(
       }
 
       const revisionVersion = Number(row.revision_version);
+      if (input.expectedRevisionVersion !== revisionVersion) {
+        throw statusError(409, 'Die Übergabe wurde zwischenzeitlich geändert. Bitte aktualisieren und erneut bestätigen.');
+      }
       const payloadHash = computePayloadHash({
         actorUserId: userId,
         action: confirmationType,
         handoverId,
         revisionVersion,
+        expectedRevisionVersion: input.expectedRevisionVersion,
         capturedAt: input.capturedAt ?? null
       });
       const priorMutation = await db.query(
@@ -466,7 +471,7 @@ export async function listHandoverTasks(req: Request, res: Response, next: NextF
     const handoverId = uuid.parse(req.params.id);
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const handover = await db.query(
-        'SELECT site_id FROM handovers WHERE tenant_id=$1 AND id=$2',
+        'SELECT site_id, occurred_at, created_at FROM handovers WHERE tenant_id=$1 AND id=$2',
         [req.user!.tenantId, handoverId]
       );
       if (!handover.rows.length) throw statusError(404, 'Übergabe nicht gefunden.');
@@ -477,11 +482,17 @@ export async function listHandoverTasks(req: Request, res: Response, next: NextF
          FROM handover_tasks t
          JOIN employees e ON e.id=t.assigned_employee_id AND e.tenant_id=t.tenant_id
          JOIN users creator ON creator.id=t.created_by_user_id
+         JOIN handovers origin ON origin.id=t.origin_handover_id AND origin.tenant_id=t.tenant_id
          WHERE t.tenant_id=$1 AND t.site_id=$2
-           AND (t.origin_handover_id=$3 OR t.status IN ('open','in_progress'))
+           AND (t.origin_handover_id=$3 OR (
+             t.status IN ('open','in_progress')
+             AND (origin.occurred_at, origin.created_at, origin.id)
+                 <= ($4::timestamptz, $5::timestamptz, $3::uuid)
+           ))
          ORDER BY CASE WHEN t.status IN ('open','in_progress') THEN 0 ELSE 1 END,
                   t.due_at NULLS LAST, t.created_at DESC`,
-        [req.user!.tenantId, handover.rows[0].site_id, handoverId]
+        [req.user!.tenantId, handover.rows[0].site_id, handoverId,
+          handover.rows[0].occurred_at, handover.rows[0].created_at]
       );
       return result.rows;
     });

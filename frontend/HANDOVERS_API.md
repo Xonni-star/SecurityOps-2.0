@@ -10,7 +10,7 @@ Alle Routen sind unter `/api/v1` verfügbar, verwenden die bestehende Session-/C
 | `pending_takeover_acknowledgement` | Übergabe bestätigt; Übernahmebestätigung der ablösenden Person steht aus |
 | `completed` | Beide getrennten Bestätigungen sind serverseitig gespeichert |
 
-Die Bestätigung ist an `employees.account_user_id` gebunden; E-Mail-Adressen werden nicht als Identitätsnachweis verwendet. Der Link wird explizit und mandantengeprüft über `PATCH /api/v1/employees/:id/account` hergestellt. Bestehende Mitarbeiter werden nicht anhand von E-Mail-Adressen automatisch zugeordnet. Nach der ersten Bestätigung sind die Protokollinhalte gesperrt. Rückfragen und Korrekturen werden als zusätzliche Historienereignisse gespeichert.
+Die Bestätigung ist an `employees.account_user_id` gebunden; E-Mail-Adressen werden nicht als Identitätsnachweis verwendet. Der Link wird explizit und mandantengeprüft über `PATCH /api/v1/employees/:id/account` hergestellt. Nur die Rolle `Personalverwaltung` erhält `employees:account:link`; ein allgemeines Recht zum Bearbeiten von Mitarbeitern reicht nicht. Benutzer mit `handovers:confirm` dürfen ihr eigenes Konto nicht neu einem Mitarbeiter zuordnen. Bestehende Mitarbeiter werden nicht anhand von E-Mail-Adressen automatisch zugeordnet. Nach der ersten Bestätigung sind die Protokollinhalte gesperrt. Rückfragen und Korrekturen werden als zusätzliche Historienereignisse gespeichert.
 
 ## Routen
 
@@ -21,9 +21,9 @@ Die Bestätigung ist an `employees.account_user_id` gebunden; E-Mail-Adressen we
 | `GET /handovers/:id` | `handovers:read` | Protokoll und Teilnehmer |
 | `POST /handovers` | `handovers:create` | Idempotente Online-Erfassung |
 | `PATCH /handovers/:id` | `handovers:update` | Optimistische Änderung eines noch unbestätigten Protokolls |
-| `POST /handovers/:id/confirm` | `handovers:confirm` | Bestätigung der Übergabe durch die abgebende Person |
-| `POST /handovers/:id/acknowledge` | `handovers:confirm` | Bestätigung der Übernahme durch die ablösende Person |
-| `PATCH /employees/:id/account` | `employees:update` | Explizite Zuordnung oder Aufhebung des Mitarbeiter-Benutzerkonto-Links |
+| `POST /handovers/:id/confirm` | `handovers:confirm` | Bestätigung der Übergabe durch die abgebende Person mit `expectedRevisionVersion` |
+| `POST /handovers/:id/acknowledge` | `handovers:confirm` | Bestätigung der Übernahme durch die ablösende Person mit `expectedRevisionVersion` |
+| `PATCH /employees/:id/account` | `employees:account:link` | Explizite Zuordnung oder Aufhebung des Mitarbeiter-Benutzerkonto-Links (Personalverwaltung) |
 | `POST /handovers/:id/questions` | `handovers:confirm` | Rückfrage als Historienereignis dokumentieren |
 | `POST /handovers/:id/corrections` | `handovers:manage` | Korrektur als Historienereignis dokumentieren |
 | `GET /handovers/:id/events` | `handovers:read` | Chronologische Historie, `limit`/`offset` |
@@ -43,7 +43,9 @@ Listenparameter:
 
 Die Suche berücksichtigt Objekt, Bereich, Protokolltexte und Teilnehmer. Datumsgrenzen sind inklusive (`to` umfasst den gesamten Kalendertag). Kennzahlen für überfällige Aufgaben werden serverseitig anhand `due_at < CURRENT_TIMESTAMP` berechnet.
 
-Die Kontozuordnung akzeptiert `{ "userId": "UUID oder null", "revisionVersion": 3 }`. Das Konto muss bereits mindestens eine Rolle im selben Mandanten besitzen und darf dort nicht einem anderen Mitarbeiter zugeordnet sein. Die Zuordnung erhöht die Mitarbeiterversion und erzeugt einen Audit-Eintrag. Ohne explizite Zuordnung ist eine Teilnahmebestätigung nicht zulässig.
+Bestätigungsrouten erwarten `{ "clientMutationId": "stable-id", "expectedRevisionVersion": 3, "capturedAt": "2026-11-13T06:01:00.000Z" }`. `expectedRevisionVersion` muss der in der UI angezeigten Revision entsprechen; Prüfung und Replay erfolgen unter Sperre der Übergabe.
+
+Die Kontozuordnung akzeptiert `{ "userId": "UUID oder null", "revisionVersion": 3 }`. Das Konto muss bereits mindestens eine Rolle im selben Mandanten besitzen und darf dort nicht einem anderen Mitarbeiter zugeordnet sein. Der Endpunkt verlangt das dedizierte Recht `employees:account:link`, das nur an `Personalverwaltung` vergeben wird; `employees:update` reicht nicht. Eine Person mit `handovers:confirm` kann das eigene Konto nicht neu einem Mitarbeiter zuordnen. Die Zuordnung erhöht die Mitarbeiterversion und erzeugt einen Audit-Eintrag. Ohne explizite Zuordnung ist eine Teilnahmebestätigung nicht zulässig.
 
 ## Erfassung
 
@@ -67,7 +69,7 @@ Die Kontozuordnung akzeptiert `{ "userId": "UUID oder null", "revisionVersion": 
 }
 ```
 
-`tasks` kann bei der Erfassung bis zu 30 initiale Aufgaben enthalten. Jede Aufgabe hat `title`, `description`, `assignedEmployeeId`, `priority` (`low`, `normal`, `high`, `urgent`), optional `dueAt` und optional eine eigene Client-ID. Wiederholungen mit gleichem Tenant, gleicher Client-ID und gleichem Payload liefern denselben Datensatz zurück; eine abweichende Wiederverwendung liefert `409`.
+`tasks` kann bei der Erfassung bis zu 30 initiale Aufgaben enthalten. Jede Aufgabe hat `title`, `description`, `assignedEmployeeId`, `priority` (`low`, `normal`, `high`, `urgent`), optional `dueAt` und optional eine eigene Client-ID. Wiederholungen mit gleichem Tenant, gleicher Client-ID und gleichem Payload liefern denselben Datensatz zurück; eine abweichende Wiederverwendung liefert `409`. Bei Folgeübergaben werden nur offene Aufgaben aus derselben oder einer chronologisch früheren Übergabe desselben Objekts weitergeführt; Aufgaben späterer Übergaben werden nicht angezeigt.
 
 Eine spätere Entwurfsänderung benötigt `expectedVersion`. Aufgabenänderungen benötigen ebenfalls `expectedVersion`; Statuswerte sind `open`, `in_progress`, `done` und `cancelled`. Erledigte/abgebrochene Aufgaben erhalten ein serverseitiges `completed_at`. Nicht abgeschlossene Aufgaben bleiben beim Ursprungsprotokoll und werden für Folgeübergaben desselben Objekts als weitergeführt zurückgegeben.
 
@@ -91,7 +93,7 @@ Die Oberfläche speichert eine neue Übergabe zuerst in `SecurityOps2_OfflineVau
 
 Die tatsächliche Payload muss dem Erfassungsschema entsprechen. Der Server speichert die Antwort in `sync_idempotency_receipts`; Advisory Locks und eindeutige Client-ID-Constraints schützen parallele Wiederholungen. `SYNCED` wird erst nach Commit quittiert. Bei abweichendem Inhalt zu einer bereits genutzten Client-ID antwortet der Server mit `CONFLICT` samt Versions-/Payloadvergleich. `REJECTED` und `CONFLICT` überschreiben keine vorhandene Übergabe. Die UI hält Konflikte und Fehler lokal sichtbar; eine unveränderliche Übergabe wird nicht durch „USE_LOCAL“ überschrieben. Eine Korrektur wird separat als Ereignis erfasst.
 
-Die Synchronisierung entfernt eine Outbox-Mutation erst nach Serverquittung. Statusanzeige: lokal gespeichert / Synchronisierung ausstehend / synchronisiert / Konflikt / fehlgeschlagen. Bestätigungswiederholungen sind nur dann idempotent erfolgreich, wenn Konto, Aktion, Übergabe, Revision, Mutations-ID und Payload-Hash exakt übereinstimmen. Eine andere Mutations-ID für bereits bestätigte Aktion wird mit `409` abgewiesen. Statusbestätigungen, spätere Aufgabenänderungen und DMS-Verknüpfungen erfordern eine Online-Verbindung. Externe E-Mail- oder Push-Benachrichtigungen sind nicht konfiguriert; die Anwendung behauptet keine Zustellung.
+Die Synchronisierung entfernt eine Outbox-Mutation erst nach Serverquittung. Statusanzeige: lokal gespeichert / Synchronisierung ausstehend / synchronisiert / Konflikt / fehlgeschlagen. Bestätigungen senden die angezeigte `expectedRevisionVersion`; der Server prüft sie unter Sperre der Übergabe vor einer neuen Bestätigung und vor einem idempotenten Replay. Wiederholungen sind nur dann idempotent erfolgreich, wenn Konto, Aktion, Übergabe, erwartete Revision, Mutations-ID und Payload-Hash exakt übereinstimmen. Eine veraltete UI-Revision oder eine andere Mutations-ID für eine bereits bestätigte Aktion wird mit `409` abgewiesen. Statusbestätigungen, spätere Aufgabenänderungen und DMS-Verknüpfungen erfordern eine Online-Verbindung. Externe E-Mail- oder Push-Benachrichtigungen sind nicht konfiguriert; die Anwendung behauptet keine Zustellung.
 
 ## Daten- und Sicherheitsgrenzen
 

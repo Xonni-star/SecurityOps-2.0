@@ -48,7 +48,7 @@ Datei-Blobs werden getrennt von PostgreSQL unter einem zufälligen UUID-Schlüss
 
 Planversionen, Aktionen und Statushistorie besitzen Datenbanktrigger gegen UPDATE/DELETE und nur INSERT-/SELECT-Rechte für die Anwendungsrolle. Die aktuelle Planfassung kann geändert werden; veröffentlichte Versionen bleiben als unveränderlicher Snapshot erhalten. Eskalationsjobs und Zustellversuche sind veränderliche Prozesszustände; sie sind nicht Teil der append-only Vorfallshistorie. Mutation-Quittungen enthalten einen Payload-Hash zur Idempotenzprüfung. Die Site-Autorisierung wird zusätzlich in der API erzwungen; RLS selbst begrenzt auf den Tenant.
 
-## Übergabemanagement (Migrationen 017/018)
+## Übergabemanagement (Migrationen 017–019)
 
 Migration `017_handover_management.sql` folgt auf die Alarmmigrationen 015/016. Die Tabellen `handovers`, `handover_participants`, `handover_events`, `handover_confirmations`, `handover_tasks`, `handover_task_events` und `handover_documents` erzwingen alle `ENABLE` und `FORCE ROW LEVEL SECURITY` mit `app.current_tenant`. Fremdschlüssel binden Objekt, Dienst, Mitarbeiter, Ursprungübergabe und DMS-Dokument jeweils zusammen mit `tenant_id`.
 
@@ -56,4 +56,4 @@ Migration `017_handover_management.sql` folgt auf die Alarmmigrationen 015/016. 
 
 Aufgaben bleiben mit dem Ursprungsprotokoll verknüpft; ein Index unterstützt die Abfrage offener Aufgaben je Objekt und Fälligkeit. Sie werden bei Folgeübergaben mit `carried_forward=true` dargestellt, ohne den ursprünglichen Bezug umzuschreiben. Die vollständige Tabellen- und Statusbeschreibung steht in [HANDOVERS_API.md](./HANDOVERS_API.md).
 
-Migration 018 ergänzt `employees.account_user_id` als nullable, tenant-validierten Fremdschlüssel auf `users`. Bestehende Datensätze werden absichtlich nicht anhand ihrer möglicherweise veralteten oder doppelten E-Mail-Adresse automatisch verknüpft. Konten müssen über die Mitarbeiter-API explizit und innerhalb desselben Mandanten zugeordnet werden.
+Migration 018 ergänzt `employees.account_user_id` als nullable, tenant-validierten Fremdschlüssel auf `users`. Migration 019 ergänzt das dedizierte Recht `employees:account:link`; nur `Personalverwaltung` erhält es. Bestehende Datensätze werden absichtlich nicht anhand ihrer möglicherweise veralteten oder doppelten E-Mail-Adresse automatisch verknüpft. Konten müssen über die Mitarbeiter-API explizit und innerhalb desselben Mandanten zugeordnet werden. Bestätiger können das eigene Konto nicht neu einem Mitarbeiter zuordnen, und Bestätigungswiederholungen benötigen die aktuelle erwartete Revision.

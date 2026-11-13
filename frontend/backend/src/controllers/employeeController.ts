@@ -118,6 +118,11 @@ export async function linkEmployeeAccount(req: Request,res: Response,next: NextF
       );
       if (!current.rows.length) return { kind: 'missing' as const };
       if (Number(current.rows[0].revision_version) !== revisionVersion) return { kind: 'stale' as const };
+      if (
+        userId === req.user!.userId &&
+        req.user!.permissions.includes('handovers:confirm') &&
+        current.rows[0].account_user_id !== userId
+      ) return { kind: 'self-link-forbidden' as const };
       if (userId) {
         const membership = await db.query(
           'SELECT 1 FROM user_roles WHERE user_id=$1 AND tenant_id=$2 LIMIT 1',
@@ -153,12 +158,16 @@ export async function linkEmployeeAccount(req: Request,res: Response,next: NextF
       return { kind: 'ok' as const, employee: updated.rows[0] };
     });
     if (result.kind !== 'ok') {
-      const status = result.kind === 'missing' ? 404 : result.kind === 'foreign-account' ? 400 : 409;
+      const status = result.kind === 'missing' ? 404
+        : result.kind === 'foreign-account' ? 400
+        : result.kind === 'self-link-forbidden' ? 403
+        : 409;
       const message = {
         missing: 'Aktiver Mitarbeiter nicht gefunden.',
         stale: 'Mitarbeiter wurde zwischenzeitlich geändert.',
         'foreign-account': 'Das Benutzerkonto gehört nicht zu diesem Mandanten.',
-        'already-linked': 'Das Benutzerkonto ist bereits einem anderen Mitarbeiter zugeordnet.'
+        'already-linked': 'Das Benutzerkonto ist bereits einem anderen Mitarbeiter zugeordnet.',
+        'self-link-forbidden': 'Personen mit Bestätigungsrecht dürfen sich nicht selbst einem Mitarbeiter zuordnen.'
       }[result.kind];
       res.status(status).json({ success: false, message });
       return;
