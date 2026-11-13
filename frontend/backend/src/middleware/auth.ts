@@ -68,3 +68,23 @@ export function requirePermission(permissionCode: string) {
     });
   };
 }
+
+export function requireAnyPermission(...permissionCodes: string[]) {
+  return (req: Request, res: Response, next: NextFunction): void => {
+    if (!req.user) {
+      res.status(401).json({ success: false, message: 'Nicht authentifiziert' });
+      return;
+    }
+
+    const granted = permissionCodes.find(permissionCode => req.user!.permissions.includes(permissionCode));
+    if (granted) {
+      next();
+      return;
+    }
+
+    res.status(403).json({
+      success: false,
+      message: `Zugriff verweigert: Erforderlich ist eine der Berechtigungen ${permissionCodes.map(code => `'${code}'`).join(', ')}`
+    });
+  };
+}

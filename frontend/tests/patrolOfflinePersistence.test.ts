@@ -26,7 +26,9 @@ describe('Patrol offline outbox persistence', () => {
       payload: {
         checkpointId: 'checkpoint-patrol-test',
         checkpointToken: 'A'.repeat(43),
-        method: 'QR_CODE'
+        method: 'QR_CODE',
+        latitude: 52.52,
+        longitude: 13.405
       },
       occurredAt: '2026-11-12T12:00:00.000Z',
       baseVersion: 1
@@ -40,6 +42,7 @@ describe('Patrol offline outbox persistence', () => {
     expect(pending[0].id).toBe('patrol-mutation-123');
     expect(pending[0].status).toBe('PENDING');
     expect(pending[0].payload.checkpointToken).toBe('A'.repeat(43));
+    expect(pending[0].payload).toMatchObject({ latitude: 52.52, longitude: 13.405 });
   });
 
   test('restores cached routes and active rounds, and orders offline start before scans and completion', async () => {

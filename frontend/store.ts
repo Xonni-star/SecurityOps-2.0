@@ -2407,6 +2407,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         checkpointTokenVersion: scan.checkpointTokenVersion,
         roundId: scan.roundId,
         notes: scan.notes,
+        latitude: scan.latitude,
+        longitude: scan.longitude,
         scannedAt
       }
     });

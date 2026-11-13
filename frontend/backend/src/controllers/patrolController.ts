@@ -7,9 +7,21 @@ import { computePayloadHash } from '../services/syncHash';
 
 const uuid = z.string().uuid();
 const dateTime = z.string().datetime({ offset: true });
+type PatrolScanAttemptReason =
+  | 'invalid_payload'
+  | 'unassigned_employee'
+  | 'round_unavailable'
+  | 'unknown_checkpoint'
+  | 'invalid_token'
+  | 'stale_token'
+  | 'duplicate_scan'
+  | 'invalid_capture_time';
 
 const listQueryBaseSchema = z.object({
   siteId: uuid.optional(),
+  clientId: uuid.optional(),
+  employeeId: uuid.optional(),
+  routeId: uuid.optional(),
   from: z.string().date().optional(),
   to: z.string().date().optional(),
   status: z.enum(['in_progress', 'completed', 'abandoned']).optional(),
@@ -52,6 +64,15 @@ const routeBaseSchema = z.object({
   code: z.string().trim().min(1).max(50),
   name: z.string().trim().min(1).max(150),
   changeReason: z.string().trim().min(1).max(500),
+  flexibleOrder: z.boolean().default(false),
+  targetDurationMinutes: z.number().int().min(1).max(10080).nullable().default(null),
+  lateToleranceMinutes: z.number().int().min(0).max(1440).default(5),
+  timeWindowStart: z.string().regex(/^\d{2}:\d{2}$/).nullable().default(null),
+  timeWindowEnd: z.string().regex(/^\d{2}:\d{2}$/).nullable().default(null),
+  recurrenceFrequency: z.enum(['none', 'daily', 'weekly']).default('none'),
+  recurrenceInterval: z.number().int().min(1).max(365).default(1),
+  recurrenceDays: z.array(z.number().int().min(0).max(6)).max(7).default([]),
+  employeeIds: z.array(uuid).max(200).default([]),
   checkpoints: z.array(z.object({
     checkpointId: uuid,
     plannedOffsetMinutes: z.number().int().min(0).max(10080).default(0)
@@ -59,11 +80,33 @@ const routeBaseSchema = z.object({
 }).strict();
 
 function validateUniqueRouteCheckpoints(
-  route: { checkpoints: Array<{ checkpointId: string }> },
+  route: {
+    checkpoints: Array<{ checkpointId: string }>;
+    timeWindowStart: string | null;
+    timeWindowEnd: string | null;
+    recurrenceFrequency: 'none' | 'daily' | 'weekly';
+    recurrenceDays: number[];
+    employeeIds: string[];
+  },
   ctx: z.RefinementCtx
 ): void {
   if (new Set(route.checkpoints.map(item => item.checkpointId)).size !== route.checkpoints.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['checkpoints'], message: 'Ein Kontrollpunkt darf pro Routenversion nur einmal vorkommen.' });
+  }
+  if ((route.timeWindowStart === null) !== (route.timeWindowEnd === null)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['timeWindowStart'], message: 'Start- und Endzeitfenster müssen gemeinsam angegeben werden.' });
+  }
+  if (new Set(route.recurrenceDays).size !== route.recurrenceDays.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['recurrenceDays'], message: 'Wochentage dürfen nicht doppelt vorkommen.' });
+  }
+  if (route.recurrenceFrequency === 'weekly' && route.recurrenceDays.length === 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['recurrenceDays'], message: 'Wöchentliche Wiederholung benötigt mindestens einen Wochentag.' });
+  }
+  if (route.recurrenceFrequency !== 'weekly' && route.recurrenceDays.length > 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['recurrenceDays'], message: 'Wochentage sind nur bei wöchentlicher Wiederholung zulässig.' });
+  }
+  if (new Set(route.employeeIds).size !== route.employeeIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['employeeIds'], message: 'Mitarbeiter dürfen nicht doppelt zugeordnet werden.' });
   }
 }
 
@@ -92,11 +135,56 @@ const roundSchema = z.object({
 }).strict();
 const roundCompletionSchema = z.object({
   roundId: uuid,
-  completedAt: dateTime
+  completedAt: dateTime,
+  notes: z.string().trim().max(2000).default('')
 }).strict();
 
-function statusError(statusCode: number, message: string): Error & { statusCode: number } {
-  return Object.assign(new Error(message), { statusCode });
+function automaticExceptionMutationId(roundId: string, checkpointId: string, category: string, description: string): string {
+  const digest = crypto.createHash('sha256')
+    .update(`${roundId}:${checkpointId}:${category}:${description}`, 'utf8')
+    .digest('hex');
+  return `auto_${digest.slice(0, 55)}`;
+}
+
+async function recordAutomaticPatrolException(
+  db: PoolClient,
+  tenantId: string,
+  userId: string,
+  input: {
+    siteId: string;
+    roundId: string;
+    checkpointId: string;
+    category: 'missed_checkpoint' | 'late_checkpoint';
+    capturedAt: string;
+    description: string;
+  }
+): Promise<void> {
+  const payload = {
+    siteId: input.siteId,
+    roundId: input.roundId,
+    checkpointId: input.checkpointId,
+    category: input.category,
+    severity: 'normal',
+    description: input.description,
+    capturedAt: input.capturedAt
+  };
+  await recordPatrolException(
+    db,
+    tenantId,
+    userId,
+    automaticExceptionMutationId(input.roundId, input.checkpointId, input.category, input.description),
+    payload,
+    input.capturedAt,
+    computePayloadHash(payload)
+  );
+}
+
+function statusError(
+  statusCode: number,
+  message: string,
+  patrolScanAttemptCode?: PatrolScanAttemptReason
+): Error & { statusCode: number; patrolScanAttemptCode?: string } {
+  return Object.assign(new Error(message), { statusCode, patrolScanAttemptCode });
 }
 
 function createToken(): string {
@@ -141,15 +229,23 @@ export async function recordPatrolScan(
     checkpointToken: z.string().min(32).max(128).optional(),
     checkpointTokenVersion: z.number().int().positive().optional(),
     notes: z.string().max(2000).optional(),
+    latitude: z.number().min(-90).max(90).nullable().optional(),
+    longitude: z.number().min(-180).max(180).nullable().optional(),
     scannedAt: dateTime.optional()
-  }).strict().safeParse(payload);
-  if (!parsed.success) throw statusError(400, 'Kontrollgangs-Scan ist unvollständig oder ungültig.');
+  }).strict().superRefine((scan, ctx) => {
+    if ((scan.latitude == null) !== (scan.longitude == null)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['latitude'], message: 'Breiten- und Längengrad müssen gemeinsam angegeben werden.' });
+    }
+  }).safeParse(payload);
+  if (!parsed.success) throw statusError(400, 'Kontrollgangs-Scan ist unvollständig oder ungültig.', 'invalid_payload');
 
   const input = parsed.data;
   const capturedAt = input.scannedAt || clientTimestamp;
-  if (!dateTime.safeParse(capturedAt).success) throw statusError(400, 'Erfassungszeitpunkt ist ungültig.');
+  if (!dateTime.safeParse(capturedAt).success) throw statusError(400, 'Erfassungszeitpunkt ist ungültig.', 'invalid_capture_time');
   const capturedTime = Date.parse(capturedAt);
-  if (capturedTime > Date.now() + 5 * 60 * 1000) throw statusError(400, 'Erfassungszeitpunkt liegt unzulässig in der Zukunft.');
+  if (capturedTime > Date.now() + 5 * 60 * 1000) {
+    throw statusError(400, 'Erfassungszeitpunkt liegt unzulässig in der Zukunft.', 'invalid_capture_time');
+  }
 
   const employee = await db.query(
     `SELECT e.id
@@ -163,17 +259,19 @@ export async function recordPatrolScan(
     [tenantId, userId, input.siteId]
   );
   if (!employee.rows.length) {
-    throw statusError(403, 'Für dieses Konto ist keine aktive Mitarbeiterzuordnung zu diesem Objekt hinterlegt.');
+    throw statusError(403, 'Für dieses Konto ist keine aktive Mitarbeiterzuordnung zu diesem Objekt hinterlegt.', 'unassigned_employee');
   }
   const guardId = employee.rows[0].id as string;
 
+  let roundContext: { id: string; started_at: Date | string; route_id: string | null; route_version: number | null } | null = null;
   if (input.roundId) {
     const round = await db.query(
-      `SELECT id FROM patrol_rounds
+      `SELECT id,started_at,route_id,route_version FROM patrol_rounds
         WHERE id=$1 AND tenant_id=$2 AND site_id=$3 AND guard_user_id=$4 AND status='in_progress'`,
       [input.roundId, tenantId, input.siteId, userId]
     );
-    if (!round.rows.length) throw statusError(409, 'Kontrollgang ist nicht aktiv oder gehört nicht zu diesem Objekt/Konto.');
+    if (!round.rows.length) throw statusError(409, 'Kontrollgang ist nicht aktiv oder gehört nicht zu diesem Objekt/Konto.', 'round_unavailable');
+    roundContext = round.rows[0];
   }
 
   const checkpoint = await db.query(
@@ -182,15 +280,15 @@ export async function recordPatrolScan(
       WHERE id=$1 AND tenant_id=$2 AND site_id=$3 AND active=true AND archived_at IS NULL`,
     [input.checkpointId, tenantId, input.siteId]
   );
-  if (!checkpoint.rows.length) throw statusError(404, 'Kontrollpunkt ist nicht aktiv oder nicht diesem Objekt zugeordnet.');
+  if (!checkpoint.rows.length) throw statusError(404, 'Kontrollpunkt ist nicht aktiv oder nicht diesem Objekt zugeordnet.', 'unknown_checkpoint');
   const point = checkpoint.rows[0];
   const isManual = input.method === 'MANUELL';
   if (!isManual) {
     if (!input.checkpointToken || hashToken(input.checkpointToken) !== String(point.token_hash).trim()) {
-      throw statusError(403, 'Kontrollpunkt-Token ist ungültig oder wurde rotiert.');
+      throw statusError(403, 'Kontrollpunkt-Token ist ungültig oder wurde rotiert.', 'invalid_token');
     }
     if (input.checkpointTokenVersion !== undefined && input.checkpointTokenVersion !== Number(point.token_version)) {
-      throw statusError(409, 'Kontrollpunkt-Token-Version ist veraltet. Bitte den aktuellen Code verwenden.');
+      throw statusError(409, 'Kontrollpunkt-Token-Version ist veraltet. Bitte den aktuellen Code verwenden.', 'stale_token');
     }
   }
 
@@ -204,20 +302,24 @@ export async function recordPatrolScan(
       LIMIT 1`,
     [tenantId, input.checkpointId, guardId, capturedAt]
   );
-  if (duplicate.rows.length) throw statusError(409, 'Dieser Kontrollpunkt wurde von Ihnen innerhalb des Zwei-Minuten-Fensters bereits erfasst.');
+  if (duplicate.rows.length) {
+    throw statusError(409, 'Dieser Kontrollpunkt wurde von Ihnen innerhalb des Zwei-Minuten-Fensters bereits erfasst.', 'duplicate_scan');
+  }
 
   const inserted = await db.query(
     `INSERT INTO patrol_scans (
         tenant_id, site_id, checkpoint_id, checkpoint_uuid, checkpoint_code, checkpoint_name,
         guard_id, scanned_at, method, verified_tag, notes, client_mutation_id, round_id,
-        checkpoint_token_version, client_captured_at, payload_hash, verification_status
-     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$8,$15,$16)
+        checkpoint_token_version, client_captured_at, payload_hash, verification_status,
+        latitude,longitude
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$8,$15,$16,$17,$18)
      RETURNING id`,
     [
       tenantId, input.siteId, input.checkpointId, input.checkpointId, point.code, point.name,
       guardId, capturedAt, input.method, isManual ? 'manual' : hashToken(input.checkpointToken!).slice(0, 24),
       input.notes || null, clientMutationId, input.roundId || null,
-      isManual ? null : Number(point.token_version), payloadHash, isManual ? 'manual' : 'verified'
+      isManual ? null : Number(point.token_version), payloadHash, isManual ? 'manual' : 'verified',
+      input.latitude ?? null, input.longitude ?? null
     ]
   );
   const scanId = inserted.rows[0].id as string;
@@ -227,7 +329,99 @@ export async function recordPatrolScan(
     verificationStatus: isManual ? 'manual' : 'verified',
     clientMutationId
   });
+  if (roundContext?.route_id && roundContext.route_version !== null) {
+    const version = await db.query(
+      `SELECT flexible_order,late_tolerance_minutes
+         FROM patrol_route_versions
+        WHERE tenant_id=$1 AND route_id=$2 AND version=$3`,
+      [tenantId, roundContext.route_id, roundContext.route_version]
+    );
+    const plannedCheckpoint = await db.query(
+      `SELECT checkpoint_id,sequence_no,planned_offset_minutes
+         FROM patrol_route_version_checkpoints
+        WHERE tenant_id=$1 AND route_version_id=(
+          SELECT id FROM patrol_route_versions
+           WHERE tenant_id=$1 AND route_id=$2 AND version=$3
+        ) AND checkpoint_id=$4`,
+      [tenantId, roundContext.route_id, roundContext.route_version, input.checkpointId]
+    );
+    if (version.rows.length && plannedCheckpoint.rows.length) {
+      const routeSettings = version.rows[0];
+      const step = plannedCheckpoint.rows[0];
+      const elapsedMinutes = Math.max(0, (capturedTime - Date.parse(String(roundContext.started_at))) / 60_000);
+      const capturedIso = new Date(capturedTime).toISOString();
+      if (elapsedMinutes > Number(step.planned_offset_minutes) + Number(routeSettings.late_tolerance_minutes)) {
+        await recordAutomaticPatrolException(db, tenantId, userId, {
+          siteId: input.siteId,
+          roundId: input.roundId!,
+          checkpointId: input.checkpointId,
+          category: 'late_checkpoint',
+          capturedAt: capturedIso,
+          description: `Kontrollpunkt ${point.code} wurde außerhalb der konfigurierten Routentoleranz erfasst.`
+        });
+      }
+      if (!routeSettings.flexible_order) {
+        const skipped = await db.query(
+          `SELECT vc.checkpoint_id,c.code
+             FROM patrol_route_version_checkpoints vc
+             JOIN patrol_checkpoints c ON c.tenant_id=vc.tenant_id AND c.id=vc.checkpoint_id
+            WHERE vc.tenant_id=$1 AND vc.route_version_id=(
+              SELECT id FROM patrol_route_versions
+               WHERE tenant_id=$1 AND route_id=$2 AND version=$3
+            ) AND vc.sequence_no < $4
+              AND vc.planned_offset_minutes <= $5
+              AND NOT EXISTS (
+                SELECT 1 FROM patrol_scans ps
+                 WHERE ps.tenant_id=$1 AND ps.round_id=$6 AND ps.checkpoint_uuid=vc.checkpoint_id
+              )`,
+          [tenantId, roundContext.route_id, roundContext.route_version, step.sequence_no, Math.floor(elapsedMinutes), input.roundId]
+        );
+        for (const missed of skipped.rows) {
+          await recordAutomaticPatrolException(db, tenantId, userId, {
+            siteId: input.siteId,
+            roundId: input.roundId!,
+            checkpointId: missed.checkpoint_id,
+            category: 'missed_checkpoint',
+            capturedAt: capturedIso,
+            description: `Kontrollpunkt ${missed.code} wurde vor einem späteren Routenschritt ausgelassen.`
+          });
+        }
+      }
+    }
+  }
   return { id: scanId, verificationStatus: isManual ? 'manual' : 'verified' };
+}
+
+export async function recordPatrolScanAttempt(
+  db: PoolClient,
+  tenantId: string,
+  userId: string,
+  clientMutationId: string,
+  payload: Record<string, unknown>,
+  clientTimestamp: string,
+  payloadHash: string,
+  reasonCode: PatrolScanAttemptReason
+): Promise<void> {
+  const siteId = uuid.safeParse(payload.siteId);
+  const checkpointId = uuid.safeParse(payload.checkpointId);
+  const roundId = uuid.safeParse(payload.roundId);
+  const method = z.enum(['QR_CODE', 'NFC_TAG', 'MANUELL']).safeParse(payload.method);
+  const capturedAt = payload.scannedAt ?? clientTimestamp;
+  const validCapturedAt = dateTime.safeParse(capturedAt);
+  const knownSite = siteId.success
+    ? await db.query('SELECT id FROM sites WHERE tenant_id=$1 AND id=$2', [tenantId, siteId.data])
+    : null;
+  await db.query(
+    `INSERT INTO patrol_scan_attempts
+      (tenant_id,actor_user_id,site_id,checkpoint_id,round_id,client_mutation_id,payload_hash,
+       method,outcome,reason_code,client_captured_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (tenant_id,client_mutation_id) DO NOTHING`,
+    [tenantId, userId, knownSite?.rows[0]?.id ?? null, checkpointId.success ? checkpointId.data : null,
+      roundId.success ? roundId.data : null, clientMutationId, payloadHash, method.success ? method.data : null,
+      reasonCode === 'duplicate_scan' ? 'duplicate' : 'rejected', reasonCode,
+      validCapturedAt.success ? validCapturedAt.data : null]
+  );
 }
 
 export async function recordPatrolException(
@@ -456,12 +650,29 @@ async function insertRouteVersion(
   version: number,
   name: string,
   changeReason: string,
+  settings: {
+    flexibleOrder: boolean;
+    targetDurationMinutes: number | null;
+    lateToleranceMinutes: number;
+    timeWindowStart: string | null;
+    timeWindowEnd: string | null;
+    recurrenceFrequency: 'none' | 'daily' | 'weekly';
+    recurrenceInterval: number;
+    recurrenceDays: number[];
+    employeeIds: string[];
+  },
   checkpoints: Array<{ checkpointId: string; plannedOffsetMinutes: number }>
 ): Promise<string> {
   const inserted = await db.query(
-    `INSERT INTO patrol_route_versions (tenant_id,route_id,version,name,change_reason,created_by_user_id)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-    [tenantId, routeId, version, name, changeReason, actorUserId]
+    `INSERT INTO patrol_route_versions
+       (tenant_id,route_id,version,name,change_reason,created_by_user_id,flexible_order,
+        target_duration_minutes,late_tolerance_minutes,time_window_start,time_window_end,
+        recurrence_frequency,recurrence_interval,recurrence_days)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+    [tenantId, routeId, version, name, changeReason, actorUserId, settings.flexibleOrder,
+      settings.targetDurationMinutes, settings.lateToleranceMinutes, settings.timeWindowStart,
+      settings.timeWindowEnd, settings.recurrenceFrequency, settings.recurrenceInterval,
+      settings.recurrenceDays]
   );
   const versionId = inserted.rows[0].id as string;
   for (const [index, item] of checkpoints.entries()) {
@@ -472,8 +683,28 @@ async function insertRouteVersion(
       [tenantId, versionId, item.checkpointId, siteId, index + 1, item.plannedOffsetMinutes]
     );
   }
+  if (settings.employeeIds.length) {
+    const assignedEmployees = await db.query(
+      `SELECT e.id FROM employees e
+        JOIN employee_site_assignments esa
+          ON esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=$3
+       WHERE e.tenant_id=$1 AND e.id=ANY($2::uuid[]) AND e.archived_at IS NULL`,
+      [tenantId, settings.employeeIds, siteId]
+    );
+    if (assignedEmployees.rows.length !== settings.employeeIds.length) {
+      throw statusError(400, 'Alle Routenzuweisungen müssen aktive Mitarbeiter mit Objektzuordnung enthalten.');
+    }
+    await db.query(
+      `INSERT INTO patrol_route_version_assignments
+        (tenant_id,route_version_id,route_id,site_id,employee_id,created_by_user_id)
+       SELECT $1,$2,$3,$4,employee_id,$5
+         FROM unnest($6::uuid[]) AS selected(employee_id)`,
+      [tenantId, versionId, routeId, siteId, actorUserId, settings.employeeIds]
+    );
+  }
   await writeEvent(db, tenantId, siteId, actorUserId, 'route_version', versionId, 'created', {
-    routeId, version, changeReason, checkpointCount: checkpoints.length
+    routeId, version, changeReason, checkpointCount: checkpoints.length,
+    assignedEmployeeCount: settings.employeeIds.length
   });
   return versionId;
 }
@@ -485,6 +716,15 @@ export async function listRoutes(req: Request, res: Response, next: NextFunction
       const result = await db.query(
         `SELECT r.id,r.site_id,s.name AS site_name,r.route_code,r.name,r.current_version,r.active,r.created_at,r.updated_at,
                 v.id AS version_id,v.change_reason,v.created_at AS version_created_at,
+                v.flexible_order,v.target_duration_minutes,v.late_tolerance_minutes,
+                v.time_window_start,v.time_window_end,v.recurrence_frequency,v.recurrence_interval,v.recurrence_days,
+                COALESCE((
+                  SELECT jsonb_agg(jsonb_build_object('id',e.id,'name',concat_ws(' ',e.first_name,e.last_name))
+                                   ORDER BY e.last_name,e.first_name)
+                    FROM patrol_route_version_assignments a
+                    JOIN employees e ON e.tenant_id=a.tenant_id AND e.id=a.employee_id
+                   WHERE a.tenant_id=r.tenant_id AND a.route_version_id=v.id
+                ),'[]'::jsonb) AS assigned_employees,
                 COALESCE(jsonb_agg(jsonb_build_object(
                   'checkpointId',c.id,'code',c.code,'name',c.name,'sequence',vc.sequence_no,
                   'plannedOffsetMinutes',vc.planned_offset_minutes
@@ -494,7 +734,10 @@ export async function listRoutes(req: Request, res: Response, next: NextFunction
            LEFT JOIN patrol_route_version_checkpoints vc ON vc.tenant_id=v.tenant_id AND vc.route_version_id=v.id
            LEFT JOIN patrol_checkpoints c ON c.tenant_id=vc.tenant_id AND c.id=vc.checkpoint_id
           WHERE r.tenant_id=$1 AND ($2::uuid IS NULL OR r.site_id=$2)
-          GROUP BY r.id,s.name,v.id ORDER BY s.name,r.route_code`,
+          GROUP BY r.id,r.tenant_id,r.site_id,s.name,r.route_code,r.name,r.current_version,r.active,r.created_at,r.updated_at,
+                   v.id,v.change_reason,v.created_at,v.flexible_order,v.target_duration_minutes,v.late_tolerance_minutes,
+                   v.time_window_start,v.time_window_end,v.recurrence_frequency,v.recurrence_interval,v.recurrence_days
+          ORDER BY s.name,r.route_code`,
         [req.user!.tenantId, siteId || null]
       );
       return result.rows;
@@ -514,7 +757,8 @@ export async function createRoute(req: Request, res: Response, next: NextFunctio
       );
       const routeId = inserted.rows[0].id as string;
       const versionId = await insertRouteVersion(
-        db, req.user!.tenantId, req.user!.userId, routeId, input.siteId, 1, input.name, input.changeReason, input.checkpoints
+        db, req.user!.tenantId, req.user!.userId, routeId, input.siteId, 1, input.name, input.changeReason,
+        input, input.checkpoints
       );
       await writeEvent(db, req.user!.tenantId, input.siteId, req.user!.userId, 'route', routeId, 'created', {
         version: 1, versionId
@@ -539,7 +783,7 @@ export async function createRouteVersion(req: Request, res: Response, next: Next
       const version = currentVersion + 1;
       const versionId = await insertRouteVersion(
         db, req.user!.tenantId, req.user!.userId, routeId, route.rows[0].site_id, version,
-        input.name, input.changeReason, input.checkpoints
+        input.name, input.changeReason, input, input.checkpoints
       );
       await db.query(
         `UPDATE patrol_routes SET name=$1,current_version=$2,updated_at=CURRENT_TIMESTAMP
@@ -582,12 +826,19 @@ export async function listScans(req: Request, res: Response, next: NextFunction)
                 p.checkpoint_code,p.checkpoint_name,p.guard_id,p.scanned_at,p.client_captured_at,
                 p.server_received_at,p.method,p.verification_status,p.notes,p.round_id
            FROM patrol_scans p JOIN sites s ON s.id=p.site_id AND s.tenant_id=p.tenant_id
+           LEFT JOIN patrol_rounds r ON r.id=p.round_id AND r.tenant_id=p.tenant_id
           WHERE p.tenant_id=$1
             AND ($2::uuid IS NULL OR p.site_id=$2)
-            AND ($3::date IS NULL OR p.scanned_at >= $3::date)
-            AND ($4::date IS NULL OR p.scanned_at < $4::date + interval '1 day')
-          ORDER BY p.scanned_at DESC,p.id DESC LIMIT $5 OFFSET $6`,
-        [req.user!.tenantId, filters.siteId || null, filters.from || null, filters.to || null, filters.limit, filters.offset]
+            AND ($3::uuid IS NULL OR s.client_id=$3)
+            AND ($4::uuid IS NULL OR p.guard_id=$4)
+            AND ($5::uuid IS NULL OR r.route_id=$5)
+            AND ($6::text IS NULL OR r.status=$6)
+            AND ($7::date IS NULL OR p.scanned_at >= $7::date)
+            AND ($8::date IS NULL OR p.scanned_at < $8::date + interval '1 day')
+          ORDER BY p.scanned_at DESC,p.id DESC LIMIT $9 OFFSET $10`,
+        [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+          filters.routeId || null, filters.status || null, filters.from || null, filters.to || null,
+          filters.limit, filters.offset]
       );
       return result.rows;
     });
@@ -598,18 +849,27 @@ export async function listScans(req: Request, res: Response, next: NextFunction)
 export async function listRounds(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const filters = listQuerySchema.parse(req.query);
+    const includeAllRounds = req.user!.permissions.includes('patrol:manage') ||
+      req.user!.permissions.includes('patrol:audit') ||
+      req.user!.permissions.includes('patrol:analytics:read');
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const result = await db.query(
         `SELECT r.id,r.site_id,s.name AS site_name,r.route_id,r.route_version,r.status,
+                r.guard_user_id,e.id AS guard_id,concat_ws(' ',e.first_name,e.last_name) AS guard_name,
                 r.started_at,r.completed_at,r.client_captured_at,r.server_received_at
            FROM patrol_rounds r JOIN sites s ON s.id=r.site_id AND s.tenant_id=r.tenant_id
-          WHERE r.tenant_id=$1 AND r.guard_user_id=$2
-            AND ($3::uuid IS NULL OR r.site_id=$3)
-            AND ($4::text IS NULL OR r.status=$4)
-            AND ($5::date IS NULL OR r.started_at >= $5::date)
-            AND ($6::date IS NULL OR r.started_at < $6::date + interval '1 day')
-          ORDER BY r.started_at DESC,r.id DESC LIMIT $7 OFFSET $8`,
-        [req.user!.tenantId, req.user!.userId, filters.siteId || null, filters.status || null,
+           LEFT JOIN employees e ON e.tenant_id=r.tenant_id AND e.account_user_id=r.guard_user_id
+          WHERE r.tenant_id=$1 AND ($2::boolean OR r.guard_user_id=$3)
+            AND ($4::uuid IS NULL OR r.site_id=$4)
+            AND ($5::uuid IS NULL OR s.client_id=$5)
+            AND ($6::uuid IS NULL OR e.id=$6)
+            AND ($7::uuid IS NULL OR r.route_id=$7)
+            AND ($8::text IS NULL OR r.status=$8)
+            AND ($9::date IS NULL OR r.started_at >= $9::date)
+            AND ($10::date IS NULL OR r.started_at < $10::date + interval '1 day')
+          ORDER BY r.started_at DESC,r.id DESC LIMIT $11 OFFSET $12`,
+        [req.user!.tenantId, includeAllRounds, req.user!.userId, filters.siteId || null,
+          filters.clientId || null, filters.employeeId || null, filters.routeId || null, filters.status || null,
           filters.from || null, filters.to || null, filters.limit, filters.offset]
       );
       return result.rows;
@@ -625,16 +885,59 @@ export async function listExceptions(req: Request, res: Response, next: NextFunc
       const result = await db.query(
         `SELECT e.id,e.site_id,s.name AS site_name,e.round_id,e.scan_id,e.checkpoint_id,
                 e.category,e.severity,e.description,e.client_captured_at,e.server_received_at,
-                e.created_by_user_id,e.created_at
+                e.created_by_user_id,e.created_at,round.guard_user_id,employee.id AS guard_id,
+                concat_ws(' ',employee.first_name,employee.last_name) AS guard_name,round.route_id,round.status AS round_status
            FROM patrol_exceptions e JOIN sites s ON s.id=e.site_id AND s.tenant_id=e.tenant_id
+           LEFT JOIN patrol_rounds round ON round.tenant_id=e.tenant_id AND round.id=e.round_id
+           LEFT JOIN employees employee ON employee.tenant_id=e.tenant_id
+              AND employee.account_user_id=COALESCE(round.guard_user_id,e.created_by_user_id)
           WHERE e.tenant_id=$1
             AND ($2::uuid IS NULL OR e.site_id=$2)
-            AND ($3::date IS NULL OR e.created_at >= $3::date)
-            AND ($4::date IS NULL OR e.created_at < $4::date + interval '1 day')
-            AND ($5::text IS NULL OR e.category=$5)
-          ORDER BY e.created_at DESC,e.id DESC LIMIT $6 OFFSET $7`,
-        [req.user!.tenantId, filters.siteId || null, filters.from || null, filters.to || null,
+            AND ($3::uuid IS NULL OR s.client_id=$3)
+            AND ($4::uuid IS NULL OR employee.id=$4)
+            AND ($5::uuid IS NULL OR round.route_id=$5)
+            AND ($6::text IS NULL OR round.status=$6)
+            AND ($7::date IS NULL OR e.created_at >= $7::date)
+            AND ($8::date IS NULL OR e.created_at < $8::date + interval '1 day')
+            AND ($9::text IS NULL OR e.category=$9)
+          ORDER BY e.created_at DESC,e.id DESC LIMIT $10 OFFSET $11`,
+        [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+          filters.routeId || null, filters.status || null, filters.from || null, filters.to || null,
           filters.category || null, filters.limit, filters.offset]
+      );
+      return result.rows;
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function listScanAttempts(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const filters = listQuerySchema.parse(req.query);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const result = await db.query(
+        `SELECT a.id,a.site_id,s.name AS site_name,a.checkpoint_id,c.code AS checkpoint_code,
+                a.round_id,r.route_id,r.status AS round_status,a.actor_user_id,
+                employee.id AS employee_id,concat_ws(' ',employee.first_name,employee.last_name) AS employee_name,
+                a.client_mutation_id,a.method,a.outcome,a.reason_code,a.client_captured_at,a.server_received_at
+           FROM patrol_scan_attempts a
+           LEFT JOIN sites s ON s.id=a.site_id AND s.tenant_id=a.tenant_id
+           LEFT JOIN patrol_checkpoints c ON c.id=a.checkpoint_id AND c.tenant_id=a.tenant_id
+           LEFT JOIN patrol_rounds r ON r.id=a.round_id AND r.tenant_id=a.tenant_id
+           LEFT JOIN employees employee ON employee.tenant_id=a.tenant_id
+             AND employee.account_user_id=a.actor_user_id
+          WHERE a.tenant_id=$1
+            AND ($2::uuid IS NULL OR a.site_id=$2)
+            AND ($3::uuid IS NULL OR s.client_id=$3)
+            AND ($4::uuid IS NULL OR employee.id=$4)
+            AND ($5::uuid IS NULL OR r.route_id=$5)
+            AND ($6::text IS NULL OR r.status=$6)
+            AND ($7::date IS NULL OR a.server_received_at >= $7::date)
+            AND ($8::date IS NULL OR a.server_received_at < $8::date + interval '1 day')
+          ORDER BY a.server_received_at DESC,a.id DESC LIMIT $9 OFFSET $10`,
+        [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+          filters.routeId || null, filters.status || null, filters.from || null, filters.to || null,
+          filters.limit, filters.offset]
       );
       return result.rows;
     });
@@ -748,6 +1051,17 @@ export async function recordPatrolRoundStart(
       [tenantId, routeId, routeVersion]
     );
     if (!versionExists.rows.length) throw statusError(409, 'Die zwischengespeicherte Routenversion ist nicht mehr verfügbar.');
+    const routeAssignments = await db.query(
+      `SELECT count(*)::int AS total,
+              count(*) FILTER (WHERE employee_id=$4)::int AS assigned
+         FROM patrol_route_version_assignments
+        WHERE tenant_id=$1 AND route_id=$2
+          AND route_version_id=(SELECT id FROM patrol_route_versions WHERE tenant_id=$1 AND route_id=$2 AND version=$3)`,
+      [tenantId, routeId, routeVersion, assignment.rows[0].id]
+    );
+    if (routeAssignments.rows[0].total > 0 && routeAssignments.rows[0].assigned === 0) {
+      throw statusError(403, 'Mitarbeiter ist dieser Routenversion nicht zugeordnet.');
+    }
   } else if (input.routeVersion !== undefined) {
     throw statusError(400, 'Eine Routenversion erfordert eine Routen-ID.');
   }
@@ -774,11 +1088,12 @@ export async function completeRound(req: Request, res: Response, next: NextFunct
     const roundId = uuid.parse(req.params.id);
     const body = z.object({
       clientMutationId: z.string().min(8).max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
-      completedAt: dateTime.optional()
+      completedAt: dateTime.optional(),
+      notes: z.string().trim().max(2000).optional()
     }).strict().parse(req.body);
     const completedAt = body.completedAt || new Date().toISOString();
     const clientMutationId = body.clientMutationId || crypto.randomUUID();
-    const payload = { roundId, completedAt };
+    const payload = { roundId, completedAt, ...(body.notes !== undefined ? { notes: body.notes } : {}) };
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       return recordPatrolRoundCompletion(
         db, req.user!.tenantId, req.user!.userId, clientMutationId, payload,
@@ -829,7 +1144,7 @@ export async function recordPatrolRoundCompletion(
   }
 
   const round = await db.query(
-    `SELECT id,site_id,status,guard_user_id FROM patrol_rounds
+    `SELECT id,site_id,status,guard_user_id,route_id,route_version,started_at FROM patrol_rounds
       WHERE id=$1 AND tenant_id=$2 FOR UPDATE`,
     [input.roundId, tenantId]
   );
@@ -843,16 +1158,70 @@ export async function recordPatrolRoundCompletion(
     `UPDATE patrol_rounds
         SET status='completed',completed_at=$1,completion_client_captured_at=$1,
             completion_server_received_at=CURRENT_TIMESTAMP,completion_client_mutation_id=$2,
-            completion_payload_hash=$3
-      WHERE id=$4 AND tenant_id=$5 AND guard_user_id=$6 AND status='in_progress'
+              completion_payload_hash=$3,completion_notes=$4
+      WHERE id=$5 AND tenant_id=$6 AND guard_user_id=$7 AND status='in_progress'
       RETURNING id,site_id,completed_at`,
-    [input.completedAt, clientMutationId, payloadHash, input.roundId, tenantId, userId]
+    [input.completedAt, clientMutationId, payloadHash, input.notes, input.roundId, tenantId, userId]
   );
   if (!result.rows.length) throw statusError(409, 'Kontrollgang wurde parallel abgeschlossen.');
   await writeEvent(db, tenantId, round.rows[0].site_id, userId, 'round', input.roundId, 'completed', {
     clientCapturedAt: input.completedAt,
-    clientMutationId
+    clientMutationId,
+    notes: input.notes
   });
+  if (round.rows[0].route_id && round.rows[0].route_version !== null) {
+    const routeSettings = await db.query(
+      `SELECT target_duration_minutes,late_tolerance_minutes
+         FROM patrol_route_versions
+        WHERE tenant_id=$1 AND route_id=$2 AND version=$3`,
+      [tenantId, round.rows[0].route_id, round.rows[0].route_version]
+    );
+    const missing = await db.query(
+      `SELECT vc.checkpoint_id,c.code,vc.sequence_no
+         FROM patrol_route_version_checkpoints vc
+         JOIN patrol_route_versions rv
+           ON rv.id=vc.route_version_id AND rv.tenant_id=vc.tenant_id
+         JOIN patrol_checkpoints c ON c.tenant_id=vc.tenant_id AND c.id=vc.checkpoint_id
+        WHERE vc.tenant_id=$1 AND rv.route_id=$2 AND rv.version=$3
+          AND NOT EXISTS (
+            SELECT 1 FROM patrol_scans ps
+             WHERE ps.tenant_id=$1 AND ps.round_id=$4 AND ps.checkpoint_uuid=vc.checkpoint_id
+          )`,
+      [tenantId, round.rows[0].route_id, round.rows[0].route_version, input.roundId]
+    );
+    for (const checkpoint of missing.rows) {
+      await recordAutomaticPatrolException(db, tenantId, userId, {
+        siteId: round.rows[0].site_id,
+        roundId: input.roundId,
+        checkpointId: checkpoint.checkpoint_id,
+        category: 'missed_checkpoint',
+        capturedAt: input.completedAt,
+        description: `Kontrollgang abgeschlossen, ohne Kontrollpunkt ${checkpoint.code} zu erfassen.`
+      });
+    }
+    const targetDuration = routeSettings.rows.length ? routeSettings.rows[0].target_duration_minutes : null;
+    const elapsedMinutes = (Date.parse(input.completedAt) - Date.parse(String(round.rows[0].started_at))) / 60_000;
+    if (targetDuration !== null && targetDuration !== undefined &&
+        elapsedMinutes > Number(targetDuration) + Number(routeSettings.rows[0].late_tolerance_minutes)) {
+      const firstCheckpoint = await db.query(
+        `SELECT checkpoint_id FROM patrol_route_version_checkpoints vc
+          JOIN patrol_route_versions rv ON rv.id=vc.route_version_id AND rv.tenant_id=vc.tenant_id
+         WHERE vc.tenant_id=$1 AND rv.route_id=$2 AND rv.version=$3
+         ORDER BY vc.sequence_no LIMIT 1`,
+        [tenantId, round.rows[0].route_id, round.rows[0].route_version]
+      );
+      if (firstCheckpoint.rows.length) {
+        await recordAutomaticPatrolException(db, tenantId, userId, {
+          siteId: round.rows[0].site_id,
+          roundId: input.roundId,
+          checkpointId: firstCheckpoint.rows[0].checkpoint_id,
+          category: 'late_checkpoint',
+          capturedAt: input.completedAt,
+          description: `Kontrollgang überschritt die Soll-Dauer von ${targetDuration} Minuten zuzüglich Toleranz.`
+        });
+      }
+    }
+  }
   return { ...result.rows[0], status: 'completed', idempotent: false };
 }
 
@@ -863,38 +1232,84 @@ export async function getDashboard(req: Request, res: Response, next: NextFuncti
       const [scans, exceptions, rounds] = await Promise.all([
         db.query(
           `SELECT count(*)::int AS total,
-                  count(*) FILTER (WHERE verification_status='verified')::int AS verified,
-                  count(*) FILTER (WHERE verification_status='manual')::int AS manual
-             FROM patrol_scans
-            WHERE tenant_id=$1 AND ($2::uuid IS NULL OR site_id=$2)
-              AND ($3::date IS NULL OR scanned_at >= $3::date)
-              AND ($4::date IS NULL OR scanned_at < $4::date + interval '1 day')`,
-          [req.user!.tenantId, filters.siteId || null, filters.from || null, filters.to || null]
+                  count(*) FILTER (WHERE p.verification_status='verified')::int AS verified,
+                  count(*) FILTER (WHERE p.verification_status='manual')::int AS manual
+             FROM patrol_scans p
+             JOIN sites s ON s.id=p.site_id AND s.tenant_id=p.tenant_id
+             LEFT JOIN patrol_rounds r ON r.id=p.round_id AND r.tenant_id=p.tenant_id
+            WHERE p.tenant_id=$1 AND ($2::uuid IS NULL OR p.site_id=$2)
+              AND ($3::uuid IS NULL OR s.client_id=$3)
+              AND ($4::uuid IS NULL OR p.guard_id=$4)
+              AND ($5::uuid IS NULL OR r.route_id=$5)
+              AND ($6::text IS NULL OR r.status=$6)
+              AND ($7::date IS NULL OR p.scanned_at >= $7::date)
+              AND ($8::date IS NULL OR p.scanned_at < $8::date + interval '1 day')`,
+          [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+            filters.routeId || null, filters.status || null, filters.from || null, filters.to || null]
         ),
         db.query(
           `SELECT count(*)::int AS total,
                   count(*) FILTER (WHERE severity IN ('high','critical'))::int AS urgent
-             FROM patrol_exceptions
-            WHERE tenant_id=$1 AND ($2::uuid IS NULL OR site_id=$2)
-              AND ($3::date IS NULL OR created_at >= $3::date)
-              AND ($4::date IS NULL OR created_at < $4::date + interval '1 day')`,
-          [req.user!.tenantId, filters.siteId || null, filters.from || null, filters.to || null]
+             FROM patrol_exceptions e
+             JOIN sites s ON s.id=e.site_id AND s.tenant_id=e.tenant_id
+             LEFT JOIN patrol_rounds r ON r.id=e.round_id AND r.tenant_id=e.tenant_id
+             LEFT JOIN employees employee ON employee.tenant_id=e.tenant_id
+               AND employee.account_user_id=COALESCE(r.guard_user_id,e.created_by_user_id)
+            WHERE e.tenant_id=$1 AND ($2::uuid IS NULL OR e.site_id=$2)
+              AND ($3::uuid IS NULL OR s.client_id=$3)
+              AND ($4::uuid IS NULL OR employee.id=$4)
+              AND ($5::uuid IS NULL OR r.route_id=$5)
+              AND ($6::text IS NULL OR r.status=$6)
+              AND ($7::text IS NULL OR e.category=$7)
+              AND ($8::date IS NULL OR e.created_at >= $8::date)
+              AND ($9::date IS NULL OR e.created_at < $9::date + interval '1 day')`,
+          [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+            filters.routeId || null, filters.status || null, filters.category || null,
+            filters.from || null, filters.to || null]
         ),
         db.query(
           `SELECT count(*)::int AS total,
-                  count(*) FILTER (WHERE status='in_progress')::int AS in_progress,
-                  count(*) FILTER (WHERE status='completed')::int AS completed
-             FROM patrol_rounds
-            WHERE tenant_id=$1 AND ($2::uuid IS NULL OR site_id=$2)
-              AND ($3::date IS NULL OR started_at >= $3::date)
-              AND ($4::date IS NULL OR started_at < $4::date + interval '1 day')`,
-          [req.user!.tenantId, filters.siteId || null, filters.from || null, filters.to || null]
+                  count(*) FILTER (WHERE r.status='in_progress')::int AS in_progress,
+                  count(*) FILTER (WHERE r.status='completed')::int AS completed
+             FROM patrol_rounds r
+             JOIN sites s ON s.id=r.site_id AND s.tenant_id=r.tenant_id
+             LEFT JOIN employees e ON e.tenant_id=r.tenant_id AND e.account_user_id=r.guard_user_id
+            WHERE r.tenant_id=$1 AND ($2::uuid IS NULL OR r.site_id=$2)
+              AND ($3::uuid IS NULL OR s.client_id=$3)
+              AND ($4::uuid IS NULL OR e.id=$4)
+              AND ($5::uuid IS NULL OR r.route_id=$5)
+              AND ($6::text IS NULL OR r.status=$6)
+              AND ($7::date IS NULL OR r.started_at >= $7::date)
+              AND ($8::date IS NULL OR r.started_at < $8::date + interval '1 day')`,
+          [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+            filters.routeId || null, filters.status || null, filters.from || null, filters.to || null]
         )
       ]);
+      const canReadAttempts = req.user!.permissions.includes('patrol:scan-attempt:read') ||
+        req.user!.permissions.includes('patrol:history:read') || req.user!.permissions.includes('patrol:audit');
+      const attempts = canReadAttempts ? await db.query(
+        `SELECT count(*)::int AS total,
+                count(*) FILTER (WHERE a.outcome='rejected')::int AS rejected,
+                count(*) FILTER (WHERE a.outcome='duplicate')::int AS duplicate
+           FROM patrol_scan_attempts a
+           LEFT JOIN sites s ON s.id=a.site_id AND s.tenant_id=a.tenant_id
+           LEFT JOIN patrol_rounds r ON r.id=a.round_id AND r.tenant_id=a.tenant_id
+           LEFT JOIN employees e ON e.tenant_id=a.tenant_id AND e.account_user_id=a.actor_user_id
+          WHERE a.tenant_id=$1 AND ($2::uuid IS NULL OR a.site_id=$2)
+            AND ($3::uuid IS NULL OR s.client_id=$3)
+            AND ($4::uuid IS NULL OR e.id=$4)
+            AND ($5::uuid IS NULL OR r.route_id=$5)
+            AND ($6::text IS NULL OR r.status=$6)
+            AND ($7::date IS NULL OR a.server_received_at >= $7::date)
+            AND ($8::date IS NULL OR a.server_received_at < $8::date + interval '1 day')`,
+        [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+          filters.routeId || null, filters.status || null, filters.from || null, filters.to || null]
+      ) : null;
       return {
         scans: scans.rows[0],
         exceptions: exceptions.rows[0],
-        rounds: rounds.rows[0]
+        rounds: rounds.rows[0],
+        scanAttempts: attempts?.rows[0] ?? null
       };
     });
     res.json({ success: true, data });

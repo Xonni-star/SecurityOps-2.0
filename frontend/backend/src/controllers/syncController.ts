@@ -7,7 +7,8 @@ import {
   recordPatrolException,
   recordPatrolRoundCompletion,
   recordPatrolRoundStart,
-  recordPatrolScan
+  recordPatrolScan,
+  recordPatrolScanAttempt
 } from './patrolController';
 
 export { canonicalStringify, computePayloadHash } from '../services/syncHash';
@@ -67,6 +68,17 @@ export function hasMutationPermission(
     (entityType === 'handover' && permissions.includes('handover:create'));
 }
 
+function hasPatrolMutationPermission(recordType: unknown, permissions: string[]): boolean {
+  const specificPermission = recordType === 'round_start'
+    ? 'patrol:round:start'
+    : recordType === 'round_complete'
+      ? 'patrol:round:complete'
+      : recordType === 'exception'
+        ? 'patrol:exception:create'
+        : 'patrol:round:perform';
+  return permissions.includes(specificPermission) || permissions.includes('patrol:create');
+}
+
 /**
  * Kanonische, rekursive Serialisierung:
  * Sortiert alle Schlüssel verschachtelter Objekte und normalisiert Arrays deterministisch,
@@ -87,8 +99,8 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
-        const hasPermission = mut.entityType === 'patrol' && mut.payload.recordType === 'exception'
-          ? req.user!.permissions.includes('patrol:exception:create')
+        const hasPermission = mut.entityType === 'patrol'
+          ? hasPatrolMutationPermission(mut.payload.recordType, req.user!.permissions)
           : hasMutationPermission(mut.entityType, req.user!.permissions);
         if (!hasPermission) {
           results.push({
@@ -652,6 +664,13 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
             } catch (error) {
               const statusCode = Number((error as any)?.statusCode);
               if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) throw error;
+              const attemptReason = (error as { patrolScanAttemptCode?: Parameters<typeof recordPatrolScanAttempt>[7] })
+                .patrolScanAttemptCode;
+              if (attemptReason) {
+                await recordPatrolScanAttempt(
+                  client, tenantId, userId, mut.clientUuid, mut.payload, mut.clientTimestamp, payloadHash, attemptReason
+                );
+              }
               itemResult = {
                 clientUuid: mut.clientUuid,
                 serverId: 'none',

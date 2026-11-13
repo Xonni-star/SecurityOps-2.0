@@ -30,6 +30,15 @@ interface PatrolRoute {
   current_version: number;
   active: boolean;
   archived_at?: string | null;
+  flexible_order?: boolean;
+  target_duration_minutes?: number | null;
+  late_tolerance_minutes?: number;
+  time_window_start?: string | null;
+  time_window_end?: string | null;
+  recurrence_frequency?: 'none' | 'daily' | 'weekly';
+  recurrence_interval?: number;
+  recurrence_days?: number[];
+  assigned_employees?: Array<{ id: string; name: string }>;
   checkpoints: Array<{ checkpointId: string; code: string; name: string; sequence: number; plannedOffsetMinutes: number }>;
 }
 
@@ -53,21 +62,29 @@ interface PatrolException {
   created_at: string;
 }
 
+interface PatrolScanAttempt {
+  id: string;
+  employee_name?: string | null;
+  checkpoint_code?: string | null;
+  reason_code: string;
+  outcome: 'rejected' | 'duplicate';
+  server_received_at: string;
+}
+
 interface PatrolStats {
   scans: { total: number; verified: number; manual: number };
   exceptions: { total: number; urgent: number };
   rounds: { total: number; in_progress: number; completed: number };
+  scanAttempts: { total: number; rejected: number; duplicate: number } | null;
 }
 
 interface CreatedCheckpoint extends PatrolCheckpoint {
   scanPayload: string;
 }
 
-function queryString(siteId: string, from: string, to: string): string {
+function queryString(filters: Record<string, string>): string {
   const query = new URLSearchParams();
-  if (siteId) query.set('siteId', siteId);
-  if (from) query.set('from', from);
-  if (to) query.set('to', to);
+  Object.entries(filters).forEach(([key, value]) => { if (value) query.set(key, value); });
   const value = query.toString();
   return value ? `?${value}` : '';
 }
@@ -79,14 +96,25 @@ function formatTime(value: string): string {
 
 export const PatrolModule: React.FC = () => {
   const {
-    getTenantSites, currentTenantId, authUser, isOnline, enqueueOfflineAction,
+    getTenantSites, getTenantEmployees, currentTenantId, authUser, isOnline, enqueueOfflineAction,
     triggerManualSync, syncQueue
   } = useSecurityStore();
   const sites = getTenantSites();
+  const tenantEmployees = getTenantEmployees();
   const permissions = authUser?.permissions || [];
-  const canManage = permissions.includes('patrol:manage');
+  const canManage = permissions.includes('patrol:manage') ||
+    permissions.includes('patrol:checkpoint:manage') ||
+    permissions.includes('patrol:route:manage');
+  const canReadScanAttempts = permissions.includes('patrol:scan-attempt:read') ||
+    permissions.includes('patrol:history:read') ||
+    permissions.includes('patrol:audit');
   const canReportException = permissions.includes('patrol:exception:create');
   const [siteId, setSiteId] = useState('');
+  const [clientId, setClientId] = useState('');
+  const [employeeId, setEmployeeId] = useState('');
+  const [routeId, setRouteId] = useState('');
+  const [status, setStatus] = useState('');
+  const [category, setCategory] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [stats, setStats] = useState<PatrolStats | null>(null);
@@ -94,6 +122,7 @@ export const PatrolModule: React.FC = () => {
   const [routes, setRoutes] = useState<PatrolRoute[]>([]);
   const [scans, setScans] = useState<PatrolScan[]>([]);
   const [exceptions, setExceptions] = useState<PatrolException[]>([]);
+  const [scanAttempts, setScanAttempts] = useState<PatrolScanAttempt[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
@@ -112,35 +141,50 @@ export const PatrolModule: React.FC = () => {
   const [routeCode, setRouteCode] = useState('');
   const [routeName, setRouteName] = useState('');
   const [routeChangeReason, setRouteChangeReason] = useState('');
+  const [flexibleOrder, setFlexibleOrder] = useState(false);
+  const [targetDurationMinutes, setTargetDurationMinutes] = useState(60);
+  const [lateToleranceMinutes, setLateToleranceMinutes] = useState(5);
+  const [timeWindowStart, setTimeWindowStart] = useState('');
+  const [timeWindowEnd, setTimeWindowEnd] = useState('');
+  const [recurrenceFrequency, setRecurrenceFrequency] = useState<'none' | 'daily' | 'weekly'>('none');
+  const [recurrenceInterval, setRecurrenceInterval] = useState(1);
+  const [recurrenceDays, setRecurrenceDays] = useState<number[]>([]);
+  const [assignedEmployeeIds, setAssignedEmployeeIds] = useState<string[]>([]);
   const [selectedCheckpointIds, setSelectedCheckpointIds] = useState<string[]>([]);
   const [versionRouteId, setVersionRouteId] = useState('');
   const [exceptionCategory, setExceptionCategory] = useState('other');
   const [exceptionSeverity, setExceptionSeverity] = useState('normal');
   const [exceptionDescription, setExceptionDescription] = useState('');
 
-  const filters = useMemo(() => queryString(siteId, from, to), [siteId, from, to]);
+  const filters = useMemo(() => queryString({
+    siteId, clientId, employeeId, routeId, status, category, from, to
+  }), [siteId, clientId, employeeId, routeId, status, category, from, to]);
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [dashboardData, checkpointData, routeData, scanData, exceptionData] = await Promise.all([
+      const [dashboardData, checkpointData, routeData, scanData, exceptionData, attemptData] = await Promise.all([
         apiClient.get<PatrolStats>(`/patrol/dashboard${filters}`),
         apiClient.get<PatrolCheckpoint[]>(`/patrol/checkpoints${siteId ? `?siteId=${encodeURIComponent(siteId)}` : ''}`),
         apiClient.get<PatrolRoute[]>(`/patrol/routes${siteId ? `?siteId=${encodeURIComponent(siteId)}` : ''}`),
         apiClient.get<PatrolScan[]>(`/patrol/scans${filters}`),
-        apiClient.get<PatrolException[]>(`/patrol/exceptions${filters}`)
+        apiClient.get<PatrolException[]>(`/patrol/exceptions${filters}`),
+        canReadScanAttempts
+          ? apiClient.get<PatrolScanAttempt[]>(`/patrol/scan-attempts${filters}`)
+          : Promise.resolve([])
       ]);
       setStats(dashboardData);
       setCheckpoints(checkpointData);
       setRoutes(routeData);
       setScans(scanData);
       setExceptions(exceptionData);
+      setScanAttempts(attemptData);
       setErrorMessage('');
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Kontrollgangsdaten konnten nicht geladen werden.');
     } finally {
       setLoading(false);
     }
-  }, [filters, siteId]);
+  }, [canReadScanAttempts, filters, siteId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -283,6 +327,15 @@ export const PatrolModule: React.FC = () => {
   const makeRoutePayload = () => ({
     name: routeName,
     changeReason: routeChangeReason,
+    flexibleOrder,
+    targetDurationMinutes,
+    lateToleranceMinutes,
+    timeWindowStart: timeWindowStart || null,
+    timeWindowEnd: timeWindowEnd || null,
+    recurrenceFrequency,
+    recurrenceInterval,
+    recurrenceDays: recurrenceFrequency === 'weekly' ? recurrenceDays : [],
+    employeeIds: assignedEmployeeIds,
     checkpoints: selectedForRoute.map((point, index) => ({ checkpointId: point.id, plannedOffsetMinutes: index * point.required_interval_minutes }))
   });
 
@@ -371,6 +424,57 @@ export const PatrolModule: React.FC = () => {
 
   const pendingCount = syncQueue.filter(item => item.entityType === 'patrol' && item.status !== 'synced').length;
   const currentSites = sites.filter(site => !site.archivedAt);
+  const clients = Array.from(new Map(currentSites.map(site => [site.clientId, site.clientName])).entries());
+  const employees = tenantEmployees
+    .filter(employee => !employee.archivedAt && (!siteId || employee.assignedSiteIds.includes(siteId)))
+    .map(employee => [employee.id, `${employee.firstName} ${employee.lastName}`] as [string, string]);
+  const renderRoutePlanning = () => (
+    <div className="space-y-3 rounded-lg border border-slate-800 p-3 sm:col-span-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+        <label className="text-[11px] text-slate-300">Zeitfenster von
+          <input type="time" value={timeWindowStart} onChange={event => setTimeWindowStart(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+        </label>
+        <label className="text-[11px] text-slate-300">Zeitfenster bis
+          <input type="time" value={timeWindowEnd} onChange={event => setTimeWindowEnd(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+        </label>
+        <label className="text-[11px] text-slate-300">Wiederholung
+          <select value={recurrenceFrequency} onChange={event => {
+            const frequency = event.target.value as 'none' | 'daily' | 'weekly';
+            setRecurrenceFrequency(frequency);
+            if (frequency !== 'weekly') setRecurrenceDays([]);
+          }} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
+            <option value="none">Keine</option><option value="daily">Täglich</option><option value="weekly">Wöchentlich</option>
+          </select>
+        </label>
+        <label className="text-[11px] text-slate-300">Intervall
+          <input type="number" min={1} max={365} value={recurrenceInterval} onChange={event => setRecurrenceInterval(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+        </label>
+      </div>
+      {recurrenceFrequency === 'weekly' && (
+        <fieldset className="flex flex-wrap gap-3 text-[11px] text-slate-300">
+          <legend>Wochentage</legend>
+          {['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'].map((day, index) => (
+            <label key={day} className="flex items-center gap-1">
+              <input type="checkbox" checked={recurrenceDays.includes(index)} onChange={event => setRecurrenceDays(current =>
+                event.target.checked ? [...current, index].sort() : current.filter(value => value !== index)
+              )} />{day}
+            </label>
+          ))}
+        </fieldset>
+      )}
+      <fieldset className="flex flex-wrap gap-3 text-[11px] text-slate-300">
+        <legend>Mitarbeiterzuordnung (optional)</legend>
+        {employees.length ? employees.map(([id, name]) => (
+          <label key={id} className="flex items-center gap-1">
+            <input type="checkbox" checked={assignedEmployeeIds.includes(id)} onChange={event => setAssignedEmployeeIds(current =>
+              event.target.checked ? [...current, id] : current.filter(value => value !== id)
+            )} />{name}
+          </label>
+        )) : <span>Keine zugeordneten Mitarbeiter für dieses Objekt verfügbar.</span>}
+      </fieldset>
+      <p className="text-[10px] text-slate-500">Wiederholungsregeln und Zeitfenster werden versionsgebunden gespeichert. Die automatische Erzeugung geplanter Rundgangsinstanzen ist noch nicht verfügbar.</p>
+    </div>
+  );
 
   return (
     <div className="space-y-6">
@@ -389,10 +493,35 @@ export const PatrolModule: React.FC = () => {
       {errorMessage && <div role="alert" className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-rose-200">{errorMessage}</div>}
       {notice && <div role="status" className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-emerald-200">{notice}</div>}
 
-      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-5">
+      <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Kunde
+          <select value={clientId} onChange={event => setClientId(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
+            <option value="">Alle Kunden</option>{clients.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+        </label>
         <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Objekt
           <select value={siteId} onChange={event => setSiteId(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
             <option value="">Alle Objekte</option>{currentSites.map(site => <option key={site.id} value={site.id}>{site.name}</option>)}
+          </select>
+        </label>
+        <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Mitarbeiter
+          <select value={employeeId} onChange={event => setEmployeeId(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
+            <option value="">Alle Mitarbeiter</option>{employees.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+          </select>
+        </label>
+        <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Route
+          <select value={routeId} onChange={event => setRouteId(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
+            <option value="">Alle Routen</option>{routes.map(route => <option key={route.id} value={route.id}>{route.route_code} · {route.name}</option>)}
+          </select>
+        </label>
+        <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Rundgangstatus
+          <select value={status} onChange={event => setStatus(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
+            <option value="">Alle Status</option><option value="in_progress">Laufend</option><option value="completed">Abgeschlossen</option><option value="abandoned">Abgebrochen</option>
+          </select>
+        </label>
+        <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Abweichungstyp
+          <select value={category} onChange={event => setCategory(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
+            <option value="">Alle Abweichungen</option><option value="missed_checkpoint">Kontrollpunkt ausgelassen</option><option value="late_checkpoint">Verspätet</option><option value="access_blocked">Zugang blockiert</option><option value="hazard">Gefahr</option><option value="damage">Schaden</option><option value="other">Sonstige</option>
           </select>
         </label>
         <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Von
@@ -403,7 +532,29 @@ export const PatrolModule: React.FC = () => {
         </label>
         <MetricCard label="Scans" value={stats?.scans.total} detail={`${stats?.scans.verified ?? 0} Token-verifiziert · ${stats?.scans.manual ?? 0} manuell`} icon={<CheckCircle2 className="h-4 w-4 text-emerald-400" />} />
         <MetricCard label="Rundgänge / Abweichungen" value={stats ? `${stats.rounds.completed}/${stats.rounds.total} · ${stats.exceptions.total}` : undefined} detail={`${stats?.exceptions.urgent ?? 0} dringlich/kritisch`} icon={<AlertTriangle className="h-4 w-4 text-amber-400" />} />
+        {canReadScanAttempts && <MetricCard label="Scanversuche" value={stats?.scanAttempts?.total} detail={`${stats?.scanAttempts?.rejected ?? 0} abgewiesen · ${stats?.scanAttempts?.duplicate ?? 0} doppelt`} icon={<ShieldCheck className="h-4 w-4 text-amber-400" />} />}
       </section>
+
+      {canReadScanAttempts && <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
+        <h2 className="border-b border-slate-800 px-4 py-3 font-semibold text-white">Abgewiesene und doppelte Scanversuche</h2>
+        {loading ? <p className="p-4 text-sm text-slate-400">Wird geladen …</p> : scanAttempts.length === 0 ? (
+          <p className="p-4 text-sm text-slate-400">Keine Scanversuche im gewählten Filterzeitraum.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-xs">
+              <thead className="text-slate-400"><tr><th className="px-4 py-2">Zeit</th><th className="px-4 py-2">Mitarbeiter</th><th className="px-4 py-2">Kontrollpunkt</th><th className="px-4 py-2">Ergebnis</th></tr></thead>
+              <tbody>{scanAttempts.map(attempt => (
+                <tr key={attempt.id} className="border-t border-slate-800 text-slate-300">
+                  <td className="px-4 py-2">{formatTime(attempt.server_received_at)}</td>
+                  <td className="px-4 py-2">{attempt.employee_name || 'Unbekannt'}</td>
+                  <td className="px-4 py-2">{attempt.checkpoint_code || 'Unbekannt'}</td>
+                  <td className="px-4 py-2">{attempt.outcome === 'duplicate' ? 'Doppelter Scan' : `Abgewiesen · ${attempt.reason_code}`}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          </div>
+        )}
+      </section>}
 
       {canManage && (
         <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
@@ -444,6 +595,17 @@ export const PatrolModule: React.FC = () => {
               <input required maxLength={50} value={routeCode} onChange={event => setRouteCode(event.target.value)} placeholder="Routencode" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
               <input required maxLength={150} value={routeName} onChange={event => setRouteName(event.target.value)} placeholder="Routenname" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
               <input required maxLength={500} value={routeChangeReason} onChange={event => setRouteChangeReason(event.target.value)} placeholder="Änderungsgrund" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white sm:col-span-2" />
+              <label className="flex items-center gap-2 text-[11px] text-slate-300 sm:col-span-2">
+                <input type="checkbox" checked={flexibleOrder} onChange={event => setFlexibleOrder(event.target.checked)} />
+                Flexible Reihenfolge erlauben (sonst feste Reihenfolge)
+              </label>
+              <label className="text-[11px] text-slate-300">Soll-Dauer (Min.)
+                <input type="number" min={1} max={10080} value={targetDurationMinutes} onChange={event => setTargetDurationMinutes(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              </label>
+              <label className="text-[11px] text-slate-300">Verspätungstoleranz (Min.)
+                <input type="number" min={0} max={1440} value={lateToleranceMinutes} onChange={event => setLateToleranceMinutes(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              </label>
+              {renderRoutePlanning()}
             </div>
             <CheckpointPicker checkpoints={checkpoints.filter(point => point.site_id === siteId && point.active)} selected={selectedCheckpointIds} onChange={setSelectedCheckpointIds} />
             <button disabled={saving || !siteId} className="flex items-center gap-2 rounded-lg bg-blue-600 px-3 py-2 font-semibold text-white disabled:opacity-50"><Plus className="h-4 w-4" /> Route v1 anlegen</button>
@@ -457,6 +619,17 @@ export const PatrolModule: React.FC = () => {
               </select>
               <input required maxLength={150} value={routeName} onChange={event => setRouteName(event.target.value)} placeholder="Name der neuen Version" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
               <input required maxLength={500} value={routeChangeReason} onChange={event => setRouteChangeReason(event.target.value)} placeholder="Änderungsgrund" className="rounded-lg border border-slate-700 bg-slate-950 p-2 text-white sm:col-span-2" />
+              <label className="flex items-center gap-2 text-[11px] text-slate-300 sm:col-span-2">
+                <input type="checkbox" checked={flexibleOrder} onChange={event => setFlexibleOrder(event.target.checked)} />
+                Flexible Reihenfolge erlauben (sonst feste Reihenfolge)
+              </label>
+              <label className="text-[11px] text-slate-300">Soll-Dauer (Min.)
+                <input type="number" min={1} max={10080} value={targetDurationMinutes} onChange={event => setTargetDurationMinutes(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              </label>
+              <label className="text-[11px] text-slate-300">Verspätungstoleranz (Min.)
+                <input type="number" min={0} max={1440} value={lateToleranceMinutes} onChange={event => setLateToleranceMinutes(Number(event.target.value))} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+              </label>
+              {renderRoutePlanning()}
             </div>
             <CheckpointPicker checkpoints={checkpoints.filter(point => point.site_id === siteId && point.active)} selected={selectedCheckpointIds} onChange={setSelectedCheckpointIds} />
             <button disabled={saving || !versionRouteId} className="rounded-lg bg-indigo-600 px-3 py-2 font-semibold text-white disabled:opacity-50">Unveränderliche Version veröffentlichen</button>
@@ -487,7 +660,8 @@ export const PatrolModule: React.FC = () => {
           <div className="space-y-2">{routes.map(route => (
             <article key={route.id} className="rounded-lg border border-slate-800 bg-slate-950 p-3">
               <div className="flex items-center justify-between gap-2"><strong className="text-slate-100">{route.route_code} · {route.name}</strong><span className="rounded bg-indigo-500/15 px-2 py-1 text-indigo-200">v{route.current_version}{route.active ? '' : ' · inaktiv'}</span></div>
-              <p className="mt-1 text-[11px] text-slate-400">{route.site_name} · {route.checkpoints.map(point => point.code).join(' → ')}</p>
+              <p className="mt-1 text-[11px] text-slate-400">{route.site_name} · {route.checkpoints.map(point => point.code).join(route.flexible_order ? ' · ' : ' → ')}</p>
+              <p className="mt-1 text-[10px] text-slate-500">{route.flexible_order ? 'Flexible Reihenfolge' : 'Feste Reihenfolge'} · Soll {route.target_duration_minutes ?? '—'} Min. · Verspätungstoleranz {route.late_tolerance_minutes ?? 5} Min.</p>
               {canManage && route.active && <button disabled={saving} onClick={() => void archiveRoute(route.id)} className="mt-2 rounded bg-slate-800 px-2 py-1 text-[10px] text-amber-200">Route archivieren</button>}
             </article>
           ))}</div>

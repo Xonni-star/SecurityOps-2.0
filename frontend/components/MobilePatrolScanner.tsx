@@ -27,6 +27,8 @@ interface PatrolRoute {
   siteId: string;
   name: string;
   currentVersion: number;
+  flexibleOrder: boolean;
+  lateToleranceMinutes: number;
   checkpoints: Array<{ checkpointId: string; code: string; name: string; sequence: number; plannedOffsetMinutes: number }>;
 }
 
@@ -94,6 +96,8 @@ function mapRoute(row: Record<string, unknown>): PatrolRoute {
     siteId: String(row.site_id ?? row.siteId),
     name: String(row.name),
     currentVersion: Number(row.current_version ?? row.currentVersion ?? 1),
+    flexibleOrder: row.flexible_order === true || row.flexibleOrder === true,
+    lateToleranceMinutes: Number(row.late_tolerance_minutes ?? row.lateToleranceMinutes ?? 5),
     checkpoints: checkpoints.map((item: any, index) => ({
       checkpointId: String(item.checkpointId ?? item.checkpoint_id),
       code: String(item.code ?? ''),
@@ -140,6 +144,8 @@ function mapQueuedScan(
     checkpointTokenVersion: mutation.payload.checkpointTokenVersion,
     roundId: mutation.payload.roundId,
     notes: mutation.payload.notes,
+    latitude: mutation.payload.latitude == null ? undefined : Number(mutation.payload.latitude),
+    longitude: mutation.payload.longitude == null ? undefined : Number(mutation.payload.longitude),
     offlineCaptured: true
   };
 }
@@ -168,6 +174,8 @@ export const MobilePatrolScanner: React.FC = () => {
   const [scanSuccessMessage, setScanSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [notes, setNotes] = useState('');
+  const [completionNotes, setCompletionNotes] = useState('');
+  const [captureGps, setCaptureGps] = useState(false);
   const [loadingCheckpoints, setLoadingCheckpoints] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [nfcActive, setNfcActive] = useState(false);
@@ -183,7 +191,8 @@ export const MobilePatrolScanner: React.FC = () => {
   const routeProgress = (activeRoute?.checkpoints ?? []).map(point => {
     const scan = activeRoundScans.find(item => item.checkpointId === point.checkpointId);
     const dueAt = Date.parse(activeRound?.started_at || '') + point.plannedOffsetMinutes * 60_000;
-    return { ...point, scan, late: !scan && Number.isFinite(dueAt) && Date.now() > dueAt };
+    const lateTolerance = (activeRoute?.lateToleranceMinutes ?? 5) * 60_000;
+    return { ...point, scan, late: !scan && Number.isFinite(dueAt) && Date.now() > dueAt + lateTolerance };
   });
 
   useEffect(() => {
@@ -284,6 +293,8 @@ export const MobilePatrolScanner: React.FC = () => {
           verifiedTag: String(row.verification_status),
           roundId: row.round_id ? String(row.round_id) : undefined,
           notes: row.notes ? String(row.notes) : undefined,
+          latitude: row.latitude == null ? undefined : Number(row.latitude),
+          longitude: row.longitude == null ? undefined : Number(row.longitude),
           offlineCaptured: false
         }));
         const locallyCompleting = freshRounds.some(round => pendingCompletions.has(round.id));
@@ -392,6 +403,25 @@ export const MobilePatrolScanner: React.FC = () => {
       setErrorMessage(`Kontrollpunkt ${checkpoint.code} wurde vor weniger als zwei Minuten bereits erfasst.`);
       return;
     }
+    let coordinates: { latitude?: number; longitude?: number } = {};
+    if (captureGps) {
+      if (!navigator.geolocation) {
+        setErrorMessage('GPS ist in diesem Browser nicht verfügbar; der Scan wird ohne GPS erfasst.');
+      } else {
+        try {
+          const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+            navigator.geolocation.getCurrentPosition(resolve, reject, {
+              enableHighAccuracy: true,
+              timeout: 8000,
+              maximumAge: 30_000
+            });
+          });
+          coordinates = { latitude: position.coords.latitude, longitude: position.coords.longitude };
+        } catch {
+          setErrorMessage('GPS-Position konnte nicht abgerufen werden; der Scan wird ohne GPS erfasst.');
+        }
+      }
+    }
     try {
       await addPatrolScan({
         siteId: checkpoint.siteId,
@@ -406,7 +436,8 @@ export const MobilePatrolScanner: React.FC = () => {
         verifiedTag: method === 'MANUELL' ? 'manual' : undefined,
         checkpointToken: token,
         checkpointTokenVersion: checkpoint.tokenVersion,
-        notes: notes.trim() || undefined
+        notes: notes.trim() || undefined,
+        ...coordinates
       });
       setScanSuccessMessage(
         `Kontrollpunkt ${checkpoint.code} lokal gespeichert${isOnline ? ' – Serverprüfung ausstehend' : ' – offline, Synchronisierung ausstehend'}.`
@@ -588,7 +619,8 @@ export const MobilePatrolScanner: React.FC = () => {
         try {
           await apiClient.post(`/patrol/rounds/${activeRound.id}/complete`, {
             clientMutationId,
-            completedAt
+            completedAt,
+            ...(completionNotes.trim() ? { notes: completionNotes.trim() } : {})
           });
         } catch (error) {
           if (!(error instanceof ApiError) || !error.isNetworkError) throw error;
@@ -605,7 +637,8 @@ export const MobilePatrolScanner: React.FC = () => {
           payload: {
             recordType: 'round_complete',
             roundId: activeRound.id,
-            completedAt
+            completedAt,
+            ...(completionNotes.trim() ? { notes: completionNotes.trim() } : {})
           },
           baseVersion: 1
         });
@@ -632,6 +665,7 @@ export const MobilePatrolScanner: React.FC = () => {
         }
       }
       setActiveRound(null);
+      setCompletionNotes('');
       setErrorMessage(localCacheWarning);
       setScanSuccessMessage(!queuedOffline
         ? 'Kontrollgang abgeschlossen und serverseitig gespeichert.'
@@ -695,12 +729,21 @@ export const MobilePatrolScanner: React.FC = () => {
             Aktiver Kontrollgang · {activeRound.id.slice(0, 8)}
             {activeRound.localStatus === 'in_progress' && !isOnline ? ' · lokal gespeichert, Sync ausstehend' : ''}
           </p>}
+          {activeRound && activeRoute && <p className="mt-1 text-[10px] text-slate-400">
+            {activeRoute.flexibleOrder ? 'Flexible Reihenfolge' : 'Feste Reihenfolge'} · Toleranz {activeRoute.lateToleranceMinutes} Min.
+          </p>}
         </div>
-        {activeRound
-          ? <button onClick={() => void completeRound()}
-              className="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white">Kontrollgang abschließen</button>
-          : <button onClick={() => void startRound()} disabled={!siteId}
-              className="rounded-lg bg-blue-700 px-4 py-2 font-semibold text-white disabled:opacity-50">Kontrollgang starten</button>}
+        <div className="flex flex-col gap-2 sm:items-end">
+          {activeRound && <label className="text-[11px] text-slate-300">Abschlussbemerkung
+            <input value={completionNotes} onChange={event => setCompletionNotes(event.target.value)} maxLength={2000}
+              className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 sm:w-64" />
+          </label>}
+          {activeRound
+            ? <button onClick={() => void completeRound()}
+                className="rounded-lg bg-emerald-700 px-4 py-2 font-semibold text-white">Kontrollgang abschließen</button>
+            : <button onClick={() => void startRound()} disabled={!siteId}
+                className="rounded-lg bg-blue-700 px-4 py-2 font-semibold text-white disabled:opacity-50">Kontrollgang starten</button>}
+        </div>
       </div>
 
       {activeRound && routeProgress.length > 0 && (
@@ -738,6 +781,10 @@ export const MobilePatrolScanner: React.FC = () => {
       )}
 
       <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4">
+        <label className="mb-3 flex items-center gap-2 text-slate-300">
+          <input type="checkbox" checked={captureGps} onChange={event => setCaptureGps(event.target.checked)} />
+          GPS-Position optional bei Scans erfassen
+        </label>
         <label className="mb-3 block font-semibold text-slate-200" htmlFor="patrol-notes">Notiz (optional)</label>
         <textarea id="patrol-notes" value={notes} onChange={event => setNotes(event.target.value)} maxLength={2000}
           className="min-h-20 w-full rounded-lg border border-slate-700 bg-slate-950 p-3 text-slate-100" placeholder="Beobachtung zum Kontrollpunkt" />

@@ -642,6 +642,8 @@ export interface PatrolScanEvent {
   checkpointToken?: string;
   checkpointTokenVersion?: number;
   roundId?: string;
+  latitude?: number | null;
+  longitude?: number | null;
   photoUrl?: string;
   notes?: string;
   offlineCaptured: boolean;
