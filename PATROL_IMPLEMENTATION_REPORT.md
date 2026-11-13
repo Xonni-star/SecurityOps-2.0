@@ -33,7 +33,7 @@ Still not implemented or verified: direct photo capture and offline binary attac
 
 ### Local worktree
 
-Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) remains open against `main`; the live head and its checks are authoritative on GitHub. The verified project base is `5608b9010096ebac06a000ed2a2870dadd66ab60`. No merge was performed.
+Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) remains open against `main`. The verified project base is `5608b9010096ebac06a000ed2a2870dadd66ab60`; implementation commit `51d836443d25c51284782a6be91b06ec1fd8559d` is pushed. No merge was performed.
 
 - Backend TypeScript build: passed.
 - Full Backend Jest: 20 suites, 219 tests passed.
@@ -48,4 +48,11 @@ Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.c
 
 ### GitHub CI
 
-The updated implementation CI results will be recorded here after the branch push. Until that run completes, CI for this revision is **not verified**. PR #14 will remain open for the user's independent review and will not be merged by this agent.
+The four required CI jobs passed for implementation commit `51d836443d25c51284782a6be91b06ec1fd8559d`:
+
+- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946236) — passed
+- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946856) — passed
+- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946852) — passed
+- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43433302015/job/131911946742) — passed
+
+This report-only follow-up does not alter application code. The PR Checks tab remains authoritative for the live branch head. PR #14 stays open for independent review and will not be merged by this agent.
