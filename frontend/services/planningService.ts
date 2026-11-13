@@ -49,7 +49,11 @@ export interface ShiftTemplate {
   time_zone: string;
   local_start_time: string;
   local_end_time: string;
+  break_minutes: number;
+  required_staff_count: number;
   required_qualification: string;
+  effective_from?: string | null;
+  effective_until?: string | null;
   recurrence: {
     frequency: 'DAILY' | 'WEEKLY';
     interval: number;
@@ -75,6 +79,12 @@ export interface StaffingSuggestion {
       reasons: string[];
       findings: PlanningFinding[];
     }>;
+    excludedCandidates: Array<{
+      employeeId: string;
+      reasons: string[];
+    }>;
+    excludedCandidateCount: number;
+    excludedCandidatesTruncated: boolean;
   }>;
   finalAssignmentRequiresConfirmation: true;
 }
@@ -90,6 +100,10 @@ export interface ActualTimeRecord {
   recorded_by: string;
   recorded_at: string;
   notes?: string | null;
+  approval_status: 'pending' | 'approved' | string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+  approved_revision_version?: number | null;
 }
 
 export interface ActualTimeHistoryEntry {
@@ -103,6 +117,22 @@ export interface ActualTimeHistoryEntry {
 export interface ActualTimeRead {
   current: ActualTimeRecord | null;
   history: ActualTimeHistoryEntry[];
+  revisions?: Array<{
+    id: string;
+    revision_version: number;
+    previous_values: Record<string, unknown>;
+    created_at: string;
+  }>;
+}
+
+export interface PlanningNotification {
+  id: string;
+  event_type: string;
+  entity_type: string;
+  entity_id: string;
+  details: Record<string, unknown>;
+  created_at: string;
+  read_at: string | null;
 }
 
 export interface CoverRequest {
@@ -133,6 +163,13 @@ export interface WorkHoursRow {
   overtime_hours: number | null;
   overtime_status: 'unavailable' | 'partial' | 'unconfigured' | 'ambiguous' | 'available' | string;
   overtime_sources: unknown[];
+  captured_actual_hours?: number | null;
+  captured_actual_status?: 'unavailable' | 'partial' | 'complete' | string;
+  actual_approval_status?: 'unavailable' | 'pending' | 'partial' | 'approved' | string;
+  hours_variance?: number | null;
+  minus_hours?: number | null;
+  hours_variance_status?: 'unavailable' | 'partial' | 'pending_approval' | 'available' | string;
+  hours_variance_source?: string | null;
   planned_weekend_shifts?: number | null;
   actual_weekend_shifts?: number | null;
   planned_holiday_shifts?: number | null;
@@ -413,8 +450,7 @@ export function reconcileShiftMutation(
   });
 }
 
-async function getAllPages<T>(path: string, query: URLSearchParams): Promise<T[]> {
-  const pageSize = 200;
+async function getAllPages<T>(path: string, query: URLSearchParams, pageSize = 200): Promise<T[]> {
   const result: T[] = [];
   for (let page = 1; ; page += 1) {
     query.set('page', String(page));
@@ -502,7 +538,11 @@ export const planningApi = {
     timeZone?: string;
     startTime: string;
     endTime: string;
+    breakMinutes?: number;
+    requiredStaffCount?: number;
     requiredQualification: string;
+    effectiveFrom?: string;
+    effectiveUntil?: string;
     frequency: 'DAILY' | 'WEEKLY';
     interval?: number;
     weekdays?: number[];
@@ -514,7 +554,11 @@ export const planningApi = {
     timeZone?: string;
     startTime?: string;
     endTime?: string;
+    breakMinutes?: number;
+    requiredStaffCount?: number;
     requiredQualification?: string;
+    effectiveFrom?: string | null;
+    effectiveUntil?: string | null;
     frequency?: 'DAILY' | 'WEEKLY';
     interval?: number;
     weekdays?: number[];
@@ -581,6 +625,10 @@ export const planningApi = {
     recorded_at: string;
     notes?: string | null;
   }>(`/planning/shifts/${encodeURIComponent(shiftId)}/actual-time`, input),
+  approveActualTime: (shiftId: string, input: { employeeId: string; expectedVersion: number }) =>
+    apiClient.post<ActualTimeRecord>(
+      `/planning/shifts/${encodeURIComponent(shiftId)}/actual-time/approve`, input
+    ),
   getActualTime: (shiftId: string, employeeId: string) => apiClient.get<ActualTimeRead>(
     `/planning/shifts/${encodeURIComponent(shiftId)}/actual-time?employeeId=${encodeURIComponent(employeeId)}`
   ),
@@ -595,7 +643,16 @@ export const planningApi = {
   ),
   absences: (from: string, to: string) => apiClient.get<AbsenceReportRow[]>(
     `/planning/reports/absences?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
-  )
+  ),
+  planningNotifications: () => getAllPages<PlanningNotification>(
+    '/planning/notifications',
+    new URLSearchParams(),
+    100
+  ),
+  markPlanningNotificationRead: (notificationId: string) =>
+    apiClient.post<PlanningNotification>(
+      `/planning/notifications/${encodeURIComponent(notificationId)}/read`, {}
+    )
 };
 
 export function planningErrorDetails(error: unknown): { code?: string; findings: PlanningFinding[]; message: string } {

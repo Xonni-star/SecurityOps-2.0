@@ -17,6 +17,8 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
   let planningShiftAId: string;
   let coverRequestAId: string;
   let actualTimeAId: string;
+  let actualTimeRevisionAId: string;
+  let planningNotificationAId: string;
 
   beforeAll(async () => {
     const tA = await pool.query(`
@@ -72,6 +74,14 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
     );
     sopUserAId = userA.rows[0].id;
     sopUserBId = userB.rows[0].id;
+    const planningRole = await migrationPool.query(
+      `INSERT INTO roles (name,description) VALUES ($1,'Planning notification RLS fixture') RETURNING id`,
+      [`PlanningRls_${Date.now()}`]
+    );
+    await migrationPool.query(
+      `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3),($4,$2,$5)`,
+      [sopUserAId, planningRole.rows[0].id, tenantA, sopUserBId, tenantB]
+    );
     const planningPeriod = await migrationPool.query(
       `INSERT INTO schedule_periods (tenant_id,name,date_from,date_to,time_zone,created_by)
        VALUES ($1,$2,'2026-01-01','2026-01-31','Europe/Berlin',$3) RETURNING id`,
@@ -110,6 +120,31 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
       [tenantA, planningShiftAId, employeeAId, sopUserAId]
     );
     actualTimeAId = actualTime.rows[0].id;
+    const actualRevision = await migrationPool.query(
+      `UPDATE shift_actual_times
+          SET notes='RLS revision fixture',revision_version=revision_version+1
+        WHERE tenant_id=$1 AND id=$2 RETURNING revision_version`,
+      [tenantA, actualTimeAId]
+    );
+    const revision = await migrationPool.query(
+      `SELECT id FROM shift_actual_time_revisions WHERE tenant_id=$1 AND actual_time_id=$2`,
+      [tenantA, actualTimeAId]
+    );
+    expect(actualRevision.rows[0].revision_version).toBe(2);
+    actualTimeRevisionAId = revision.rows[0].id;
+    const notification = await migrationPool.query(
+      `INSERT INTO planning_notifications
+        (tenant_id,recipient_user_id,event_type,entity_type,entity_id,details)
+       VALUES ($1,$2,'test.event','shift_actual_time',$3,'{}'::jsonb) RETURNING id`,
+      [tenantA, sopUserAId, actualTimeAId]
+    );
+    planningNotificationAId = notification.rows[0].id;
+    await migrationPool.query(
+      `INSERT INTO planning_notifications
+        (tenant_id,recipient_user_id,event_type,entity_type,entity_id,details)
+       VALUES ($1,$2,'test.event','shift_actual_time',$3,'{}'::jsonb)`,
+      [tenantB, sopUserBId, actualTimeAId]
+    );
     const sopA = await migrationPool.query(
       `INSERT INTO sop_instructions (tenant_id,sop_number,title,created_by,draft_content,status)
        VALUES ($1,$2,'SOP A',$3,'{"text":"A"}'::jsonb,'published') RETURNING id`,
@@ -287,6 +322,68 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
        VALUES ($1,$2,$3,'2026-01-02T08:00:00Z','2026-01-02T16:00:00Z',$4)`,
       [tenantA, planningShiftAId, employeeBId, sopUserAId]
     )).rejects.toMatchObject({ code: '23503' });
+
+    await expect(migrationPool.query(
+      `INSERT INTO shift_cover_requests
+        (tenant_id,shift_id,shift_revision_version_at_request,requested_employee_id,reason,requested_by)
+       VALUES ($1,$2,1,$3,'Cross tenant employee',$4)`,
+      [tenantA, planningShiftAId, employeeBId, sopUserAId]
+    )).rejects.toMatchObject({ code: '23503' });
+  });
+
+  test('Actual-time revisions and planning notifications enforce tenant RLS and recipient ownership', async () => {
+    const visible = await withTenantTransaction(tenantA, async tx => ({
+      revisions: (await tx.query(
+        'SELECT id,tenant_id,actual_time_id FROM shift_actual_time_revisions WHERE actual_time_id=$1',
+        [actualTimeAId]
+      )).rows,
+      notifications: (await tx.query(
+        'SELECT id,tenant_id,recipient_user_id FROM planning_notifications'
+      )).rows
+    }));
+    expect(visible.revisions).toEqual([
+      expect.objectContaining({ id: actualTimeRevisionAId, tenant_id: tenantA, actual_time_id: actualTimeAId })
+    ]);
+    expect(visible.notifications).toEqual([
+      expect.objectContaining({ id: planningNotificationAId, tenant_id: tenantA, recipient_user_id: sopUserAId })
+    ]);
+    const otherTenant = await withTenantTransaction(tenantB, async tx => ({
+      revisions: (await tx.query('SELECT id FROM shift_actual_time_revisions')).rows,
+      notifications: (await tx.query('SELECT id FROM planning_notifications')).rows
+    }));
+    const system = await withSystemTransaction(async tx => ({
+      revisions: (await tx.query('SELECT id FROM shift_actual_time_revisions')).rows,
+      notifications: (await tx.query('SELECT id FROM planning_notifications')).rows
+    }));
+    expect(otherTenant.revisions).toHaveLength(0);
+    expect(otherTenant.notifications).toHaveLength(1);
+    expect(otherTenant.notifications[0].id).not.toBe(planningNotificationAId);
+    expect(system.revisions).toHaveLength(0);
+    expect(system.notifications).toHaveLength(0);
+
+    await expect(withTenantTransaction(tenantA, tx => tx.query(
+      `INSERT INTO planning_notifications
+        (tenant_id,recipient_user_id,event_type,entity_type,entity_id)
+       VALUES ($1,$2,'forged.tenant','shift',$3)`,
+      [tenantB, sopUserBId, planningShiftAId]
+    ))).rejects.toMatchObject({ code: '42501' });
+    await expect(migrationPool.query(
+      `INSERT INTO planning_notifications
+        (tenant_id,recipient_user_id,event_type,entity_type,entity_id)
+       VALUES ($1,$2,'cross.tenant.recipient','shift',$3)`,
+      [tenantA, sopUserBId, planningShiftAId]
+    )).rejects.toMatchObject({ code: '23503' });
+
+    const flags = await migrationPool.query(
+      `SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname=ANY($1::text[]) ORDER BY c.relname`,
+      [['planning_notifications', 'shift_actual_time_revisions']]
+    );
+    expect(flags.rows).toEqual([
+      { relname: 'planning_notifications', relrowsecurity: true, relforcerowsecurity: true },
+      { relname: 'shift_actual_time_revisions', relrowsecurity: true, relforcerowsecurity: true }
+    ]);
   });
 
   test('SOP instructions, assignment targets and assignments are tenant-isolated under PostgreSQL RLS', async () => {

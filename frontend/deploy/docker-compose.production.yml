@@ -16,6 +16,9 @@ networks:
   secops_internal:
     driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: ${SECOPS_INTERNAL_SUBNET:-172.30.0.0/24}
   secops_public:
     driver: bridge
 
@@ -127,6 +130,8 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET muss gesetzt sein}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
       CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN muss gesetzt sein}
+      TRUST_PROXY: ${TRUST_PROXY:-172.30.0.2/32}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
       DMS_STORAGE_PATH: /var/lib/securityops/documents
       DMS_MAX_FILE_SIZE_BYTES: ${DMS_MAX_FILE_SIZE_BYTES:-10485760}
     volumes:
@@ -165,8 +170,9 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     networks:
-      - secops_internal
-      - secops_public
+      secops_internal:
+        ipv4_address: ${SECOPS_PROXY_IPV4:-172.30.0.2}
+      secops_public: {}
     deploy:
       resources:
         limits:

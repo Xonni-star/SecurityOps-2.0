@@ -176,6 +176,9 @@ describe('service planning helpers', () => {
       clientMutationId: 'actual-mutation'
     });
     await planningApi.getActualTime('shift/a', 'employee/a');
+    await planningApi.approveActualTime('shift/a', { employeeId: 'employee/a', expectedVersion: 2 });
+    await planningApi.planningNotifications();
+    await planningApi.markPlanningNotificationRead('notification/a');
     await planningApi.workHours('2026-11-01', '2026-11-30');
     await planningApi.coverage('2026-11-01', '2026-11-30');
     await planningApi.qualifications('2026-11-01', '2026-11-30');
@@ -185,6 +188,7 @@ describe('service planning helpers', () => {
     expect(get).toHaveBeenCalledWith('/planning/templates?includeInactive=true&page=1&pageSize=200');
     expect(get).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/staffing-suggestions');
     expect(get).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/actual-time?employeeId=employee%2Fa');
+    expect(get).toHaveBeenCalledWith('/planning/notifications?page=1&pageSize=100');
     expect(get).toHaveBeenCalledWith('/planning/cover-requests?status=pending&shiftId=shift%2Fa&page=1&pageSize=200');
     expect(get).toHaveBeenCalledWith('/planning/reports/qualifications?from=2026-11-01&to=2026-11-30');
     expect(get).toHaveBeenCalledWith('/planning/reports/absences?from=2026-11-01&to=2026-11-30');
@@ -194,6 +198,11 @@ describe('service planning helpers', () => {
       expectedVersion: 0,
       actualStartAt: '2026-11-13T08:03:00+01:00'
     }));
+    expect(post).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/actual-time/approve', {
+      employeeId: 'employee/a',
+      expectedVersion: 2
+    });
+    expect(post).toHaveBeenCalledWith('/planning/notifications/notification%2Fa/read', {});
     expect(patch).toHaveBeenCalledWith('/planning/templates/template%2Fa', {
       expectedVersion: 3,
       name: 'Updated',

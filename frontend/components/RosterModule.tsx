@@ -1,6 +1,6 @@
 import React, { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Copy, Download,
+  AlertTriangle, Bell, CalendarDays, ChevronLeft, ChevronRight, Copy, Download,
   FileText, LoaderCircle, Plus, Printer, RefreshCw, ShieldCheck, Users, X
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
@@ -11,7 +11,8 @@ import {
   AbsenceReportRow, calendarRange, CoverRequest, CoverageRow, mapPlanningShift, mergeOutboxShifts,
   PlanningFinding, planningApi, planningErrorDetails, PlanningShift, QualificationReportRow,
   RuleProfileRow, SchedulePeriod, ShiftAssignment, ShiftSwap, ShiftTemplate, shiftCalendarDate,
-  PlanningRule, PlanningRuleCode, WorkHoursRow, StaffingSuggestion, ActualTimeRecord, ActualTimeHistoryEntry
+  PlanningRule, PlanningRuleCode, WorkHoursRow, StaffingSuggestion, ActualTimeRecord, ActualTimeHistoryEntry,
+  PlanningNotification
 } from '../services/planningService';
 
 type CalendarView = 'month' | 'week' | 'day';
@@ -54,7 +55,11 @@ interface TemplateFormState {
   name: string;
   startTime: string;
   endTime: string;
+  breakMinutes: number;
+  requiredStaffCount: number;
   requiredQualification: string;
+  effectiveFrom: string;
+  effectiveUntil: string;
   frequency: 'DAILY' | 'WEEKLY';
   interval: number;
   weekdays: number[];
@@ -154,10 +159,9 @@ function reportValue(value: number | null | undefined, status?: string): string 
   return `${value}${status ? ` (${status})` : ''}`;
 }
 
-function reportVariance(actual: number | null, planned: number, status: string): string {
-  if (actual == null) return reportValue(null, status);
-  const variance = Math.round((actual - planned) * 100) / 100;
-  return `${variance > 0 ? '+' : ''}${variance} (${status})`;
+function reportVariance(value: number | null | undefined, status?: string): string {
+  if (value == null) return reportValue(null, status);
+  return `${value > 0 ? '+' : ''}${value}${status ? ` (${status})` : ''}`;
 }
 
 function reportSources(sources: unknown[] | undefined): string {
@@ -192,6 +196,7 @@ export const RosterModule: React.FC = () => {
   const canRequestCover = permissions.includes('planning:covers:manage');
   const canDecideCover = permissions.includes('planning:covers:approve');
   const canManageActuals = permissions.includes('planning:actuals:manage');
+  const canApproveActuals = permissions.includes('planning:actuals:approve');
   const canManageRules = permissions.includes('planning:rules:manage');
   const canApproveRules = permissions.includes('planning:rules:approve');
 
@@ -241,6 +246,10 @@ export const RosterModule: React.FC = () => {
     siteId: '',
     startTime: '',
     endTime: '',
+    breakMinutes: 0,
+    requiredStaffCount: 1,
+    effectiveFrom: '',
+    effectiveUntil: '',
     requiredQualification: ''
   });
   const [detailsShift, setDetailsShift] = useState<PlanningShift | null>(null);
@@ -274,6 +283,9 @@ export const RosterModule: React.FC = () => {
   });
   const [actualSavedRevision, setActualSavedRevision] = useState<number | null>(null);
   const [actualMutationIds, setActualMutationIds] = useState<Record<string, string>>({});
+  const [planningNotifications, setPlanningNotifications] = useState<PlanningNotification[]>([]);
+  const [planningNotificationsOpen, setPlanningNotificationsOpen] = useState(false);
+  const [planningNotificationsLoading, setPlanningNotificationsLoading] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [workHours, setWorkHours] = useState<WorkHoursRow[]>([]);
   const [reportCoverage, setReportCoverage] = useState<CoverageRow[]>([]);
@@ -330,6 +342,10 @@ export const RosterModule: React.FC = () => {
       siteId: '',
       startTime: '',
       endTime: '',
+      breakMinutes: 0,
+      requiredStaffCount: 1,
+      effectiveFrom: '',
+      effectiveUntil: '',
       requiredQualification: ''
     });
     setDetailsShift(null);
@@ -363,6 +379,9 @@ export const RosterModule: React.FC = () => {
     });
     setActualSavedRevision(null);
     setActualMutationIds({});
+    setPlanningNotifications([]);
+    setPlanningNotificationsOpen(false);
+    setPlanningNotificationsLoading(false);
     setReportOpen(false);
     setWorkHours([]);
     setReportCoverage([]);
@@ -870,6 +889,10 @@ export const RosterModule: React.FC = () => {
       name: template.name,
       startTime: template.local_start_time.slice(0, 5),
       endTime: template.local_end_time.slice(0, 5),
+      breakMinutes: template.break_minutes,
+      requiredStaffCount: template.required_staff_count,
+      effectiveFrom: template.effective_from?.slice(0, 10) ?? '',
+      effectiveUntil: template.effective_until?.slice(0, 10) ?? '',
       requiredQualification: template.required_qualification,
       frequency: template.recurrence.frequency,
       interval: template.recurrence.interval,
@@ -891,6 +914,8 @@ export const RosterModule: React.FC = () => {
       await planningApi.updateTemplate(template.id, {
         expectedVersion: template.revision_version,
         ...templateEditForm,
+        effectiveFrom: templateEditForm.effectiveFrom || null,
+        effectiveUntil: templateEditForm.effectiveUntil || null,
         weekdays: templateEditForm.frequency === 'WEEKLY' ? templateEditForm.weekdays : undefined
       });
       if (!isCurrentIdentity(requestIdentity)) return;
@@ -945,6 +970,10 @@ export const RosterModule: React.FC = () => {
         name: templateForm.name,
         startTime: templateForm.startTime,
         endTime: templateForm.endTime,
+        breakMinutes: templateForm.breakMinutes,
+        requiredStaffCount: templateForm.requiredStaffCount,
+        effectiveFrom: templateForm.effectiveFrom || undefined,
+        effectiveUntil: templateForm.effectiveUntil || undefined,
         requiredQualification: templateForm.requiredQualification,
         frequency: templateForm.frequency,
         interval: templateForm.interval,
@@ -1293,6 +1322,60 @@ export const RosterModule: React.FC = () => {
     }
   };
 
+  const approveActualTime = async () => {
+    if (!detailsShift || !actualCurrent || !canApproveActuals || !isOnline ||
+        actualCurrent.approval_status !== 'pending' || actualCurrent.recorded_by === currentUserId) return;
+    const requestIdentity = identityKey;
+    const detailsRequestId = detailsRequestIdRef.current;
+    try {
+      const approved = await planningApi.approveActualTime(detailsShift.id, {
+        employeeId: actualCurrent.employee_id,
+        expectedVersion: actualCurrent.revision_version
+      });
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
+      setActualCurrent(approved);
+      await loadActualTimeForEmployee(detailsShift.id, approved.employee_id, detailsRequestId);
+      if (isCurrentIdentity(requestIdentity) && detailsRequestIdRef.current === detailsRequestId) {
+        setActionMessage(`Ist-Zeit-Revision ${approved.revision_version} unabhängig genehmigt.`);
+      }
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    }
+  };
+
+  const loadPlanningNotifications = async () => {
+    if (!canRead || !isOnline) return;
+    const requestIdentity = identityKey;
+    setPlanningNotificationsLoading(true);
+    setActionError('');
+    try {
+      const rows = await planningApi.planningNotifications();
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setPlanningNotifications(rows);
+      setPlanningNotificationsOpen(true);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionError(planningErrorDetails(error).message);
+    } finally {
+      if (isCurrentIdentity(requestIdentity)) setPlanningNotificationsLoading(false);
+    }
+  };
+
+  const markPlanningNotificationRead = async (notification: PlanningNotification) => {
+    if (!isOnline || notification.read_at) return;
+    const requestIdentity = identityKey;
+    try {
+      const updated = await planningApi.markPlanningNotificationRead(notification.id);
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setPlanningNotifications(current => current.map(item => item.id === updated.id ? updated : item));
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionError(planningErrorDetails(error).message);
+    }
+  };
+
   const loadReports = async () => {
     const requestIdentity = identityKey;
     if (!canReport || !isOnline) return;
@@ -1394,6 +1477,10 @@ export const RosterModule: React.FC = () => {
           {canManage && isOnline && <button className={buttonClass} onClick={() => { setPeriodForm(current => ({ ...current, dateFrom: range.from, dateTo: range.to })); setPeriodFormOpen(open => !open); }}>Periode anlegen</button>}
           {canRead && <button className={buttonClass} disabled={!isOnline || templatesLoading} onClick={() => { setTemplateOpen(open => !open); if (!templateOpen) void loadTemplates(); }}>Vorlagen</button>}
           {canRead && <button className={buttonClass} disabled={!isOnline || coverListLoading} onClick={() => void loadCoverRequests()}>{coverListLoading ? 'Vertretungen…' : 'Vertretungsanträge'}</button>}
+          {canRead && <button className={buttonClass} disabled={!isOnline || planningNotificationsLoading} onClick={() => void loadPlanningNotifications()}>
+            {planningNotificationsLoading ? <LoaderCircle className="animate-spin" size={14} /> : <Bell size={14} />}
+            Benachrichtigungen{planningNotifications.some(item => !item.read_at) ? ` (${planningNotifications.filter(item => !item.read_at).length})` : ''}
+          </button>}
           {canPublish && activePeriod?.status === 'draft' && (
             <button className={primaryButtonClass} disabled={!isOnline || saving} onClick={() => void publishPeriod()}>
               <ShieldCheck size={14} /> Veröffentlichen
@@ -1418,6 +1505,7 @@ export const RosterModule: React.FC = () => {
         {outbox.length > 0 && <span className="ml-2 font-semibold">{outbox.length} ausstehende/fehlerhafte Schichtmutation(en)</span>}
         {isSyncing && <span className="ml-2">Synchronisierung läuft…</span>}
       </div>
+      <p className="text-[11px] text-slate-500">Offline ist nur der zuletzt geladene Datumsbereich je Mandant und Benutzer zwischengespeichert; andere Zeiträume sind offline nicht vollständig verfügbar.</p>
       {loadError && <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" role="status">{loadError}</div>}
       {cacheWarning && <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" role="status">{cacheWarning}</div>}
       {actionError && <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200" role="alert">{actionError}</div>}
@@ -1451,7 +1539,7 @@ export const RosterModule: React.FC = () => {
                 <article key={template.id} className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3 ${selectedTemplateId === template.id ? 'border-blue-500/60 bg-blue-500/5' : 'border-slate-800 bg-slate-950'}`}>
                   <label className="flex min-w-0 flex-1 items-start gap-2 text-xs text-slate-200">
                     <input type="radio" name="selected-template" checked={selectedTemplateId === template.id} onChange={() => setSelectedTemplateId(template.id)} />
-                    <span><strong>{template.name}</strong> · {template.site_name ?? sites.find(site => site.id === template.site_id)?.name ?? template.site_id} · {template.local_start_time.slice(0, 5)}–{template.local_end_time.slice(0, 5)} · {template.required_qualification}<span className="block text-slate-500">{template.recurrence.frequency === 'WEEKLY' ? 'Wöchentlich' : 'Täglich'}, Intervall {template.recurrence.interval}{template.recurrence.weekdays?.length ? ` · Wochentage: ${template.recurrence.weekdays.join(', ')}` : ''} · {template.time_zone} · Revision {template.revision_version} · {template.active ? 'aktiv' : 'inaktiv'}</span></span>
+                    <span><strong>{template.name}</strong> · {template.site_name ?? sites.find(site => site.id === template.site_id)?.name ?? template.site_id} · {template.local_start_time.slice(0, 5)}–{template.local_end_time.slice(0, 5)} · {template.required_qualification}<span className="block text-slate-500">Bedarf {template.required_staff_count} · Pause {template.break_minutes} min · gültig {template.effective_from?.slice(0, 10) ?? 'ab unbegrenzt'} bis {template.effective_until?.slice(0, 10) ?? 'unbegrenzt'} · {template.recurrence.frequency === 'WEEKLY' ? 'Wöchentlich' : 'Täglich'}, Intervall {template.recurrence.interval}{template.recurrence.weekdays?.length ? ` · Wochentage: ${template.recurrence.weekdays.join(', ')}` : ''} · {template.time_zone} · Revision {template.revision_version} · {template.active ? 'aktiv' : 'inaktiv'}</span></span>
                   </label>
                   <div className="flex flex-wrap gap-2">
                     {canManage && <button type="button" className={buttonClass} disabled={!isOnline || !template.active || activePeriod?.status !== 'draft' || saving} onClick={() => { setSelectedTemplateId(template.id); void applyTemplateById(template.id); }}>Auf Entwurfsperiode anwenden</button>}
@@ -1463,6 +1551,10 @@ export const RosterModule: React.FC = () => {
                     <label className="text-xs text-slate-400">Objekt<select required className={`${fieldClass} mt-1`} value={templateEditForm.siteId} onChange={event => setTemplateEditForm(current => current ? { ...current, siteId: event.target.value } : current)}>{sites.filter(site => !site.archivedAt).map(site => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
                     <label className="text-xs text-slate-400">Beginn<input required type="time" className={`${fieldClass} mt-1`} value={templateEditForm.startTime} onChange={event => setTemplateEditForm(current => current ? { ...current, startTime: event.target.value } : current)} /></label>
                     <label className="text-xs text-slate-400">Ende<input required type="time" className={`${fieldClass} mt-1`} value={templateEditForm.endTime} onChange={event => setTemplateEditForm(current => current ? { ...current, endTime: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Pause (Minuten)<input aria-label="Vorlagenpause" required type="number" min={0} max={1440} className={`${fieldClass} mt-1`} value={templateEditForm.breakMinutes} onChange={event => setTemplateEditForm(current => current ? { ...current, breakMinutes: Number(event.target.value) } : current)} /></label>
+                    <label className="text-xs text-slate-400">Personalbedarf<input aria-label="Vorlagenbedarf" required type="number" min={1} max={500} className={`${fieldClass} mt-1`} value={templateEditForm.requiredStaffCount} onChange={event => setTemplateEditForm(current => current ? { ...current, requiredStaffCount: Number(event.target.value) } : current)} /></label>
+                    <label className="text-xs text-slate-400">Gültig ab<input aria-label="Vorlage gültig ab" type="date" className={`${fieldClass} mt-1`} value={templateEditForm.effectiveFrom} onChange={event => setTemplateEditForm(current => current ? { ...current, effectiveFrom: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Gültig bis<input aria-label="Vorlage gültig bis" type="date" className={`${fieldClass} mt-1`} value={templateEditForm.effectiveUntil} onChange={event => setTemplateEditForm(current => current ? { ...current, effectiveUntil: event.target.value } : current)} /></label>
                     <label className="text-xs text-slate-400">Qualifikation<input required minLength={2} className={`${fieldClass} mt-1`} value={templateEditForm.requiredQualification} onChange={event => setTemplateEditForm(current => current ? { ...current, requiredQualification: event.target.value } : current)} /></label>
                     <label className="text-xs text-slate-400">Wiederholung<select className={`${fieldClass} mt-1`} value={templateEditForm.frequency} onChange={event => setTemplateEditForm(current => current ? { ...current, frequency: event.target.value as 'DAILY' | 'WEEKLY' } : current)}><option value="WEEKLY">Wöchentlich</option><option value="DAILY">Täglich</option></select></label>
                     <label className="text-xs text-slate-400">Intervall<input required type="number" min={1} max={52} className={`${fieldClass} mt-1`} value={templateEditForm.interval} onChange={event => setTemplateEditForm(current => current ? { ...current, interval: Number(event.target.value) } : current)} /></label>
@@ -1476,6 +1568,10 @@ export const RosterModule: React.FC = () => {
             <label className="text-xs text-slate-300">Objekt<select aria-label="Vorlagenobjekt" required className={`${fieldClass} mt-1`} value={templateForm.siteId} onChange={event => setTemplateForm({ ...templateForm, siteId: event.target.value })}><option value="">Objekt auswählen</option>{sites.filter(site => !site.archivedAt).map(site => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
             <label className="text-xs text-slate-300">Beginn<input required type="time" className={`${fieldClass} mt-1`} value={templateForm.startTime} onChange={event => setTemplateForm({ ...templateForm, startTime: event.target.value })} /></label>
             <label className="text-xs text-slate-300">Ende<input required type="time" className={`${fieldClass} mt-1`} value={templateForm.endTime} onChange={event => setTemplateForm({ ...templateForm, endTime: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Pause (Minuten)<input aria-label="Vorlagenpause" required type="number" min={0} max={1440} className={`${fieldClass} mt-1`} value={templateForm.breakMinutes} onChange={event => setTemplateForm({ ...templateForm, breakMinutes: Number(event.target.value) })} /></label>
+            <label className="text-xs text-slate-300">Personalbedarf<input aria-label="Vorlagenbedarf" required type="number" min={1} max={500} className={`${fieldClass} mt-1`} value={templateForm.requiredStaffCount} onChange={event => setTemplateForm({ ...templateForm, requiredStaffCount: Number(event.target.value) })} /></label>
+            <label className="text-xs text-slate-300">Gültig ab<input aria-label="Vorlage gültig ab" type="date" className={`${fieldClass} mt-1`} value={templateForm.effectiveFrom} onChange={event => setTemplateForm({ ...templateForm, effectiveFrom: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Gültig bis<input aria-label="Vorlage gültig bis" type="date" className={`${fieldClass} mt-1`} value={templateForm.effectiveUntil} onChange={event => setTemplateForm({ ...templateForm, effectiveUntil: event.target.value })} /></label>
             <label className="text-xs text-slate-300">Qualifikation<input aria-label="Vorlagenqualifikation" required minLength={2} className={`${fieldClass} mt-1`} value={templateForm.requiredQualification} onChange={event => setTemplateForm({ ...templateForm, requiredQualification: event.target.value })} /></label>
             <label className="text-xs text-slate-300">Wiederholung<select className={`${fieldClass} mt-1`} value={templateForm.frequency} onChange={event => setTemplateForm({ ...templateForm, frequency: event.target.value as 'DAILY' | 'WEEKLY' })}><option value="WEEKLY">Wöchentlich</option><option value="DAILY">Täglich</option></select></label>
             <label className="text-xs text-slate-300">Intervall (Wochen/Tage)<input required type="number" min={1} max={52} step={1} className={`${fieldClass} mt-1`} value={templateForm.interval} onChange={event => setTemplateForm({ ...templateForm, interval: Number(event.target.value) })} /></label>
@@ -1627,7 +1723,7 @@ export const RosterModule: React.FC = () => {
               {!isOnline ? <p className="text-xs text-amber-300">Besetzungsvorschläge sind online-only.</p>
                 : !staffingSuggestions ? <p className="text-xs text-slate-500">{detailsLoading ? 'Vorschläge werden geladen…' : 'Keine Vorschläge verfügbar.'}</p>
                   : <div className="space-y-3">
-                    <p className="text-[11px] text-amber-300">Nicht bindende Hinweise. Die API listet aktive, dem Objekt zugeordnete Mitarbeitende mit gültiger, verifizierter Qualifikation; Personen, die vor der Kandidatenprüfung durch diese Filter ausgeschlossen werden, erscheinen nicht mit Einzelgrund. Die Auswahl füllt nur das Zuweisungsfeld; eine Zuweisung erfolgt erst nach separater Bestätigung und erneuter Serverprüfung.</p>
+                    <p className="text-[11px] text-amber-300">Nicht bindende Hinweise. Die API prüft aktive Zuordnung, Qualifikation und Verfügbarkeit; eine Zuweisung erfolgt erst nach separater Bestätigung und erneuter Serverprüfung.</p>
                     {staffingSuggestions.requirements.map(requirement => <div key={requirement.qualificationType} className="rounded-lg border border-slate-800 bg-slate-950 p-3">
                       <div className="text-xs font-semibold text-slate-200">{requirement.qualificationType} · Bedarf {requirement.requiredCount}, qualifiziert zugewiesen {requirement.assignedCount}, offen {requirement.shortfall}</div>
                       {requirement.candidates.length === 0 ? <p className="mt-2 text-xs text-slate-500">Keine Kandidaten gemeldet.</p>
@@ -1638,6 +1734,10 @@ export const RosterModule: React.FC = () => {
                           </div>
                           {candidate.eligible && canManage && detailsShift.planningStatus !== 'published' && <button type="button" className={buttonClass} onClick={() => setAssignmentEmployeeId(candidate.employeeId)}>Für Zuweisung auswählen</button>}
                         </li>)}</ul>}
+                      {(requirement.excludedCandidates?.length ?? 0) > 0 && <details className="mt-2 text-[10px] text-slate-400">
+                        <summary className="cursor-pointer">Vorfilter-Ausschlüsse ({requirement.excludedCandidateCount}){requirement.excludedCandidatesTruncated ? ' · Liste gekürzt auf 50' : ''}</summary>
+                        <ul className="mt-1 space-y-1">{(requirement.excludedCandidates ?? []).map(candidate => <li key={candidate.employeeId}>{candidate.employeeId}: {candidate.reasons.join(', ')}</li>)}</ul>
+                      </details>}
                     </div>)}
                   </div>}
             </section>
@@ -1665,10 +1765,12 @@ export const RosterModule: React.FC = () => {
             <section><h3 className="mb-2 text-xs font-bold uppercase text-slate-400">Ist-Zeit erfassen / korrigieren</h3>
               {!isOnline && <p className="text-xs text-amber-300">Ist-Zeiten bleiben online-only und werden nicht in die Offline-Warteschlange aufgenommen.</p>}
               {isOnline && actualLoading && <p role="status" className="text-xs text-slate-400">Gespeicherte Ist-Zeit und Verlauf werden geladen…</p>}
-              {isOnline && !actualLoading && actualForm.employeeId && actualCurrent && <p className="text-xs text-slate-300">Gespeicherter Nachweis, Revision {actualCurrent.revision_version} · {actualCurrent.actual_start_at} – {actualCurrent.actual_end_at} · Pause {actualCurrent.break_minutes} min · aufgezeichnet {new Date(actualCurrent.recorded_at).toLocaleString()}</p>}
+              {isOnline && !actualLoading && actualForm.employeeId && actualCurrent && <p className="text-xs text-slate-300">Gespeicherter Nachweis, Revision {actualCurrent.revision_version} · {actualCurrent.actual_start_at} – {actualCurrent.actual_end_at} · Pause {actualCurrent.break_minutes} min · Status {actualCurrent.approval_status} · aufgezeichnet {new Date(actualCurrent.recorded_at).toLocaleString()}{actualCurrent.approved_at ? ` · genehmigt ${new Date(actualCurrent.approved_at).toLocaleString()}` : ''}</p>}
+              {isOnline && actualCurrent?.approval_status === 'pending' && canApproveActuals && actualCurrent.recorded_by !== currentUserId && <button type="button" className={primaryButtonClass} disabled={actualLoading || detailsLoading} onClick={() => void approveActualTime()}>Ist-Zeit unabhängig genehmigen · Revision {actualCurrent.revision_version}</button>}
+              {isOnline && actualCurrent?.approval_status === 'pending' && canApproveActuals && actualCurrent.recorded_by === currentUserId && <p className="text-xs text-amber-300">Eigene Ist-Zeit kann nicht genehmigt werden. Eine andere berechtigte Person muss die aktuelle Revision prüfen.</p>}
               {isOnline && !detailsLoading && !actualLoading && actualForm.employeeId && !actualCurrent && assignments.some(item => item.status === 'assigned') && <p className="text-xs text-slate-500">Für diese Person liegt noch kein gespeicherter Ist-Zeitnachweis vor.</p>}
               {isOnline && actualHistory.length > 0 && <details className="rounded-lg border border-slate-800 p-2 text-xs"><summary className="cursor-pointer text-slate-300">Änderungsverlauf ({actualHistory.length})</summary><ul className="mt-2 space-y-2">{actualHistory.map(entry => <li key={entry.id} className="border-t border-slate-800 pt-2"><div>{entry.event_type} · {new Date(entry.created_at).toLocaleString()} · Nutzer {entry.actor_user_id}</div><pre className="mt-1 whitespace-pre-wrap break-words text-[10px] text-slate-500">{JSON.stringify(entry.details)}</pre></li>)}</ul></details>}
-              {actualForm.employeeId && <p className="text-[11px] text-amber-300">Ist-Zeiten besitzen keine separate Freigabe und sind kein unabhängig genehmigtes Abrechnungsergebnis.</p>}
+              {actualForm.employeeId && <p className="text-[11px] text-amber-300">Korrekturen setzen den Freigabestatus auf ausstehend zurück. Nur unabhängig genehmigte Ist-Zeiten fließen in Ist-Soll-Abweichungen und Berichte ein; dies ist keine Aussage zur rechtlichen oder abrechnungstechnischen Anerkennung.</p>}
               {canManageActuals && isOnline && assignments.some(item => item.status === 'assigned') && <form className="space-y-2" onSubmit={event => void recordActualTime(event)}>
                 <label className="block text-xs text-slate-400">Zugewiesene Person<select required className={`${fieldClass} mt-1`} value={actualForm.employeeId} onChange={event => {
                   const employeeId = event.target.value;
@@ -1727,6 +1829,28 @@ export const RosterModule: React.FC = () => {
         </div>
       </Dialog>}
 
+      {planningNotificationsOpen && <Dialog title="Planungsbenachrichtigungen" onClose={() => setPlanningNotificationsOpen(false)}>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs text-slate-400">Mandanten- und benutzerspezifischer In-App-Eingang. Keine E-Mail- oder Push-Zustellung.</p>
+            <button type="button" className={buttonClass} disabled={!isOnline || planningNotificationsLoading} onClick={() => void loadPlanningNotifications()}>
+              {planningNotificationsLoading ? 'Laden…' : 'Aktualisieren'}
+            </button>
+          </div>
+          {!isOnline && <p className="text-xs text-amber-300">Benachrichtigungen sind online-only.</p>}
+          {planningNotifications.length === 0
+            ? <p className="rounded-lg border border-dashed border-slate-700 p-5 text-center text-xs text-slate-400">Keine Planungsbenachrichtigungen geladen.</p>
+            : <ul className="space-y-2">{planningNotifications.map(notification => <li key={notification.id} className={`rounded-xl border p-3 text-xs ${notification.read_at ? 'border-slate-800 bg-slate-950 text-slate-400' : 'border-blue-500/30 bg-blue-500/5 text-slate-200'}`}>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div><strong>{notification.event_type}</strong><div className="mt-1 text-slate-400">{notification.entity_type} · {notification.entity_id} · {new Date(notification.created_at).toLocaleString()}</div></div>
+                {!notification.read_at && <button type="button" className={buttonClass} disabled={!isOnline} onClick={() => void markPlanningNotificationRead(notification)}>Als gelesen markieren</button>}
+              </div>
+              <pre className="mt-2 whitespace-pre-wrap break-words text-[10px] text-slate-500">{JSON.stringify(notification.details)}</pre>
+              {notification.read_at && <div className="mt-1 text-[10px]">Gelesen {new Date(notification.read_at).toLocaleString()}</div>}
+            </li>)}</ul>}
+        </div>
+      </Dialog>}
+
       {reportOpen && <Dialog title={`Planungsberichte · ${range.from} – ${range.to}`} onClose={() => setReportOpen(false)}>
         <div className="space-y-4">
           <div className="flex justify-end"><button className={buttonClass} onClick={() => window.print()}><Printer size={14} /> Drucken</button><button className={`${buttonClass} ml-2`} onClick={() => void downloadHoursCsv()}><Download size={14} /> Arbeitsstunden-CSV</button></div>
@@ -1734,14 +1858,14 @@ export const RosterModule: React.FC = () => {
             <h3 className="mb-2 text-xs font-bold text-slate-300">Geplante und tatsächliche Arbeitszeit</h3>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Soll-Stunden</th><th className="p-2">Ist-Stunden / Status</th><th className="p-2">Ist-Soll-Abweichung / Status</th><th className="p-2">Überstunden / Status</th><th className="p-2">Überstundenquelle</th></tr></thead>
+                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Soll-Stunden</th><th className="p-2">Erfasste Ist-Stunden / Status</th><th className="p-2">Genehmigte Ist-Stunden / Status</th><th className="p-2">Ist-Soll-Abweichung / Status / Quelle</th><th className="p-2">Minusstunden / Status</th><th className="p-2">Überstunden / Status</th><th className="p-2">Überstundenquelle</th></tr></thead>
                 <tbody>{workHours.length === 0
-                  ? <tr><td colSpan={7} className="p-3 text-center text-slate-500">Keine Berichtsdaten für diesen Zeitraum.</td></tr>
-                  : workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800 align-top"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{reportValue(row.planned_hours)}</td><td className="p-2">{reportValue(row.actual_hours, row.actual_status)}</td><td className="p-2">{reportVariance(row.actual_hours, row.planned_hours, row.actual_status)}</td><td className="p-2">{reportValue(row.overtime_hours, row.overtime_status)}</td><td className="max-w-72 break-words p-2 text-slate-400">{reportSources(row.overtime_sources)}</td></tr>)}
+                  ? <tr><td colSpan={9} className="p-3 text-center text-slate-500">Keine Berichtsdaten für diesen Zeitraum.</td></tr>
+                  : workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800 align-top"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{reportValue(row.planned_hours)}</td><td className="p-2">{reportValue(row.captured_actual_hours, row.captured_actual_status)}</td><td className="p-2">{reportValue(row.actual_hours, row.actual_status)}<span className="mt-1 block text-[10px] text-slate-500">Freigabe: {row.actual_approval_status ?? 'Nicht gemeldet'}</span></td><td className="p-2">{reportVariance(row.hours_variance, row.hours_variance_status)}<span className="mt-1 block break-words text-[10px] text-slate-500">{row.hours_variance_source ?? 'Quelle nicht gemeldet'}</span></td><td className="p-2">{reportValue(row.minus_hours, row.hours_variance_status)}</td><td className="p-2">{reportValue(row.overtime_hours, row.overtime_status)}</td><td className="max-w-72 break-words p-2 text-slate-400">{reportSources(row.overtime_sources)}</td></tr>)}
                 </tbody>
               </table>
             </div>
-            <p className="mt-1 text-[10px] text-slate-500">Ist-Soll-Abweichung = erfasste Ist-Stunden minus Soll-Stunden; bei Status „partial“ nur ein Zwischenstand. Überstunden sind eine separate, konfigurationsabhängige Kennzahl.</p>
+            <p className="mt-1 text-[10px] text-slate-500">Ist-Soll-Abweichung und Minusstunden stammen aus der API und basieren nur auf vollständig genehmigten Ist-Zeiten. Erfasste, aber nicht genehmigte Werte bleiben getrennt. Überstunden sind eine separate, konfigurationsabhängige Kennzahl.</p>
           </section>
           <section>
             <h3 className="mb-2 text-xs font-bold text-slate-300">Wochenend-, Feiertags- und Nachtarbeit</h3>

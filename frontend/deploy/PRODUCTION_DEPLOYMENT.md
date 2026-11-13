@@ -36,8 +36,13 @@ Werte in `.env` setzen:
 | `JWT_SECRET` | Signaturgeheimnis, mindestens 32 Zeichen |
 | `JWT_EXPIRES_IN` | Session-Laufzeit, z. B. `8h` |
 | `CORS_ORIGIN` | Exakte öffentliche Origin, z. B. `https://securityops.example` |
+| `SECOPS_INTERNAL_SUBNET` | Privates Docker-Subnetz für Backend/Proxy/DB (Default `172.30.0.0/24`) |
+| `SECOPS_PROXY_IPV4` | Feste interne IPv4-Adresse von Caddy (Default `172.30.0.2`) |
+| `TRUST_PROXY` | Ausschließlich die Caddy-Adresse als CIDR, standardmäßig `172.30.0.2/32` |
 | `BACKUP_ENCRYPTION_KEY` | Schlüssel für verschlüsselte Backups |
 | `DMS_MAX_FILE_SIZE_BYTES` | Maximale Uploadgröße je Datei (Default 10 MiB, Obergrenze 100 MiB) |
+
+Express vertraut nur den in `TRUST_PROXY` ausdrücklich angegebenen Proxy-IP-Adressen/CIDRs; die Voreinstellung vertraut keinem Proxy. Im Production-Compose-Netz ist nur Caddy öffentlich, der Backend-Port wird nicht veröffentlicht, Caddy hat die feste interne Adresse `172.30.0.2`, und die Caddy-Konfiguration überschreibt `X-Forwarded-For` mit der tatsächlichen Verbindungsadresse. Bei geänderten Netzwerkwerten müssen `SECOPS_PROXY_IPV4` und `TRUST_PROXY` übereinstimmen; `TRUST_PROXY` darf nicht pauschal das gesamte Docker-Subnetz oder `*` freigeben. Dadurch basiert die Rate-Limit-IP auf dem Client hinter genau diesem vertrauenswürdigen Proxy, während nicht vertrauenswürdige `X-Forwarded-For`-Header ignoriert werden.
 
 Secrets erzeugen:
 

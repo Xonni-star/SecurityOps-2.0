@@ -14,7 +14,10 @@ const mocks = vi.hoisted(() => ({
   createCoverRequest: vi.fn(),
   decideCoverRequest: vi.fn(),
   recordActualTime: vi.fn(),
+  approveActualTime: vi.fn(),
   getActualTime: vi.fn(),
+  planningNotifications: vi.fn(),
+  markPlanningNotificationRead: vi.fn(),
   listTemplates: vi.fn(),
   updateTemplate: vi.fn(),
   staffingSuggestions: vi.fn(),
@@ -101,7 +104,10 @@ vi.mock('../services/planningService', async importOriginal => {
       createCoverRequest: mocks.createCoverRequest,
       decideCoverRequest: mocks.decideCoverRequest,
       recordActualTime: mocks.recordActualTime,
+      approveActualTime: mocks.approveActualTime,
       getActualTime: mocks.getActualTime,
+      planningNotifications: mocks.planningNotifications,
+      markPlanningNotificationRead: mocks.markPlanningNotificationRead,
       listTemplates: mocks.listTemplates,
       updateTemplate: mocks.updateTemplate,
       staffingSuggestions: mocks.staffingSuggestions,
@@ -183,6 +189,7 @@ describe('RosterModule', () => {
           'planning:read', 'planning:manage', 'planning:publish',
           'planning:reports:read', 'planning:swaps:manage', 'planning:swaps:approve',
           'planning:covers:manage', 'planning:covers:approve', 'planning:actuals:manage',
+          'planning:actuals:approve',
           'planning:rules:manage', 'planning:rules:approve',
           'shifts:manage'
         ]
@@ -213,7 +220,10 @@ describe('RosterModule', () => {
     mocks.createCoverRequest.mockResolvedValue({});
     mocks.decideCoverRequest.mockResolvedValue({});
     mocks.recordActualTime.mockResolvedValue({ revision_version: 1 });
+    mocks.approveActualTime.mockResolvedValue({});
     mocks.getActualTime.mockResolvedValue({ current: null, history: [] });
+    mocks.planningNotifications.mockResolvedValue([]);
+    mocks.markPlanningNotificationRead.mockResolvedValue({});
     mocks.listTemplates.mockResolvedValue([]);
     mocks.updateTemplate.mockResolvedValue({});
     mocks.staffingSuggestions.mockResolvedValue({
@@ -310,6 +320,7 @@ describe('RosterModule', () => {
     await act(async () => reports.click());
 
     expect(container.textContent).toContain('Keine Berichtsdaten für diesen Zeitraum.');
+    expect(container.textContent).toContain('zuletzt geladene Datumsbereich');
     expect(container.textContent).toContain('Keine Besetzungsdaten für diesen Zeitraum.');
     expect(container.textContent).toContain('Geplante und tatsächliche Arbeitszeit');
     expect(container.textContent).toContain('Qualifikationsangebot und -bedarf');
@@ -326,6 +337,13 @@ describe('RosterModule', () => {
       planned_hours: 16,
       actual_hours: null,
       actual_status: 'partial',
+      captured_actual_hours: 8,
+      captured_actual_status: 'complete',
+      actual_approval_status: 'pending',
+      hours_variance: null,
+      minus_hours: null,
+      hours_variance_status: 'pending_approval',
+      hours_variance_source: 'approved_actual_hours_minus_planned_hours',
       overtime_hours: null,
       overtime_status: 'unconfigured',
       overtime_sources: [],
@@ -373,6 +391,13 @@ describe('RosterModule', () => {
       planned_hours: 8,
       actual_hours: 10,
       actual_status: 'complete',
+      captured_actual_hours: 10,
+      captured_actual_status: 'complete',
+      actual_approval_status: 'approved',
+      hours_variance: 2,
+      minus_hours: 0,
+      hours_variance_status: 'available',
+      hours_variance_source: 'approved_actual_hours_minus_planned_hours',
       overtime_hours: null,
       overtime_status: 'unconfigured',
       overtime_sources: [],
@@ -384,7 +409,9 @@ describe('RosterModule', () => {
     await act(async () => reports.click());
 
     expect(container.textContent).toContain('Ist-Soll-Abweichung / Status');
-    expect(container.textContent).toContain('+2 (complete)');
+    expect(container.textContent).toContain('+2 (available)');
+    expect(container.textContent).toContain('approved_actual_hours_minus_planned_hours');
+    expect(container.textContent).toContain('Minusstunden / Status');
     expect(container.textContent).toContain('Nicht verfügbar (unconfigured)');
     expect(container.textContent).toContain('Überstunden sind eine separate, konfigurationsabhängige Kennzahl.');
   });
@@ -398,7 +425,11 @@ describe('RosterModule', () => {
       time_zone: 'Europe/Berlin',
       local_start_time: '08:00:00',
       local_end_time: '16:00:00',
+      break_minutes: 30,
+      required_staff_count: 2,
       required_qualification: 'Sachkunde',
+      effective_from: '2026-01-01',
+      effective_until: '2026-12-31',
       recurrence: { frequency: 'WEEKLY', interval: 1, weekdays: [1, 2, 3, 4, 5] },
       active: true,
       revision_version: 1
@@ -431,7 +462,11 @@ describe('RosterModule', () => {
       time_zone: 'Europe/Berlin',
       local_start_time: '08:00:00',
       local_end_time: '16:00:00',
+      break_minutes: 30,
+      required_staff_count: 2,
       required_qualification: 'Sachkunde',
+      effective_from: '2026-01-01',
+      effective_until: '2026-12-31',
       recurrence: { frequency: 'WEEKLY', interval: 1, weekdays: [1, 2, 3, 4, 5] },
       active: true,
       revision_version: 6
@@ -459,7 +494,11 @@ describe('RosterModule', () => {
 
     expect(mocks.updateTemplate).toHaveBeenCalledWith('template-a', expect.objectContaining({
       expectedVersion: 6,
-      name: 'Spätdienst'
+      name: 'Spätdienst',
+      breakMinutes: 30,
+      requiredStaffCount: 2,
+      effectiveFrom: '2026-01-01',
+      effectiveUntil: '2026-12-31'
     }));
     const deactivate = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Deaktivieren');
     if (!deactivate) throw new Error('Vorlage deaktivieren fehlt');
@@ -500,7 +539,10 @@ describe('RosterModule', () => {
           scheduledMinutesThisWeek: 240,
           reasons: ['active', 'qualified'],
           findings: []
-        }]
+        }],
+        excludedCandidates: [{ employeeId: 'filtered-id', reasons: ['qualification_missing'] }],
+        excludedCandidateCount: 1,
+        excludedCandidatesTruncated: false
       }],
       finalAssignmentRequiresConfirmation: true
     });
@@ -509,7 +551,8 @@ describe('RosterModule', () => {
     if (!eventButton) throw new Error('Kalendereintrag fehlt');
     await act(async () => eventButton.click());
     expect(container.textContent).toContain('Nicht bindende Hinweise');
-    expect(container.textContent).toContain('erscheinen nicht mit Einzelgrund');
+    expect(container.textContent).toContain('Vorfilter-Ausschlüsse (1)');
+    expect(container.textContent).toContain('filtered-id: qualification_missing');
     expect(container.textContent).toContain('Alex Guard');
 
     const selectCandidate = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Für Zuweisung auswählen'));
@@ -533,7 +576,11 @@ describe('RosterModule', () => {
       time_zone: 'Europe/Berlin',
       local_start_time: '08:00:00',
       local_end_time: '16:00:00',
+      break_minutes: 0,
+      required_staff_count: 1,
       required_qualification: 'Sachkunde',
+      effective_from: null,
+      effective_until: null,
       recurrence: { frequency: 'WEEKLY' as const, interval: 1, weekdays: [1, 2, 3, 4, 5] },
       active: true,
       revision_version: 1
@@ -714,7 +761,11 @@ describe('RosterModule', () => {
     const siteSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Vorlagenobjekt"]');
     const qualification = container.querySelector<HTMLInputElement>('input[aria-label="Vorlagenqualifikation"]');
     const times = container.querySelectorAll<HTMLInputElement>('input[type="time"]');
-    if (!name || !siteSelect || !qualification || times.length < 2) throw new Error('Vorlagenformular fehlt');
+    const effectiveFrom = container.querySelector<HTMLInputElement>('input[aria-label="Vorlage gültig ab"]');
+    const effectiveUntil = container.querySelector<HTMLInputElement>('input[aria-label="Vorlage gültig bis"]');
+    const breakMinutes = container.querySelector<HTMLInputElement>('input[aria-label="Vorlagenpause"]');
+    const requiredStaffCount = container.querySelector<HTMLInputElement>('input[aria-label="Vorlagenbedarf"]');
+    if (!name || !siteSelect || !qualification || times.length < 2 || !effectiveFrom || !effectiveUntil || !breakMinutes || !requiredStaffCount) throw new Error('Vorlagenformular fehlt');
     expect(name.value).toBe('');
     expect(qualification.value).toBe('');
     await act(async () => {
@@ -723,6 +774,10 @@ describe('RosterModule', () => {
       setInput(times[0], '07:00');
       setInput(times[1], '15:00');
       setInput(qualification, 'Werkschutz');
+      setInput(breakMinutes, '45');
+      setInput(requiredStaffCount, '3');
+      setInput(effectiveFrom, '2027-01-01');
+      setInput(effectiveUntil, '2027-12-31');
     });
     const create = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlage erstellen');
     if (!create) throw new Error('Vorlage erstellen fehlt');
@@ -733,6 +788,10 @@ describe('RosterModule', () => {
       name: 'Wachposten Tag',
       startTime: '07:00',
       endTime: '15:00',
+      breakMinutes: 45,
+      requiredStaffCount: 3,
+      effectiveFrom: '2027-01-01',
+      effectiveUntil: '2027-12-31',
       requiredQualification: 'Werkschutz',
       frequency: 'WEEKLY'
     }));
@@ -820,6 +879,7 @@ describe('RosterModule', () => {
         current: { ...actualRecord, revision_version: 8, notes: 'Corrected' },
         history: [{ id: 'audit-a', actor_user_id: 'user-b', event_type: 'shift.actual_time.recorded', details: {}, created_at: actualRecord.recorded_at }]
       });
+
     mocks.recordActualTime
       .mockRejectedValueOnce(new ApiError(500, 'Verbindung unterbrochen.', undefined, true))
       .mockResolvedValueOnce({ ...actualRecord, revision_version: 8, notes: 'Corrected' });
@@ -854,6 +914,143 @@ describe('RosterModule', () => {
     expect(mocks.getActualTime).toHaveBeenCalledTimes(2);
     expect(container.textContent).toContain('Revision 8');
     expect(container.querySelector<HTMLInputElement>('input[type="number"][min="0"][step="1"]')).toBeNull();
+  });
+
+  test('allows a different authorized user to approve the current actual-time revision', async () => {
+    mocks.listAssignments.mockResolvedValue([{
+      id: 'assignment-a',
+      shift_id: 'shift-a',
+      employee_id: 'employee-a',
+      first_name: 'Ada',
+      last_name: 'Guard',
+      status: 'assigned',
+      revision_version: 1
+    }]);
+    const pending = {
+      id: 'actual-a',
+      shift_id: 'shift-a',
+      employee_id: 'employee-a',
+      actual_start_at: '2027-01-10T08:03:00+01:00',
+      actual_end_at: '2027-01-10T16:05:00+01:00',
+      break_minutes: 30,
+      revision_version: 7,
+      recorded_by: 'user-b',
+      recorded_at: '2027-01-10T15:10:00.000Z',
+      approval_status: 'pending'
+    };
+    const approved = { ...pending, approval_status: 'approved', approved_by: 'user-a', approved_at: '2027-01-10T16:00:00.000Z' };
+    mocks.getActualTime
+      .mockResolvedValueOnce({ current: pending, history: [] })
+      .mockResolvedValueOnce({ current: approved, history: [] });
+    mocks.approveActualTime.mockResolvedValue(approved);
+    await act(async () => root.render(<RosterModule />));
+    const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
+    if (!eventButton) throw new Error('Kalendereintrag fehlt');
+    await act(async () => eventButton.click());
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)));
+
+    const approve = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Ist-Zeit unabhängig genehmigen'));
+    if (!approve) throw new Error('Ist-Zeit-Genehmigung fehlt');
+    await act(async () => approve.click());
+
+    expect(mocks.approveActualTime).toHaveBeenCalledWith('shift-a', {
+      employeeId: 'employee-a',
+      expectedVersion: 7
+    });
+    expect(container.textContent).toContain('Status approved');
+    expect(container.textContent).toContain('Ist-Zeit-Revision 7 unabhängig genehmigt');
+  });
+
+  test('does not offer self-approval for an actual-time record', async () => {
+    mocks.listAssignments.mockResolvedValue([{
+      id: 'assignment-a',
+      shift_id: 'shift-a',
+      employee_id: 'employee-a',
+      first_name: 'Ada',
+      last_name: 'Guard',
+      status: 'assigned',
+      revision_version: 1
+    }]);
+    mocks.getActualTime.mockResolvedValue({
+      current: {
+        id: 'actual-a',
+        shift_id: 'shift-a',
+        employee_id: 'employee-a',
+        actual_start_at: '2027-01-10T08:03:00+01:00',
+        actual_end_at: '2027-01-10T16:05:00+01:00',
+        break_minutes: 30,
+        revision_version: 7,
+        recorded_by: 'user-a',
+        recorded_at: '2027-01-10T15:10:00.000Z',
+        approval_status: 'pending'
+      },
+      history: []
+    });
+    await act(async () => root.render(<RosterModule />));
+    const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
+    if (!eventButton) throw new Error('Kalendereintrag fehlt');
+    await act(async () => eventButton.click());
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)));
+
+    expect(container.textContent).toContain('Eigene Ist-Zeit kann nicht genehmigt werden');
+    expect(Array.from(container.querySelectorAll('button')).some(button => button.textContent?.includes('Ist-Zeit unabhängig genehmigen'))).toBe(false);
+    expect(mocks.approveActualTime).not.toHaveBeenCalled();
+  });
+
+  test('loads and marks read tenant-scoped planning notifications', async () => {
+    const notification = {
+      id: 'notification-a',
+      event_type: 'shift.actual_time.approved',
+      entity_type: 'shift_actual_time',
+      entity_id: 'actual-a',
+      details: { shiftId: 'shift-a' },
+      created_at: '2027-01-10T16:00:00.000Z',
+      read_at: null
+    };
+    mocks.planningNotifications.mockResolvedValue([notification]);
+    mocks.markPlanningNotificationRead.mockResolvedValue({
+      ...notification,
+      read_at: '2027-01-10T16:05:00.000Z'
+    });
+    await act(async () => root.render(<RosterModule />));
+    const open = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Benachrichtigungen'));
+    if (!open) throw new Error('Benachrichtigungen-Schaltfläche fehlt');
+    await act(async () => open.click());
+    expect(container.textContent).toContain('shift.actual_time.approved');
+
+    const markRead = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Als gelesen markieren'));
+    if (!markRead) throw new Error('Als-gelesen-Aktion fehlt');
+    await act(async () => markRead.click());
+    expect(mocks.markPlanningNotificationRead).toHaveBeenCalledWith('notification-a');
+    expect(container.textContent).toContain('Gelesen');
+    expect(container.textContent).toContain('Keine E-Mail- oder Push-Zustellung');
+  });
+
+  test('clears planning notifications and ignores stale inbox responses after an identity switch', async () => {
+    let resolveTenantANotifications!: (rows: any[]) => void;
+    mocks.planningNotifications.mockReturnValue(new Promise(resolve => {
+      resolveTenantANotifications = resolve;
+    }));
+    await act(async () => root.render(<RosterModule />));
+    const open = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Benachrichtigungen'));
+    if (!open) throw new Error('Benachrichtigungen-Schaltfläche fehlt');
+    await act(async () => open.click());
+
+    await act(async () => {
+      Object.assign(mocks.storeState, { currentTenantId: 'tenant-b', currentUserId: 'user-b' });
+      root.render(<RosterModule />);
+    });
+    await act(async () => resolveTenantANotifications([{
+      id: 'notification-tenant-a',
+      event_type: 'TENANT_A_NOTIFICATION_SECRET',
+      entity_type: 'shift',
+      entity_id: 'shift-a',
+      details: {},
+      created_at: '2027-01-10T16:00:00.000Z',
+      read_at: null
+    }]));
+
+    expect(container.textContent).not.toContain('TENANT_A_NOTIFICATION_SECRET');
   });
 
   test('keeps template, cover, and actual-time workflows online-only', async () => {

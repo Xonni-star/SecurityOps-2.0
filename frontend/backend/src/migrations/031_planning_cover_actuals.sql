@@ -5,7 +5,12 @@ UPDATE shifts
 ALTER TABLE shifts ALTER COLUMN end_date SET NOT NULL;
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'shifts_end_date_order') THEN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conrelid = 'shifts'::regclass
+           AND conname = 'shifts_end_date_order'
+    ) THEN
         ALTER TABLE shifts ADD CONSTRAINT shifts_end_date_order CHECK (end_date >= shift_date);
     END IF;
 END $$;
