@@ -1,9 +1,9 @@
 # SecurityOps 2.0 — Sicherheitsdienstverwaltung
 
-Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
+Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Übergabemanagement, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
 
 > **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.**
-> DMS und SOP/Dienstanweisungen sind im Repository implementiert, aber nicht deployed. Alarme/Notfallpläne, Übergaben und Streifenkontrollen sind weiterhin offen.
+> DMS, SOP/Dienstanweisungen und Übergabemanagement sind im Repository implementiert, aber nicht deployed. PR #12 (Alarm-/Notfallmanagement) ist offen und nicht Bestandteil von `main`; Streifenkontrollen bleiben offen.
 > Historischer Gesamtstatus: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md); aktuelle SOP-Umsetzung: [SOP_IMPLEMENTATION_REPORT.md](./SOP_IMPLEMENTATION_REPORT.md).
 
 ---
@@ -86,7 +86,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Dokumente | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte PostgreSQL-Verwaltung, private Dateispeicherung, Versionen, Kategorien, Ordner, Audit und REST-API; Einschränkungen siehe [DMS-Bericht](./DMS_IMPLEMENTATION_REPORT.md) |
 | SOPs | implementiert, nicht deployed | Versionierter Prüf-/Freigabe-Workflow, Zuweisungen, Bestätigungen, JSON-Berichte; Einschränkungen siehe [SOP-API](./frontend/SOP_API.md) und [Implementierungsbericht](./SOP_IMPLEMENTATION_REPORT.md) |
 | Alarme/Notfallpläne | offen | Keine Tabelle, kein Endpunkt |
-| Übergaben | offen | Nur lokales Mobile-Modul |
+| Übergaben | implementiert, nicht deployed | Mandantengeschützte Protokolle, getrennte Bestätigungen, Historie, übernommene Aufgaben, DMS-Links und IndexedDB-Sync; Details siehe [Handovers-API](./frontend/HANDOVERS_API.md) |
 | Streifenkontrollen | offen | Nur lokales Mobile-Modul |
 | Benutzer/Rechte | teilweise | Login/RBAC vorhanden; Verwaltungs-API offen |
 | Offline-Sync | teilweise | Outbox vorhanden; nicht alle Module angebunden |
@@ -114,7 +114,7 @@ npm --prefix frontend/backend run build
 * **Mandantenisolation:** PostgreSQL 16+ erzwingt `FORCE ROW LEVEL SECURITY`; ohne gesetzten Transaktionskontext (`SET LOCAL app.current_tenant`) liefert die Datenbank physisch keine Datensätze.
 * **Least Privilege:** Der operative Benutzer `secops_app_user` besitzt weder Superuser- noch `BYPASSRLS`-Rechte; die Rolle wird beim Serverstart verifiziert.
 * **Authentifizierung:** Argon2id-Passworthashes, JWT-Sessions, Rate Limiting und Brute-Force-Schutz.
-* **Offline-Sync:** Idempotente Mutationen über `POST /api/v1/sync/push` mit Advisory Locks und Quittungstabellen; Konflikte werden über `POST /api/v1/sync/conflicts/resolve` entschieden.
+* **Offline-Sync:** Idempotente Mutationen über `POST /api/v1/sync/push`; Übergaben verwenden zusätzlich `POST /api/v1/handovers/sync`, Advisory Locks und persistente Quittungen. Lokale Erfassung bleibt bis zur API-Quittung ausstehend; Konflikte überschreiben keine bestätigten Protokolle.
 
 ---
 
@@ -123,6 +123,7 @@ npm --prefix frontend/backend run build
 * [frontend/README.md](./frontend/README.md) — detaillierte Architektur-, Build- und Testhinweise
 * [frontend/INSTALLATION_GUIDE.md](./frontend/INSTALLATION_GUIDE.md) — Installation und Inbetriebnahme
 * [frontend/SYSTEM_OVERVIEW.md](./frontend/SYSTEM_OVERVIEW.md) — Systemüberblick
+* [frontend/HANDOVERS_API.md](./frontend/HANDOVERS_API.md) — Übergabe-API, Statusmodell und Offline-Synchronisierung
 * [frontend/SECURITY_AUDIT.md](./frontend/SECURITY_AUDIT.md) — Sicherheitsaudit
 * [frontend/KNOWN_ISSUES.md](./frontend/KNOWN_ISSUES.md) — bekannte Einschränkungen
 * [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md) — aktueller Umsetzungsstand

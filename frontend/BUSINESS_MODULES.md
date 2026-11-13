@@ -10,7 +10,8 @@
 | **Digitales Wachbuch** | Vollständig | Revisionssichere Protokollierung, Rundgänge, Schichtwechsel, lückenlose Historie | Vorfälle, Aufgaben, Objekte |
 | **Vorfallmanagement** | Vollständig | Workflow: Erfassung -> Bewertung -> Zuweisung -> Maßnahme -> Eskalation -> Abschluss | Aufgaben, DMS, Benachrichtigungen |
 | **Qualitätsmanagement & SOP** | Implementiert, nicht deployed | Versionierte Dienstanweisungen mit Prüfung/Freigabe, Zuweisungen und digitaler Kenntnisnahme; Erinnerungen und JSON-Berichte. Offline-Vormerkungen werden erst nach Serverbestätigung abgeschlossen; kein Hintergrundscheduler/CSV-/PDF-Export. | Mitarbeiter, Objekte, DMS |
-| **Alarmmanagement** | Vollständig | BMA/EMA Eskalationsketten, Notfall-Ansprechpartner, Evakuierungspläne | Objekte, Notfall-SOPs |
+| **Alarmmanagement** | Offen (PR #12 separat, nicht Bestandteil von `main`) | BMA/EMA Eskalationsketten, Notfall-Ansprechpartner, Evakuierungspläne | Objekte, Notfall-SOPs |
+| **Übergabemanagement** | Implementiert, nicht deployed | Mandantengeschützte Objekt-/Schichtprotokolle, getrennte Übergabe-/Übernahmebestätigungen, append-only Historie, fortgeführte Aufgaben, DMS-Verweise und IndexedDB-Synchronisierung | Mitarbeiter, Objekte, Dienstplan, Aufgaben, DMS |
 | **Schlüsselverwaltung** | Vollständig | Generalschlüssel-Depot, Ausgabe-/Rücknahmeprotokolle, automatische Verzugserkennung | Mitarbeiter, Objekte, Aufgaben |
 | **Aufgaben & Maßnahmen** | Vollständig | Modulübergreifende Aufgaben-Pipeline (generiert aus Vorfällen, Schlüsselverzug, Audit-Mängeln) | Vorfälle, Schlüssel, QM |
 | **Dokumentenmanagement (DMS)** | Vollständig | Polymorphe Zuordnung zu Kunden, Objekten, Personalakten und Vorfällen | Alle Fachmodule |
@@ -24,3 +25,4 @@
 2. **Schlüssel & Aufgaben**: Wenn ein ausgegebener Schlüssel den vereinbarten Rückgabezeitpunkt überschreitet, setzt die Watchdog-Engine den Status auf *Überfällig* und erzeugt eine Eskalationsaufgabe.
 3. **Mitarbeiter & Dienstplan**: Bei der Schichtdisposition werden sowohl die Arbeitsunfähigkeit/Urlaub als auch die geforderte Qualifikation (§ 34a Sachkunde, Brandschutzhelfer) geprüft und bei Nichteignung als Konflikt markiert.
 4. **Polymorphe Dokumentenablage**: Dokumente werden in einer zentralen DMS-Tabelle gespeichert und können flexibel mit Kunden, Objekten, Mitarbeitern oder Vorfällen verknüpft werden, ohne Dateiduplikate zu erzeugen.
+5. **Übergabe & Aufgaben**: Nicht erledigte Übergabeaufgaben bleiben am Objekt offen und werden in nachfolgenden Übergaben angezeigt; Erledigung und Zuweisungsänderungen erzeugen eine Historie.

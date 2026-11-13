@@ -17,6 +17,10 @@ Die lokale Speicherung erfolgt über die native Browser-IndexedDB `SecurityOps2_
 
 SOP-Kenntnisnahmen verwenden zusätzlich den `sopAcknowledgements`-Store derselben IndexedDB. Jeder Eintrag ist an Mandant, Benutzer, SOP-Zuweisung und konkrete Versions-ID gebunden und enthält einen stabilen `clientMutationId` sowie den Erfassungszeitpunkt. Der Eintrag wird dauerhaft gespeichert, bevor die Oberfläche die Bestätigung als vorgemerkt anzeigt; fehlgeschlagene Übertragungen werden mit derselben Mutation-ID erneut versucht und erst nach bestätigter Serverantwort entfernt. Der allgemeine Entity-Outbox-Endpunkt wird dafür nicht verwendet. Alte localStorage-Einträge werden nur dann einmalig übernommen, wenn die konkrete Versions-ID zuverlässig zugeordnet werden kann.
 
+Übergaben verwenden denselben `outbox`-Store mit `entityType='handover'`, stabiler Client-ID, Mandant, Benutzer, Erfassungszeitpunkt und Payload. Der Store schreibt zuerst transaktionssicher in IndexedDB; danach überträgt der bestehende Sync-Manager die Mutationen an `POST /api/v1/handovers/sync`. Die Antwort wird mit derselben Client-ID quittiert. `SYNCED` entfernt die Outbox-Mutation, `CONFLICT` und `FAILED` bleiben lokal erhalten, und fehlgeschlagene Mutationen können bei Verbindung erneut gesendet werden. Eine Konfliktwiederholung mit abweichendem Inhalt wird nicht als Erfolg behandelt. Synchronisierte Datensätze werden anschließend aus PostgreSQL geladen; lokale Einträge sind sichtbar als „ausstehend“, nie als serverbestätigt.
+
+Die Handover-Outbox ermöglicht die Offline-Erfassung des Übergabeprotokolls und der initialen Aufgaben. Statusbestätigungen, Aufgabenänderungen und DMS-Verknüpfungen benötigen eine Online-Verbindung. Eine verspätete Erfassung kann bestätigte Serverprotokolle nicht ändern; Korrekturen werden als Historienereignis hinzugefügt.
+
 ---
 
 ## 3. Datenintegrität & Append-Only Modell

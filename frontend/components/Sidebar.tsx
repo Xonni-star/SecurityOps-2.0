@@ -18,7 +18,8 @@ import {
   ShieldCheck,
   Smartphone,
   Award,
-  HelpCircle
+  HelpCircle,
+  ClipboardCheck
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
 import { UserRole } from '../types';
@@ -62,6 +63,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
         { id: 'guardbook', label: 'Digitales Wachbuch', icon: BookOpen, badge: criticalLogsCount, badgeColor: 'bg-rose-500', visible: true },
         { id: 'roster', label: 'Dienstplanung (Soll/Ist)', icon: CalendarDays, badge: openShiftsCount, badgeColor: 'bg-amber-500', visible: canAccessRoster },
         { id: 'alarms', label: 'Alarm- & Notfallmanagement', icon: Siren, visible: true },
+        { id: 'handovers', label: 'Übergabemanagement', icon: ClipboardCheck, visible: true },
         { id: 'keys', label: 'Schlüssel & Zutrittsmedien', icon: KeyRound, badge: issuedKeysCount, badgeColor: 'bg-blue-500', visible: true }
       ]
     },

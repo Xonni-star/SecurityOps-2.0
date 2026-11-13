@@ -10,6 +10,7 @@ import { ClientsModule } from './components/ClientsModule';
 import { EmployeesModule } from './components/EmployeesModule';
 import { SOPModule } from './components/SOPModule';
 import { AlarmsModule } from './components/AlarmsModule';
+import { HandoversModule } from './components/HandoversModule';
 import { KeysModule } from './components/KeysModule';
 import { TasksModule } from './components/TasksModule';
 import { DocumentsModule } from './components/DocumentsModule';
@@ -157,6 +158,8 @@ export default function App(): React.ReactNode {
         return <AutomationCenter />;
       case 'alarms':
         return <AlarmsModule />;
+      case 'handovers':
+        return <HandoversModule />;
       case 'keys':
         return <KeysModule />;
       case 'tasks':

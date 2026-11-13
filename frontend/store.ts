@@ -970,9 +970,19 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       });
 
       try {
-        for (const items of [pendingItems.filter((p) => !['client', 'site', 'employee'].includes(p.entityType)), pendingItems.filter((p) => p.entityType === 'client'), pendingItems.filter((p) => p.entityType === 'site'), pendingItems.filter((p) => p.entityType === 'employee')]) {
+        for (const items of [
+          pendingItems.filter((p) => !['client', 'site', 'employee', 'handover'].includes(p.entityType)),
+          pendingItems.filter((p) => p.entityType === 'handover'),
+          pendingItems.filter((p) => p.entityType === 'client'),
+          pendingItems.filter((p) => p.entityType === 'site'),
+          pendingItems.filter((p) => p.entityType === 'employee')
+        ]) {
           if (!items.length) continue;
-          const path = items[0].entityType === 'client' ? '/customers/sync' : items[0].entityType === 'site' ? '/sites/sync' : items[0].entityType === 'employee' ? '/employees/sync' : '/sync/push';
+          const path = items[0].entityType === 'handover' ? '/handovers/sync'
+            : items[0].entityType === 'client' ? '/customers/sync'
+              : items[0].entityType === 'site' ? '/sites/sync'
+                : items[0].entityType === 'employee' ? '/employees/sync'
+                  : '/sync/push';
           const orderedItems = ['site', 'employee'].includes(items[0].entityType) ? [...items].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)) : items;
           const serverResponse: any = await apiClient.post(path, makeSyncPayload(orderedItems));
           const receipts = Array.isArray(serverResponse) ? serverResponse : serverResponse?.data;

@@ -19,6 +19,7 @@
 | **Schlüssel & Zutritt** | `KeysModule.tsx` | `/api/v1/keys` | `keys` | Ja | Ja |
 | **QM & Anweisungen** | `SOPModule.tsx` | `/api/v1/sops` | `sop_instructions`, `sop_versions`, `sop_events`, `sop_assignments` | Ja | Teilweise (lokale Vormerkung) |
 | **Alarmmanagement** | `AlarmsModule.tsx` | `/api/v1/alarms` | `alarm_plans` | Ja | Ja |
+| **Übergabemanagement** | `HandoversModule.tsx` (`MobileShiftHandover.tsx` nutzt dieselbe Oberfläche) | `/api/v1/handovers`, `/api/v1/handovers/sync` | `handovers`, `handover_participants`, `handover_events`, `handover_confirmations`, `handover_tasks`, `handover_task_events`, `handover_documents` | Ja (FORCE RLS) | Ja (Erfassung/initiale Aufgaben; Status sichtbar bis Quittung) |
 | **Aufgaben & Maßnahmen**| `TasksModule.tsx` | `/api/v1/tasks` | `tasks` | Ja | Ja (Conflict Diff) |
 | **Dokumente (DMS)** | `DocumentsModule.tsx` | Nicht vorhanden | Nicht vorhanden | Nein | Nein (nur lokale Metadaten; kein echter Datei-Upload/-Download) |
 | **Automationen & Watchdog**| `AutomationCenter.tsx` | `/api/v1/automations` | `automation_rules`, `logs` | Ja | Ja |

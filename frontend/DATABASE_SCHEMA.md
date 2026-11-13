@@ -41,3 +41,11 @@ Kategorien, Ordner und Dokumente haben zusammengesetzte Schlüssel/Fremdschlüss
 `document_audit_events` enthält Actor, Dokument, Mandant, Aktion, JSON-Details und Zeitstempel. `secops_app_user` darf Auditdaten nur lesen und einfügen. Zusätzlich weist ein Trigger `UPDATE` und `DELETE` zurück. Dokumente werden archiviert, nicht physisch gelöscht.
 
 Datei-Blobs werden getrennt von PostgreSQL unter einem zufälligen UUID-Schlüssel im privaten `DMS_STORAGE_PATH` abgelegt. Das Originaldateiname ist nur Metadatum. Das persistente Docker-Volume heißt `secops_documents`; Datei-Backups müssen zusammen mit dem Datenbankdump wiederhergestellt werden.
+
+## 5. Übergabemanagement (Migration 017)
+
+Migration `017_handover_management.sql` verwendet absichtlich Version 017, da der separate offene PR #12 die Versionen 015/016 beansprucht. Die Tabellen `handovers`, `handover_participants`, `handover_events`, `handover_confirmations`, `handover_tasks`, `handover_task_events` und `handover_documents` haben alle `ENABLE` und `FORCE ROW LEVEL SECURITY` mit `app.current_tenant`. Fremdschlüssel binden Objekt, Dienst, Mitarbeiter, Ursprungübergabe und DMS-Dokument jeweils zusammen mit `tenant_id`.
+
+Übergaben enthalten Objekt/Bereich, Datum, Dienst, strukturierte Textfelder, Status, Revision, Client-Mutations-ID, Payload-Hash sowie client- und serverseitige Empfangszeitpunkte. Eine eindeutige `(tenant_id, client_mutation_id)`-Constraint und Hashprüfung verhindern Doppelanlage sowie Wiederverwendung einer Client-ID für abweichende Inhalte. Bestätigungen sind an Übergabe, Mitarbeiter, Revision und Mutations-ID gebunden. Ereignis-, Bestätigungs-, Teilnehmer-, Dokument- und Aufgabenhistorientabellen sind durch Trigger und Least-Privilege-Rechte unveränderlich.
+
+Aufgaben bleiben mit dem Ursprungsprotokoll verknüpft; ein Index unterstützt die Abfrage offener Aufgaben je Objekt und Fälligkeit. Sie werden bei Folgeübergaben mit `carried_forward=true` dargestellt, ohne den ursprünglichen Bezug umzuschreiben. Die vollständige Tabellen- und Statusbeschreibung steht in [HANDOVERS_API.md](./HANDOVERS_API.md).

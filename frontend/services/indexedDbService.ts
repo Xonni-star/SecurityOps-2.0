@@ -202,6 +202,20 @@ class IndexedDbService {
     });
   }
 
+  async getOutbox(tenantId: string, entityType?: OutboxMutation['entityType']): Promise<OutboxMutation[]> {
+    const db = await this.init();
+
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('outbox', 'readonly');
+      const request = tx.objectStore('outbox').getAll();
+      request.onsuccess = () => {
+        const records = (request.result as OutboxMutation[]) || [];
+        resolve(records.filter(record => record.tenantId === tenantId && (!entityType || record.entityType === entityType)));
+      };
+      request.onerror = () => reject(request.error || new Error('[INDEXEDDB FEHLER] Lesen der Outbox fehlgeschlagen'));
+    });
+  }
+
   /**
    * Aktualisiert den Status einer Mutation in der Outbox erst nach Bestätigung.
    */

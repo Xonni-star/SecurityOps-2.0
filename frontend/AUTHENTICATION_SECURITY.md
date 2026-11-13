@@ -22,3 +22,9 @@ Production cookies require HTTPS (`Secure`). Configure exact frontend origins in
 Dokumentrouten verwenden dieselbe serverseitige, datenbankgestützte RBAC-Prüfung wie die übrige API. Der Tenant wird ausschließlich aus der authentifizierten Datenbanksitzung (`user_sessions.tenant_id`) übernommen; `currentTenantId` im Browser ist kein Autorisierungsmerkmal. DMS-Tabellen erzwingen PostgreSQL RLS und Beziehungen zu Kunden, Objekten, Mitarbeitern, Schichten und Wachbuchereignissen verwenden zusammengesetzte Fremdschlüssel mit `tenant_id`.
 
 Die granularen DMS-Rechte sind `documents:read`, `documents:create`, `documents:update`, `documents:download`, `documents:archive`, `documents:restore`, `documents:manage` und `documents:approve`. Download erfordert ein eigenes Recht. Audit-Ereignisse sind für die Anwendungsrolle nur les- und anlegbar; zusätzlich verhindert ein Trigger Updates und Deletes.
+
+# Übergabemanagement-Rollen und Tenant-Grenze
+
+Die Handover-Routen verwenden die serverseitigen Rechte `handovers:read`, `handovers:create`, `handovers:update`, `handovers:confirm`, `handovers:tasks` und `handovers:manage`. Die Zuordnung wird in Migration 017 an die bestehenden Einsatz-, Objektleitungs-, Wach- und Auditorrollen vergeben. Jede Controller-Abfrage läuft über `withTenantTransaction`; jede neue Tabelle erzwingt RLS. Bestätigungen prüfen zusätzlich, dass die E-Mail des authentifizierten Kontos mit dem zugeordneten Übergabe-/Übernahmemitarbeiter übereinstimmt. DMS-Verknüpfungen erfordern zusätzlich `documents:read`.
+
+Offline gespeicherte Übergaben sind bis zur serverseitigen Quittung ausdrücklich nicht bestätigt. Sync-ID-Wiederverwendung mit abweichendem Inhalt wird als Konflikt zurückgegeben; der Server überschreibt keine bestätigten Übergabeinhalte.
