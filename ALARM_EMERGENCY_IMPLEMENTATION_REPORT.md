@@ -28,7 +28,7 @@ Die Umsetzung folgt der angehängten Master-Brief-Anforderung zum mandantenfähi
 | Frische PostgreSQL-16-Migration bis Version 016 und Seed auf isolierter Testdatenbank | erfolgreich; aktuelle Quellen bis einschließlich Migration 016 |
 | Produktions-Compose-Konfiguration | erfolgreich mit ausschließlich test-only Pflichtvariablen |
 | Produktions-Backend- und Frontend-Container-Images | lokale Builds erfolgreich |
-| PR-CI für bisherigen PR-Stand `6cc5156` | 4 von 4 Jobs bestanden; der aktualisierte PR-Stand benötigt neue CI-Prüfung |
+| PR-CI für aktuellen PR-Stand `d6d0741` | 4 von 4 Jobs bestanden (Backend, Frontend, Produktions-Docker und Root) |
 | `git diff --check` | ohne Beanstandungen |
 
 Der Frontend-Build meldet bestehende Vite-Konfigurations- und Bundlegrößen-Warnungen, endet aber erfolgreich. Die Container wurden gebaut, nicht gestartet. Es fand keine Bereitstellung statt.
@@ -40,4 +40,4 @@ Der Frontend-Build meldet bestehende Vite-Konfigurations- und Bundlegrößen-War
 - Kontakt-, Benachrichtigungs- und Eskalationsstatus-Endpunkte verwenden weiterhin feste Höchstgrenzen; Alarmvorfälle und Ereignis-/Maßnahmen-/Statusverläufe sind cursor-paginiert.
 - Die lokale Worker-Implementierung verwendet PostgreSQL-Jobs und Leases; Hochverfügbarkeit und Produktionsbetrieb des Workers sind nicht durch einen Produktiv-Deployment-Test belegt.
 - Keine Produktionsdatenbank wurde verwendet und keine Produktion wurde geändert.
-- PR [#12](https://github.com/Xonni-star/SecurityOps-2.0/pull/12) bleibt geöffnet und wird nicht gemergt. Die vor diesem Update vorliegenden CI-Ergebnisse gelten nicht für die Pagination-/Worker-Änderungen.
+- PR [#12](https://github.com/Xonni-star/SecurityOps-2.0/pull/12) bleibt geöffnet und wird nicht gemergt. Lokale Prüfungen und alle vier CI-Jobs für `d6d0741` sind bestanden.
