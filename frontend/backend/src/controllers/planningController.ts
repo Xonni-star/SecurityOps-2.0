@@ -93,7 +93,7 @@ const ruleSchema = z.object({
   }
 });
 
-const ruleProfileSchema = z.object({
+const ruleProfileFieldsSchema = z.object({
   name: z.string().min(2).max(160),
   scope: z.record(z.string(), z.unknown()).default({}),
   effectiveFrom: dateSchema,
@@ -101,10 +101,15 @@ const ruleProfileSchema = z.object({
   sourceName: z.string().min(2).max(255),
   sourceReference: z.string().min(2).max(2000),
   rules: z.array(ruleSchema).min(1).max(100)
-}).strict().refine(value => !value.effectiveUntil || value.effectiveUntil >= value.effectiveFrom, {
+}).strict();
+const ruleProfileSchema = ruleProfileFieldsSchema.refine(value =>
+  !value.effectiveUntil || value.effectiveUntil >= value.effectiveFrom, {
   path: ['effectiveUntil'], message: 'effectiveUntil darf nicht vor effectiveFrom liegen.'
 });
-const ruleVersionSchema = ruleProfileSchema.omit({ name: true, scope: true });
+const ruleVersionSchema = ruleProfileFieldsSchema.omit({ name: true, scope: true }).refine(value =>
+  !value.effectiveUntil || value.effectiveUntil >= value.effectiveFrom, {
+  path: ['effectiveUntil'], message: 'effectiveUntil darf nicht vor effectiveFrom liegen.'
+});
 
 const templateSchema = z.object({
   siteId: uuidSchema,
