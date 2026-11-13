@@ -113,6 +113,8 @@ app.post('/api/v1/planning/periods', authenticateJwt, requirePermission('plannin
 app.post('/api/v1/planning/periods/:id/publish', authenticateJwt, requirePermission('planning:publish'), planningController.publishSchedulePeriod);
 app.get('/api/v1/planning/rule-profiles', authenticateJwt, requirePermission('planning:read'), planningController.listRuleProfiles);
 app.post('/api/v1/planning/rule-profiles', authenticateJwt, requirePermission('planning:rules:manage'), planningController.createRuleProfile);
+app.get('/api/v1/planning/rule-profiles/:profileId/versions', authenticateJwt, requirePermission('planning:read'), planningController.listRuleProfileVersions);
+app.patch('/api/v1/planning/rule-profiles/:profileId', authenticateJwt, requirePermission('planning:rules:manage'), planningController.setRuleProfileActive);
 app.post('/api/v1/planning/rule-profiles/:profileId/versions', authenticateJwt, requirePermission('planning:rules:manage'), planningController.createRuleProfileVersion);
 app.post('/api/v1/planning/rule-profiles/:profileId/versions/:versionId/approve',
   authenticateJwt, requirePermission('planning:rules:approve'), planningController.approveRuleProfileVersion);
@@ -121,14 +123,24 @@ app.post('/api/v1/planning/findings/:findingId/exceptions',
 app.post('/api/v1/planning/exceptions/:exceptionId/decision',
   authenticateJwt, requirePermission('planning:exceptions:approve'), planningController.decideRuleException);
 app.post('/api/v1/planning/templates', authenticateJwt, requirePermission('planning:manage'), planningController.createShiftTemplate);
+app.get('/api/v1/planning/templates', authenticateJwt, requirePermission('planning:read'), planningController.listShiftTemplates);
 app.post('/api/v1/planning/templates/:templateId/apply', authenticateJwt, requirePermission('planning:manage'), planningController.applyShiftTemplate);
 app.get('/api/v1/planning/reports/work-hours', authenticateJwt, requirePermission('planning:reports:read'), planningController.workHoursReport);
 app.get('/api/v1/planning/reports/coverage', authenticateJwt, requirePermission('planning:reports:read'), planningController.coverageReport);
+app.get('/api/v1/planning/reports/qualifications', authenticateJwt, requirePermission('planning:reports:read'), planningController.qualificationReport);
+app.get('/api/v1/planning/reports/absences', authenticateJwt, requirePermission('planning:reports:read'), planningController.absenceReport);
 app.get('/api/v1/planning/audit', authenticateJwt, requirePermission('planning:read'), planningController.listPlanningAudit);
 app.post('/api/v1/planning/shifts/:id/swaps', authenticateJwt, requirePermission('planning:swaps:manage'), planningController.createShiftSwapRequest);
 app.get('/api/v1/planning/swaps', authenticateJwt, requirePermission('planning:read'), planningController.listShiftSwapRequests);
 app.post('/api/v1/planning/swaps/:requestId/decision',
   authenticateJwt, requirePermission('planning:swaps:approve'), planningController.decideShiftSwap);
+app.post('/api/v1/planning/shifts/:id/cover-requests',
+  authenticateJwt, requirePermission('planning:covers:manage'), planningController.createCoverRequest);
+app.get('/api/v1/planning/cover-requests', authenticateJwt, requirePermission('planning:read'), planningController.listCoverRequests);
+app.post('/api/v1/planning/cover-requests/:requestId/decision',
+  authenticateJwt, requirePermission('planning:covers:approve'), planningController.decideCoverRequest);
+app.post('/api/v1/planning/shifts/:id/actual-time',
+  authenticateJwt, requirePermission('planning:actuals:manage'), planningController.recordActualTime);
 
 app.get('/api/v1/keys', authenticateJwt, requirePermission('keys:read'), resourceController.listKeys);
 app.post('/api/v1/keys', authenticateJwt, requirePermission('keys:manage'), resourceController.createKey);

@@ -14,6 +14,9 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
   let assignmentAId: string;
   let versionA2Id: string;
   let planningPeriodAId: string;
+  let planningShiftAId: string;
+  let coverRequestAId: string;
+  let actualTimeAId: string;
 
   beforeAll(async () => {
     const tA = await pool.query(`
@@ -75,6 +78,38 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
       [tenantA, `RLS-Planning-${Date.now()}`, sopUserAId]
     );
     planningPeriodAId = planningPeriod.rows[0].id;
+    const clientA = await migrationPool.query('SELECT id FROM clients WHERE tenant_id=$1 LIMIT 1', [tenantA]);
+    const siteA = await migrationPool.query(
+      `INSERT INTO sites (tenant_id,client_id,site_code,name,address,time_zone)
+       VALUES ($1,$2,$3,'RLS Planning Site','Test address','Europe/Berlin') RETURNING id`,
+      [tenantA, clientA.rows[0].id, `RLS-${Date.now()}`]
+    );
+    const shiftA = await migrationPool.query(
+      `INSERT INTO shifts
+        (tenant_id,site_id,shift_date,start_time,end_time,required_qualification,revision_version)
+       VALUES ($1,$2,'2026-01-02','08:00','16:00','Security',1) RETURNING id`,
+      [tenantA, siteA.rows[0].id]
+    );
+    planningShiftAId = shiftA.rows[0].id;
+    await migrationPool.query(
+      `INSERT INTO shift_staffing_assignments (tenant_id,shift_id,employee_id,assigned_by)
+       VALUES ($1,$2,$3,$4)`,
+      [tenantA, planningShiftAId, employeeAId, sopUserAId]
+    );
+    const coverRequest = await migrationPool.query(
+      `INSERT INTO shift_cover_requests
+        (tenant_id,shift_id,shift_revision_version_at_request,reason,requested_by)
+       VALUES ($1,$2,1,'RLS fixture',$3) RETURNING id`,
+      [tenantA, planningShiftAId, sopUserAId]
+    );
+    coverRequestAId = coverRequest.rows[0].id;
+    const actualTime = await migrationPool.query(
+      `INSERT INTO shift_actual_times
+        (tenant_id,shift_id,employee_id,actual_start_at,actual_end_at,recorded_by)
+       VALUES ($1,$2,$3,'2026-01-02T08:00:00Z','2026-01-02T16:00:00Z',$4) RETURNING id`,
+      [tenantA, planningShiftAId, employeeAId, sopUserAId]
+    );
+    actualTimeAId = actualTime.rows[0].id;
     const sopA = await migrationPool.query(
       `INSERT INTO sop_instructions (tenant_id,sop_number,title,created_by,draft_content,status)
        VALUES ($1,$2,'SOP A',$3,'{"text":"A"}'::jsonb,'published') RETURNING id`,
@@ -212,6 +247,46 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
         WHERE n.nspname='public' AND c.relname='schedule_periods'`
     );
     expect(flags.rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
+  });
+
+  test('Cover requests and actual-time records enforce tenant RLS, FORCE RLS, and composite tenant FKs', async () => {
+    const tenantRows = await withTenantTransaction(tenantA, async tx => ({
+      covers: (await tx.query('SELECT id,tenant_id FROM shift_cover_requests')).rows,
+      actuals: (await tx.query('SELECT id,tenant_id FROM shift_actual_times')).rows
+    }));
+    expect(tenantRows.covers).toEqual([expect.objectContaining({ id: coverRequestAId, tenant_id: tenantA })]);
+    expect(tenantRows.actuals).toEqual([expect.objectContaining({ id: actualTimeAId, tenant_id: tenantA })]);
+
+    const otherTenantRows = await withTenantTransaction(tenantB, async tx => ({
+      covers: (await tx.query('SELECT id FROM shift_cover_requests')).rows,
+      actuals: (await tx.query('SELECT id FROM shift_actual_times')).rows
+    }));
+    const systemRows = await withSystemTransaction(async tx => ({
+      covers: (await tx.query('SELECT id FROM shift_cover_requests')).rows,
+      actuals: (await tx.query('SELECT id FROM shift_actual_times')).rows
+    }));
+    expect(otherTenantRows.covers).toHaveLength(0);
+    expect(otherTenantRows.actuals).toHaveLength(0);
+    expect(systemRows.covers).toHaveLength(0);
+    expect(systemRows.actuals).toHaveLength(0);
+
+    const flags = await migrationPool.query(
+      `SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname=ANY($1::text[]) ORDER BY c.relname`,
+      [['shift_actual_times', 'shift_cover_requests']]
+    );
+    expect(flags.rows).toEqual([
+      { relname: 'shift_actual_times', relrowsecurity: true, relforcerowsecurity: true },
+      { relname: 'shift_cover_requests', relrowsecurity: true, relforcerowsecurity: true }
+    ]);
+
+    await expect(migrationPool.query(
+      `INSERT INTO shift_actual_times
+        (tenant_id,shift_id,employee_id,actual_start_at,actual_end_at,recorded_by)
+       VALUES ($1,$2,$3,'2026-01-02T08:00:00Z','2026-01-02T16:00:00Z',$4)`,
+      [tenantA, planningShiftAId, employeeBId, sopUserAId]
+    )).rejects.toMatchObject({ code: '23503' });
   });
 
   test('SOP instructions, assignment targets and assignments are tenant-isolated under PostgreSQL RLS', async () => {

@@ -18,6 +18,8 @@ export interface ShiftCandidate extends LocalShiftTime {
   requiredQualification: string;
   breakMinutes?: number;
   excludeShiftId?: string;
+  storedStartsAt?: Date | string;
+  storedEndsAt?: Date | string;
 }
 
 export interface PlanningFinding {
@@ -52,6 +54,13 @@ function wallParts(epochMs: number, timeZone: string): number[] {
   }).formatToParts(new Date(epochMs));
   const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
   return [value('year'), value('month'), value('day'), value('hour'), value('minute'), value('second')];
+}
+
+function dateAtInstant(value: Date | string, timeZone: string): string {
+  const instant = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(instant.getTime())) throw new PlanningTimeError('Gespeicherter Schichtzeitraum ist ungültig.');
+  const [year, month, day] = wallParts(instant.getTime(), timeZone);
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 function parseLocalDateTime(date: string, time: string): { date: string; time: string; epochMs: number } {
@@ -127,6 +136,15 @@ function resolveLocalInstant(
 function addOneDate(date: string): string {
   const parsed = parseLocalDateTime(date, '12:00');
   return new Date(parsed.epochMs + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+export function shiftEndDateAfterStartDateChange(oldStartDate: string, oldEndDate: string, newStartDate: string): string {
+  const oldStart = parseLocalDateTime(oldStartDate, '12:00').epochMs;
+  const oldEnd = parseLocalDateTime(oldEndDate, '12:00').epochMs;
+  const newStart = parseLocalDateTime(newStartDate, '12:00').epochMs;
+  const dayOffset = Math.round((oldEnd - oldStart) / (24 * 60 * 60 * 1000));
+  const shifted = new Date(newStart + dayOffset * 24 * 60 * 60 * 1000);
+  return `${String(shifted.getUTCFullYear()).padStart(4, '0')}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
 }
 
 export function resolveShiftTime(input: LocalShiftTime, siteTimeZone: string): ResolvedShiftTime {
@@ -214,7 +232,23 @@ export async function validateShiftCandidate(
     };
   }
 
-  const resolved = resolveShiftTime({ ...candidate, timeZone: site.rows[0].time_zone }, site.rows[0].time_zone);
+  const timeZone = site.rows[0].time_zone as string;
+  let resolved: ResolvedShiftTime;
+  if (candidate.storedStartsAt !== undefined && candidate.storedEndsAt !== undefined) {
+    const startsAt = candidate.storedStartsAt instanceof Date ? candidate.storedStartsAt : new Date(candidate.storedStartsAt);
+    const endsAt = candidate.storedEndsAt instanceof Date ? candidate.storedEndsAt : new Date(candidate.storedEndsAt);
+    if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) {
+      throw new PlanningTimeError('Gespeicherter Schichtzeitraum ist ungültig.');
+    }
+    resolved = {
+      timeZone,
+      startsAt,
+      endsAt,
+      endDate: candidate.endDate ?? dateAtInstant(endsAt, timeZone)
+    };
+  } else {
+    resolved = resolveShiftTime({ ...candidate, timeZone }, timeZone);
+  }
   const findings: PlanningFinding[] = [];
   let profileVersionId: string | undefined;
   const profile = await client.query(

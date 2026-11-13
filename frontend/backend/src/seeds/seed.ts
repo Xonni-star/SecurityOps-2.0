@@ -141,6 +141,9 @@ export async function seedDatabase(): Promise<void> {
       { code: 'planning:exceptions:approve', module: 'planning' },
       { code: 'planning:swaps:manage', module: 'planning' },
       { code: 'planning:swaps:approve', module: 'planning' },
+      { code: 'planning:covers:manage', module: 'planning' },
+      { code: 'planning:covers:approve', module: 'planning' },
+      { code: 'planning:actuals:manage', module: 'planning' },
       { code: 'planning:reports:read', module: 'planning' }
     ];
 
@@ -188,13 +191,15 @@ export async function seedDatabase(): Promise<void> {
       SELECT r.id,p.id FROM roles r JOIN permissions p ON
         (r.name IN ('Systemadministrator','Geschäftsführung','Einsatzleitung','Objektleitung')
           AND p.code IN ('planning:read','planning:manage','planning:publish',
-            'planning:swaps:manage','planning:swaps:approve','planning:reports:read'))
+            'planning:swaps:manage','planning:swaps:approve','planning:covers:manage',
+            'planning:covers:approve','planning:actuals:manage','planning:reports:read'))
         OR (r.name IN ('Systemadministrator','Geschäftsführung','Qualitätsmanagement')
           AND p.code IN ('planning:rules:manage','planning:rules:approve',
             'planning:exceptions:manage','planning:exceptions:approve'))
         OR (r.name IN ('Systemadministrator','Geschäftsführung','Qualitätsmanagement')
           AND p.code IN ('planning:read','planning:reports:read'))
-        OR (r.name='Wachdienstmitarbeiter' AND p.code IN ('planning:read','planning:swaps:manage'))
+        OR (r.name='Wachdienstmitarbeiter' AND p.code IN ('planning:read','planning:swaps:manage',
+            'planning:covers:manage','planning:actuals:manage'))
         OR (r.name='Auditor' AND p.code IN ('planning:read','planning:reports:read'))
       ON CONFLICT DO NOTHING
     `);
