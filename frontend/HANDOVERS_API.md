@@ -98,6 +98,7 @@ Migration `017_handover_management.sql` führt sieben tenantgebundene Tabellen m
 
 - Keine externe E-Mail-/Push-Zustellung.
 - Die Offline-Outbox unterstützt neue Übergaben samt initialen Aufgaben. Nachträgliche Bestätigungen, Aufgabenänderungen und DMS-Verknüpfungen sind online-only.
+- Offline-Erfassung setzt eine aktive angemeldete Sitzung und zuvor geladene Objekt-/Mitarbeiter-Stammdaten voraus. Eine App-Neustart-Wiederherstellung von Sitzung und Stammdaten ohne Netzwerk wird von der bestehenden Auth-/Datenladearchitektur nicht unterstützt.
 - DMS-Dateien und Metadaten werden nicht offline repliziert.
 - Status- und Historienansichten verwenden begrenzte Seitengrößen; Aufgaben werden aktuell als Objektliste ohne eigene Pagination geladen.
 - Dies ist eine Repository-Implementierung, keine produktive Bereitstellung oder Betriebsfreigabe.

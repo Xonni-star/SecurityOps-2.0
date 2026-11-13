@@ -21,6 +21,8 @@ SOP-Kenntnisnahmen verwenden zusätzlich den `sopAcknowledgements`-Store derselb
 
 Die Handover-Outbox ermöglicht die Offline-Erfassung des Übergabeprotokolls und der initialen Aufgaben. Statusbestätigungen, Aufgabenänderungen und DMS-Verknüpfungen benötigen eine Online-Verbindung. Eine verspätete Erfassung kann bestätigte Serverprotokolle nicht ändern; Korrekturen werden als Historienereignis hinzugefügt.
 
+Die Erfassung setzt eine aktive angemeldete Sitzung sowie zuvor geladene Objekt- und Mitarbeiter-Stammdaten voraus. Die vorhandene Session-Wiederherstellung ruft `/auth/me` online ab; nach einem App-Neustart ohne Netzwerk sind Anmeldung und Stammdaten deshalb nicht wiederherstellbar. Dieser Offline-Startpfad ist nicht implementiert.
+
 ---
 
 ## 3. Datenintegrität & Append-Only Modell
