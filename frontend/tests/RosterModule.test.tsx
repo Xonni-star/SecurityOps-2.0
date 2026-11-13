@@ -9,10 +9,16 @@ const mocks = vi.hoisted(() => ({
   listAssignments: vi.fn(),
   listFindings: vi.fn(),
   listSwaps: vi.fn(),
+  coverRequests: vi.fn(),
+  createCoverRequest: vi.fn(),
+  decideCoverRequest: vi.fn(),
+  recordActualTime: vi.fn(),
+  listTemplates: vi.fn(),
   listRuleProfiles: vi.fn(),
   createRuleProfile: vi.fn(),
   createRuleProfileVersion: vi.fn(),
   approveRuleProfileVersion: vi.fn(),
+  setRuleProfileActive: vi.fn(),
   createShift: vi.fn(),
   updateShift: vi.fn(),
   deleteShift: vi.fn(),
@@ -23,6 +29,8 @@ const mocks = vi.hoisted(() => ({
   createSwap: vi.fn(),
   decideSwap: vi.fn(),
   workHours: vi.fn(),
+  qualifications: vi.fn(),
+  absences: vi.fn(),
   getOutbox: vi.fn(),
   savePlanningCache: vi.fn(),
   getPlanningCache: vi.fn(),
@@ -54,11 +62,13 @@ vi.mock('../services/apiClient', () => ({
     status: number;
     code?: string;
     data?: unknown;
-    constructor(status: number, message: string, _errors?: string[], _network = false, code?: string, data?: unknown) {
+    isNetworkError: boolean;
+    constructor(status: number, message: string, _errors?: string[], network = false, code?: string, data?: unknown) {
       super(message);
       this.status = status;
       this.code = code;
       this.data = data;
+      this.isNetworkError = network;
     }
   }
 }));
@@ -82,10 +92,16 @@ vi.mock('../services/planningService', async importOriginal => {
       listAssignments: mocks.listAssignments,
       listFindings: mocks.listFindings,
       listSwaps: mocks.listSwaps,
+      coverRequests: mocks.coverRequests,
+      createCoverRequest: mocks.createCoverRequest,
+      decideCoverRequest: mocks.decideCoverRequest,
+      recordActualTime: mocks.recordActualTime,
+      listTemplates: mocks.listTemplates,
       listRuleProfiles: mocks.listRuleProfiles,
       createRuleProfile: mocks.createRuleProfile,
       createRuleProfileVersion: mocks.createRuleProfileVersion,
       approveRuleProfileVersion: mocks.approveRuleProfileVersion,
+      setRuleProfileActive: mocks.setRuleProfileActive,
       createShift: mocks.createShift,
       updateShift: mocks.updateShift,
       deleteShift: mocks.deleteShift,
@@ -95,7 +111,9 @@ vi.mock('../services/planningService', async importOriginal => {
       applyTemplate: mocks.applyTemplate,
       createSwap: mocks.createSwap,
       decideSwap: mocks.decideSwap,
-      workHours: mocks.workHours
+      workHours: mocks.workHours,
+      qualifications: mocks.qualifications,
+      absences: mocks.absences
     }
   };
 });
@@ -145,6 +163,7 @@ describe('RosterModule', () => {
   beforeEach(() => {
     Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
     vi.stubGlobal('confirm', vi.fn(() => true));
+    vi.stubGlobal('crypto', { randomUUID: vi.fn(() => 'mutation-id') });
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -155,6 +174,7 @@ describe('RosterModule', () => {
         permissions: [
           'planning:read', 'planning:manage', 'planning:publish',
           'planning:reports:read', 'planning:swaps:manage', 'planning:swaps:approve',
+          'planning:covers:manage', 'planning:covers:approve', 'planning:actuals:manage',
           'planning:rules:manage', 'planning:rules:approve',
           'shifts:manage'
         ]
@@ -180,16 +200,24 @@ describe('RosterModule', () => {
     mocks.listAssignments.mockResolvedValue([]);
     mocks.listFindings.mockResolvedValue([]);
     mocks.listSwaps.mockResolvedValue([]);
+    mocks.coverRequests.mockResolvedValue([]);
+    mocks.createCoverRequest.mockResolvedValue({});
+    mocks.decideCoverRequest.mockResolvedValue({});
+    mocks.recordActualTime.mockResolvedValue({ revision_version: 1 });
+    mocks.listTemplates.mockResolvedValue([]);
     mocks.listRuleProfiles.mockResolvedValue([]);
     mocks.createRuleProfile.mockResolvedValue({});
     mocks.createRuleProfileVersion.mockResolvedValue({});
     mocks.approveRuleProfileVersion.mockResolvedValue({});
+    mocks.setRuleProfileActive.mockResolvedValue({});
     mocks.createPeriod.mockResolvedValue(period);
     mocks.createTemplate.mockResolvedValue({ id: 'template-a' });
     mocks.applyTemplate.mockResolvedValue({ occurrences: [] });
     mocks.createSwap.mockResolvedValue({});
     mocks.decideSwap.mockResolvedValue({});
     mocks.workHours.mockResolvedValue([]);
+    mocks.qualifications.mockResolvedValue([]);
+    mocks.absences.mockResolvedValue([]);
     mocks.enqueueOfflineAction.mockResolvedValue(undefined);
   });
 
@@ -263,9 +291,236 @@ describe('RosterModule', () => {
 
     expect(container.textContent).toContain('Keine Berichtsdaten für diesen Zeitraum.');
     expect(container.textContent).toContain('Keine Besetzungsdaten für diesen Zeitraum.');
-    expect(container.querySelector('[aria-label="Berichtsabdeckung"]')?.textContent).toContain('Ist-Stunden und Überstunden');
-    expect(container.querySelector('[aria-label="Berichtsabdeckung"]')?.textContent).toContain('Qualifikations- und Abwesenheitsauswertung');
+    expect(container.textContent).toContain('Geplante und tatsächliche Arbeitszeit');
+    expect(container.textContent).toContain('Qualifikationsangebot und -bedarf');
+    expect(container.textContent).toContain('Abwesenheiten');
     expect(container.textContent).not.toContain('Überstunden: 0');
+  });
+
+  test('renders nullable report values, configuration statuses, and source metadata', async () => {
+    mocks.workHours.mockResolvedValue([{
+      employee_id: 'employee-a',
+      first_name: 'Ada',
+      last_name: 'Guard',
+      assigned_shifts: 2,
+      planned_hours: 16,
+      actual_hours: null,
+      actual_status: 'partial',
+      overtime_hours: null,
+      overtime_status: 'unconfigured',
+      overtime_sources: [],
+      calendar: {
+        weekend: {
+          plannedShifts: null,
+          plannedStatus: 'unconfigured',
+          actualShifts: null,
+          actualStatus: 'unavailable',
+          sources: []
+        },
+        holiday: {
+          plannedShifts: 1,
+          plannedStatus: 'available',
+          actualShifts: null,
+          actualStatus: 'unavailable',
+          sources: [{ profileSourceName: 'Tenant policy', ruleSource: 'Calendar appendix' }]
+        },
+        night: {
+          plannedShifts: 0,
+          plannedStatus: 'available',
+          actualShifts: null,
+          actualStatus: 'unavailable',
+          sources: []
+        }
+      }
+    }]);
+    await act(async () => root.render(<RosterModule />));
+    const reports = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Berichte'));
+    if (!reports) throw new Error('Berichte fehlen');
+    await act(async () => reports.click());
+
+    expect(container.textContent).toContain('Nicht verfügbar (partial)');
+    expect(container.textContent).toContain('Nicht verfügbar (unconfigured)');
+    expect(container.textContent).toContain('Tenant policy');
+    expect(container.textContent).not.toContain('Überstunden: 0');
+  });
+
+  test('lists and applies a server template without recreating it', async () => {
+    mocks.listTemplates.mockResolvedValue([{
+      id: 'template-a',
+      site_id: 'site-a',
+      site_name: 'Objekt A',
+      name: 'Frühdienst',
+      time_zone: 'Europe/Berlin',
+      start_time: '08:00:00',
+      end_time: '16:00:00',
+      required_qualification: 'Sachkunde',
+      frequency: 'WEEKLY',
+      interval: 1,
+      weekdays: [1, 2, 3, 4, 5],
+      active: true,
+      revision_version: 1
+    }]);
+    mocks.applyTemplate.mockResolvedValue({
+      occurrences: [{ status: 'draft', shiftId: 'draft-shift' }, { status: 'REJECTED' }],
+      finalValidationRequired: true
+    });
+    await act(async () => root.render(<RosterModule />));
+    const open = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlagen');
+    if (!open) throw new Error('Vorlagen-Schaltfläche fehlt');
+    await act(async () => open.click());
+
+    expect(mocks.listTemplates).toHaveBeenCalled();
+    expect(container.textContent).toContain('Frühdienst');
+    const apply = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Auf Entwurfsperiode anwenden'));
+    if (!apply) throw new Error('Vorlagenanwendung fehlt');
+    await act(async () => apply.click());
+    expect(mocks.createTemplate).not.toHaveBeenCalled();
+    expect(mocks.applyTemplate).toHaveBeenCalledWith('template-a', expect.objectContaining({ schedulePeriodId: 'period-a' }));
+    expect(container.textContent).toContain('1 Schichtentwurf/Entwürfe erstellt; 1 Vorkommen serverseitig abgelehnt');
+  });
+
+  test('creates a template without auto-applying it or supplying tenant-specific sample values', async () => {
+    await act(async () => root.render(<RosterModule />));
+    const open = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlagen');
+    if (!open) throw new Error('Vorlagen-Schaltfläche fehlt');
+    await act(async () => open.click());
+
+    const name = container.querySelector<HTMLInputElement>('input[aria-label="Vorlagenname"]');
+    const siteSelect = container.querySelector<HTMLSelectElement>('select[aria-label="Vorlagenobjekt"]');
+    const qualification = container.querySelector<HTMLInputElement>('input[aria-label="Vorlagenqualifikation"]');
+    const times = container.querySelectorAll<HTMLInputElement>('input[type="time"]');
+    if (!name || !siteSelect || !qualification || times.length < 2) throw new Error('Vorlagenformular fehlt');
+    expect(name.value).toBe('');
+    expect(qualification.value).toBe('');
+    await act(async () => {
+      setInput(name, 'Wachposten Tag');
+      setInput(siteSelect, 'site-a');
+      setInput(times[0], '07:00');
+      setInput(times[1], '15:00');
+      setInput(qualification, 'Werkschutz');
+    });
+    const create = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlage erstellen');
+    if (!create) throw new Error('Vorlage erstellen fehlt');
+    await act(async () => create.click());
+
+    expect(mocks.createTemplate).toHaveBeenCalledWith(expect.objectContaining({
+      siteId: 'site-a',
+      name: 'Wachposten Tag',
+      startTime: '07:00',
+      endTime: '15:00',
+      requiredQualification: 'Werkschutz',
+      frequency: 'WEEKLY'
+    }));
+    expect(mocks.applyTemplate).not.toHaveBeenCalled();
+  });
+
+  test('submits a cover request online with the shift revision and mutation ID', async () => {
+    await act(async () => root.render(<RosterModule />));
+    const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
+    if (!eventButton) throw new Error('Kalendereintrag fehlt');
+    await act(async () => eventButton.click());
+    const reason = Array.from(container.querySelectorAll<HTMLInputElement>('input[maxlength="1000"]')).find(input => input.type === 'text');
+    if (!reason) throw new Error('Vertretungsbegründung fehlt');
+    await act(async () => setInput(reason, 'Kurzfristiger Ausfall'));
+    const request = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Vertretungsbedarf einreichen'));
+    if (!request) throw new Error('Vertretungsantrag fehlt');
+    await act(async () => request.click());
+
+    expect(mocks.createCoverRequest).toHaveBeenCalledWith('shift-a', expect.objectContaining({
+      expectedShiftVersion: 4,
+      clientMutationId: 'mutation-id',
+      reason: 'Kurzfristiger Ausfall'
+    }));
+  });
+
+  test('lists cover requests and submits an online approval with the request version', async () => {
+    mocks.coverRequests.mockResolvedValue([{
+      id: 'cover-a',
+      shift_id: 'shift-a',
+      requested_employee_id: 'employee-a',
+      requested_first_name: 'Ada',
+      requested_last_name: 'Guard',
+      reason: 'Ausfall',
+      status: 'pending',
+      revision_version: 2,
+      shift_revision_version_at_request: 4,
+      requested_by: 'user-b',
+      requested_at: '2026-11-13T08:00:00.000Z'
+    }]);
+    await act(async () => root.render(<RosterModule />));
+    const open = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Vertretungsanträge'));
+    if (!open) throw new Error('Vertretungsanträge fehlen');
+    await act(async () => open.click());
+    expect(container.textContent).toContain('Ada Guard');
+
+    const approve = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Genehmigen');
+    if (!approve) throw new Error('Genehmigen fehlt');
+    await act(async () => approve.click());
+    expect(mocks.decideCoverRequest).toHaveBeenCalledWith('cover-a', expect.objectContaining({
+      decision: 'approved',
+      expectedVersion: 2,
+      employeeId: 'employee-a',
+      clientMutationId: 'mutation-id'
+    }));
+  });
+
+  test('records actual time online and carries forward the server revision for corrections', async () => {
+    mocks.listAssignments.mockResolvedValue([{
+      id: 'assignment-a',
+      shift_id: 'shift-a',
+      employee_id: 'employee-a',
+      first_name: 'Ada',
+      last_name: 'Guard',
+      status: 'assigned',
+      revision_version: 1
+    }]);
+    await act(async () => root.render(<RosterModule />));
+    const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
+    if (!eventButton) throw new Error('Kalendereintrag fehlt');
+    await act(async () => eventButton.click());
+
+    const start = container.querySelector<HTMLInputElement>('input[placeholder="2027-01-10T08:03:00+01:00"]');
+    const end = container.querySelector<HTMLInputElement>('input[placeholder="2027-01-10T16:05:00+01:00"]');
+    if (!start || !end) throw new Error('Ist-Zeitfelder fehlen');
+    await act(async () => {
+      setInput(start, '2027-01-10T08:03:00+01:00');
+      setInput(end, '2027-01-10T16:05:00+01:00');
+    });
+    const save = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Ist-Zeit serverseitig speichern'));
+    if (!save) throw new Error('Ist-Zeit speichern fehlt');
+    mocks.recordActualTime.mockRejectedValueOnce(new ApiError(500, 'Verbindung unterbrochen.', undefined, true));
+    await act(async () => save.click());
+    await act(async () => save.click());
+
+    expect(mocks.recordActualTime).toHaveBeenNthCalledWith(1, 'shift-a', expect.objectContaining({
+      employeeId: 'employee-a',
+      actualStartAt: '2027-01-10T08:03:00+01:00',
+      expectedVersion: 0,
+      clientMutationId: 'mutation-id'
+    }));
+    expect(mocks.recordActualTime).toHaveBeenNthCalledWith(2, 'shift-a', expect.objectContaining({ clientMutationId: 'mutation-id' }));
+    expect(container.textContent).toContain('zuletzt gespeichert: Revision 1');
+    expect(container.querySelector<HTMLInputElement>('input[type="number"][min="0"][step="1"]')?.value).toBe('1');
+  });
+
+  test('keeps template, cover, and actual-time workflows online-only', async () => {
+    mocks.storeState.isOnline = false;
+    await act(async () => root.render(<RosterModule />));
+    const templateButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlagen');
+    const coverButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Vertretungsanträge'));
+    if (!templateButton || !coverButton) throw new Error('Online-only Aktionen fehlen');
+    expect(templateButton.disabled).toBe(true);
+    expect(coverButton.disabled).toBe(true);
+
+    const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
+    if (!eventButton) throw new Error('Kalendereintrag fehlt');
+    await act(async () => eventButton.click());
+    expect(container.textContent).not.toContain('Vertretungsbedarf einreichen');
+    expect(container.textContent).not.toContain('Ist-Zeit serverseitig speichern');
+    expect(mocks.createCoverRequest).not.toHaveBeenCalled();
+    expect(mocks.decideCoverRequest).not.toHaveBeenCalled();
+    expect(mocks.recordActualTime).not.toHaveBeenCalled();
+    expect(mocks.enqueueOfflineAction).not.toHaveBeenCalled();
   });
 
   test('creates sourced, effective-dated rule profiles without supplying default thresholds', async () => {

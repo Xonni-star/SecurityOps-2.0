@@ -170,3 +170,9 @@ Revision mismatches return HTTP 409 `REVISION_CONFLICT`. All mutations use exact
 Legacy `/shifts` CRUD remains available under `shifts:read` / `shifts:manage`; updates require `revisionVersion` and use the same validation, full interval, and period-boundary checks. The backend reuses existing employee, qualification, absence, site-assignment, site, and client masters. It does not create duplicate personnel/site/customer records.
 
 Migration `030_service_planning.sql` and `031_planning_cover_actuals.sql` add the planning schema and actual/cover storage, site IANA time zone, persisted shift end date/instants, source/versioned rules, tenant-aware composite foreign keys, `ENABLE ROW LEVEL SECURITY` plus `FORCE ROW LEVEL SECURITY` on tenant tables, and least-privilege app-role grants. Local queued edits, drafts, validation findings and reports are not proof of legal compliance; values missing from tenant configuration or actual-time records remain explicitly unavailable/unconfigured.
+
+## Frontend integration boundaries
+
+`RosterModule.tsx` uses the existing tenant-scoped roster cache and IndexedDB outbox only for supported shift create/update drafts. Shift deletion, template listing/creation/application, cover requests and decisions, actual-time records/corrections, report reads, rule-profile changes and schedule publication call the online API directly and are not queued offline.
+
+The current API does not provide template edit/archive/delete/copy operations or staff recommendations; the frontend therefore exposes no such controls. Actual-time records can be created or corrected by `POST /planning/shifts/:id/actual-time`, but there is no read/history endpoint for the current actual-time value or its revision. A correction must use the current `expectedVersion`; until a read contract is added, the UI can reuse a revision returned by a save or accept a known revision explicitly, while the server remains the concurrency authority.

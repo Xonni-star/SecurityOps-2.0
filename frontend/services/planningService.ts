@@ -35,9 +35,86 @@ export interface CoverageRow {
   shift_date: string;
   site_id: string;
   site_name: string;
+  qualification_type?: string;
   required_count: number | null;
   assigned_count: number;
   shortfall: number | null;
+}
+
+export interface ShiftTemplate {
+  id: string;
+  site_id: string;
+  site_name?: string;
+  name: string;
+  time_zone: string;
+  start_time: string;
+  end_time: string;
+  required_qualification: string;
+  frequency: 'DAILY' | 'WEEKLY';
+  interval: number;
+  weekdays: number[] | null;
+  active: boolean;
+  revision_version: number;
+}
+
+export interface CoverRequest {
+  id: string;
+  shift_id: string;
+  requested_employee_id?: string | null;
+  requested_first_name?: string | null;
+  requested_last_name?: string | null;
+  reason: string;
+  status: 'pending' | 'approved' | 'rejected' | string;
+  revision_version: number;
+  shift_revision_version_at_request: number;
+  requested_by: string;
+  requested_at: string;
+  decided_at?: string | null;
+  decision_note?: string | null;
+}
+
+export interface WorkHoursRow {
+  employee_id: string;
+  personnel_number?: string | null;
+  first_name: string;
+  last_name: string;
+  assigned_shifts: number;
+  planned_hours: number;
+  actual_hours: number | null;
+  actual_status: 'unavailable' | 'partial' | 'complete' | string;
+  overtime_hours: number | null;
+  overtime_status: 'unavailable' | 'partial' | 'unconfigured' | 'ambiguous' | 'available' | string;
+  overtime_sources: unknown[];
+  planned_weekend_shifts?: number | null;
+  actual_weekend_shifts?: number | null;
+  planned_holiday_shifts?: number | null;
+  actual_holiday_shifts?: number | null;
+  planned_night_shifts?: number | null;
+  actual_night_shifts?: number | null;
+  calendar: Record<string, {
+    plannedShifts: number | null;
+    plannedStatus: string;
+    actualShifts: number | null;
+    actualStatus: string;
+    sources: unknown[];
+  }>;
+}
+
+export interface QualificationReportRow {
+  qualification_type: string;
+  active_qualified_employees: number;
+  employees_with_record: number;
+  required_slots: number;
+  assigned_qualified_slots: number;
+  shortfall: number;
+}
+
+export interface AbsenceReportRow {
+  absence_type: string;
+  status: string;
+  absence_records: number;
+  affected_employees: number;
+  overlapping_calendar_days: number;
 }
 
 export interface ShiftAssignment {
@@ -66,9 +143,11 @@ export type PlanningRuleCode =
   | 'minimum_rest_minutes'
   | 'maximum_shift_minutes'
   | 'maximum_weekly_minutes'
+  | 'overtime_threshold_weekly_minutes'
   | 'minimum_break_minutes'
   | 'break_after_minutes'
   | 'disallowed_weekdays'
+  | 'weekend_weekdays'
   | 'sunday_work_allowed'
   | 'holiday_dates'
   | 'night_window_start_minute'
@@ -340,6 +419,11 @@ export const planningApi = {
       `/planning/rule-profiles/${encodeURIComponent(profileId)}/versions/${encodeURIComponent(versionId)}/approve`,
       {}
     ),
+  setRuleProfileActive: (profileId: string, active: boolean) =>
+    apiClient.patch<RuleProfileRow>(
+      `/planning/rule-profiles/${encodeURIComponent(profileId)}`,
+      { active }
+    ),
   listAssignments: (shiftId: string) => apiClient.get<ShiftAssignment[]>(
     `/planning/shifts/${encodeURIComponent(shiftId)}/assignments`
   ),
@@ -357,9 +441,28 @@ export const planningApi = {
     apiClient.delete<any>(`/shifts/${encodeURIComponent(shiftId)}?revisionVersion=${revisionVersion}`),
   publishPeriod: (periodId: string, expectedVersion: number) =>
     apiClient.post<any>(`/planning/periods/${encodeURIComponent(periodId)}/publish`, { expectedVersion }),
-  createTemplate: (input: Record<string, unknown>) => apiClient.post<any>('/planning/templates', input),
+  listTemplates: (siteId?: string, includeInactive = false) => getAllPages<ShiftTemplate>(
+    '/planning/templates',
+    new URLSearchParams({
+      ...(siteId ? { siteId } : {}),
+      ...(includeInactive ? { includeInactive: 'true' } : {})
+    })
+  ),
+  createTemplate: (input: {
+    siteId: string;
+    name: string;
+    timeZone?: string;
+    startTime: string;
+    endTime: string;
+    requiredQualification: string;
+    frequency: 'DAILY' | 'WEEKLY';
+    interval?: number;
+    weekdays?: number[];
+  }) => apiClient.post<ShiftTemplate>('/planning/templates', input),
   applyTemplate: (templateId: string, input: { dateFrom: string; dateTo: string; schedulePeriodId?: string }) =>
-    apiClient.post<any>(`/planning/templates/${encodeURIComponent(templateId)}/apply`, input),
+    apiClient.post<{ occurrences: Array<{ date: string; status: string; shiftId?: string; findings?: PlanningFinding[] }>; finalValidationRequired: boolean }>(
+      `/planning/templates/${encodeURIComponent(templateId)}/apply`, input
+    ),
   createSwap: (shiftId: string, input: Record<string, unknown>) =>
     apiClient.post<any>(`/planning/shifts/${encodeURIComponent(shiftId)}/swaps`, input),
   listSwaps: (status?: string) => getAllPages<ShiftSwap>(
@@ -368,11 +471,61 @@ export const planningApi = {
   ),
   decideSwap: (requestId: string, input: { decision: 'approved' | 'rejected'; expectedVersion: number; decisionNote?: string }) =>
     apiClient.post<any>(`/planning/swaps/${encodeURIComponent(requestId)}/decision`, input),
-  workHours: (from: string, to: string) => apiClient.get<Record<string, any>[]>(
+  createCoverRequest: (shiftId: string, input: {
+    requestedEmployeeId?: string;
+    expectedShiftVersion: number;
+    clientMutationId: string;
+    reason: string;
+  }) => apiClient.post<CoverRequest>(
+    `/planning/shifts/${encodeURIComponent(shiftId)}/cover-requests`, input
+  ),
+  coverRequests: (status?: string, shiftId?: string) => getAllPages<CoverRequest>(
+    '/planning/cover-requests',
+    new URLSearchParams({
+      ...(status ? { status } : {}),
+      ...(shiftId ? { shiftId } : {})
+    })
+  ),
+  decideCoverRequest: (requestId: string, input: {
+    decision: 'approved' | 'rejected';
+    expectedVersion: number;
+    employeeId?: string;
+    clientMutationId: string;
+    decisionNote?: string;
+  }) => apiClient.post<CoverRequest>(
+    `/planning/cover-requests/${encodeURIComponent(requestId)}/decision`, input
+  ),
+  recordActualTime: (shiftId: string, input: {
+    employeeId: string;
+    actualStartAt: string;
+    actualEndAt: string;
+    breakMinutes: number;
+    expectedVersion: number;
+    clientMutationId: string;
+    notes?: string;
+  }) => apiClient.post<{
+    id: string;
+    shift_id: string;
+    employee_id: string;
+    actual_start_at: string;
+    actual_end_at: string;
+    break_minutes: number;
+    revision_version: number;
+    recorded_by: string;
+    recorded_at: string;
+    notes?: string | null;
+  }>(`/planning/shifts/${encodeURIComponent(shiftId)}/actual-time`, input),
+  workHours: (from: string, to: string) => apiClient.get<WorkHoursRow[]>(
     `/planning/reports/work-hours?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
   ),
   coverage: (from: string, to: string) => apiClient.get<CoverageRow[]>(
     `/planning/reports/coverage?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+  ),
+  qualifications: (from: string, to: string) => apiClient.get<QualificationReportRow[]>(
+    `/planning/reports/qualifications?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
+  ),
+  absences: (from: string, to: string) => apiClient.get<AbsenceReportRow[]>(
+    `/planning/reports/absences?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
   )
 };
 
