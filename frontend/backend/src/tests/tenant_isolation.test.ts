@@ -284,6 +284,113 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
     expect(flags.rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
   });
 
+  test('All planning tables enforce RLS and reject forged tenant writes', async () => {
+    const planningTables = [
+      'schedule_periods', 'schedule_templates', 'shift_staffing_requirements',
+      'shift_staffing_assignments', 'schedule_rule_profiles', 'schedule_rule_profile_versions',
+      'schedule_rule_findings', 'schedule_rule_exceptions', 'shift_swap_requests',
+      'planning_audit_events', 'shift_cover_requests', 'shift_actual_times',
+      'shift_actual_time_revisions', 'planning_notifications'
+    ];
+    const flags = await migrationPool.query(
+      `SELECT c.relname,c.relrowsecurity,c.relforcerowsecurity
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname=ANY($1::text[]) ORDER BY c.relname`,
+      [planningTables]
+    );
+    expect(flags.rows).toHaveLength(planningTables.length);
+    expect(flags.rows.every(row => row.relrowsecurity && row.relforcerowsecurity)).toBe(true);
+    const unscopedRows = await withSystemTransaction(async tx => {
+      const results = [];
+      for (const table of planningTables) {
+        results.push(await tx.query(`SELECT 1 FROM ${table} LIMIT 1`));
+      }
+      return results;
+    });
+    expect(unscopedRows.every(result => result.rows.length === 0)).toBe(true);
+
+    const forgedWrites: Array<{ sql: string; params: unknown[] }> = [
+      {
+        sql: `INSERT INTO schedule_periods (tenant_id,name,date_from,date_to,time_zone,created_by)
+              VALUES ($1,$2,'2026-01-01','2026-01-31','Europe/Berlin',$3)`,
+        params: [tenantB, `forged-period-${Date.now()}`, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO schedule_templates
+                (tenant_id,site_id,name,time_zone,local_start_time,local_end_time,required_qualification,recurrence,created_by)
+              VALUES ($1,$2,$3,'Europe/Berlin','08:00','16:00','Security','{"frequency":"DAILY"}'::jsonb,$4)`,
+        params: [tenantB, planningShiftAId, `forged-template-${Date.now()}`, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO shift_staffing_requirements (tenant_id,shift_id,qualification_type,required_count)
+              VALUES ($1,$2,'Security',1)`,
+        params: [tenantB, planningShiftAId]
+      },
+      {
+        sql: `INSERT INTO shift_staffing_assignments (tenant_id,shift_id,employee_id,assigned_by)
+              VALUES ($1,$2,$3,$4)`,
+        params: [tenantB, planningShiftAId, employeeBId, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO schedule_rule_profiles (tenant_id,name,created_by)
+              VALUES ($1,$2,$3)`,
+        params: [tenantB, `forged-profile-${Date.now()}`, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO schedule_rule_profile_versions
+                (tenant_id,profile_id,version_number,effective_from,source_name,source_reference,rules,created_by)
+              VALUES ($1,$2,1,'2026-01-01','test','test','[]'::jsonb,$3)`,
+        params: [tenantB, planningShiftAId, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO schedule_rule_findings
+                (tenant_id,run_id,rule_code,severity,message)
+              VALUES ($1,$2,'test_rule','warning','test')`,
+        params: [tenantB, planningShiftAId]
+      },
+      {
+        sql: `INSERT INTO schedule_rule_exceptions (tenant_id,finding_id,reason,requested_by)
+              VALUES ($1,$2,'forged request',$3)`,
+        params: [tenantB, planningShiftAId, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO shift_swap_requests
+                (tenant_id,shift_id,requester_employee_id,proposed_employee_id,requested_by)
+              VALUES ($1,$2,$3,$4,$5)`,
+        params: [tenantB, planningShiftAId, employeeAId, employeeBId, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO planning_audit_events
+                (tenant_id,actor_user_id,event_type,entity_type,entity_id)
+              VALUES ($1,$2,'forged','shift',$3)`,
+        params: [tenantB, sopUserBId, planningShiftAId]
+      },
+      {
+        sql: `INSERT INTO shift_cover_requests
+                (tenant_id,shift_id,shift_revision_version_at_request,reason,requested_by)
+              VALUES ($1,$2,1,'forged request',$3)`,
+        params: [tenantB, planningShiftAId, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO shift_actual_times
+                (tenant_id,shift_id,employee_id,actual_start_at,actual_end_at,recorded_by)
+              VALUES ($1,$2,$3,'2026-01-02T08:00:00Z','2026-01-02T16:00:00Z',$4)`,
+        params: [tenantB, planningShiftAId, employeeBId, sopUserBId]
+      },
+      {
+        sql: `INSERT INTO planning_notifications
+                (tenant_id,recipient_user_id,event_type,entity_type,entity_id)
+              VALUES ($1,$2,'forged','shift',$3)`,
+        params: [tenantB, sopUserBId, planningShiftAId]
+      }
+    ];
+
+    for (const write of forgedWrites) {
+      await expect(withTenantTransaction(tenantA, tx => tx.query(write.sql, write.params)))
+        .rejects.toMatchObject({ code: '42501' });
+    }
+  });
+
   test('Cover requests and actual-time records enforce tenant RLS, FORCE RLS, and composite tenant FKs', async () => {
     const tenantRows = await withTenantTransaction(tenantA, async tx => ({
       covers: (await tx.query('SELECT id,tenant_id FROM shift_cover_requests')).rows,
