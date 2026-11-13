@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { computePayloadHash } from './syncHash';
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const taskSchema = z.object({
   title: z.string().trim().min(1).max(255),
   description: z.string().max(8000).default(''),

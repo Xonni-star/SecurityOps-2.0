@@ -10,7 +10,7 @@ import crypto from 'crypto';
  */
 
 const siteCreateSchema = z.object({
-  clientId: z.string().uuid(),
+  clientId: z.string().guid(),
   siteCode: z.string().min(2).max(50),
   name: z.string().min(2).max(200),
   address: z.string().min(3),
@@ -143,7 +143,7 @@ export async function createSite(req: Request, res: Response, next: NextFunction
 export async function updateSite(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const body = siteUpdateSchema.parse(req.body);
 
     const { revisionVersion, ...changes } = body;
@@ -183,7 +183,7 @@ export async function updateSite(req: Request, res: Response, next: NextFunction
 export async function archiveSite(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const { revisionVersion } = z.object({ revisionVersion: z.number().int().positive() }).strict().parse(req.body);
     const result = await withTenantTransaction(tenantId, (db) => db.query(
       `UPDATE sites SET archived_at=CURRENT_TIMESTAMP, revision_version=revision_version+1, updated_at=CURRENT_TIMESTAMP
@@ -200,7 +200,7 @@ export async function archiveSite(req: Request, res: Response, next: NextFunctio
 export async function restoreSite(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const { revisionVersion } = z.object({ revisionVersion: z.number().int().positive() }).strict().parse(req.body);
     const result = await withTenantTransaction(tenantId, (db) => db.query(
       `UPDATE sites SET archived_at=NULL, revision_version=revision_version+1, updated_at=CURRENT_TIMESTAMP
@@ -216,7 +216,7 @@ export async function restoreSite(req: Request, res: Response, next: NextFunctio
 
 const siteSyncSchema = z.object({
   deviceId: z.string().min(4).max(128).optional(),
-  mutations: z.array(z.object({ clientUuid: z.string().min(8).max(64), action: z.enum(['CREATE', 'UPDATE', 'DELETE', 'RESTORE']), baseVersion: z.number().int().positive(), payload: z.record(z.any()) }).strict()).min(1).max(100)
+  mutations: z.array(z.object({ clientUuid: z.string().min(8).max(64), action: z.enum(['CREATE', 'UPDATE', 'DELETE', 'RESTORE']), baseVersion: z.number().int().positive(), payload: z.record(z.string(), z.any()) }).strict()).min(1).max(100)
 }).strict();
 
 export async function syncSiteMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -234,7 +234,7 @@ export async function syncSiteMutations(req: Request, res: Response, next: NextF
         if (prior.rows.length) { outputs.push(prior.rows[0].payload_hash === hash ? prior.rows[0].response_json : { clientUuid: mutation.clientUuid, status: 'REJECTED', message: 'Mutation-ID mit abweichendem Inhalt wiederverwendet.' }); continue; }
         let result: any;
         {
-          const p = mutation.payload; const id = z.string().uuid().safeParse(p.id);
+          const p = mutation.payload; const id = z.string().guid().safeParse(p.id);
           if (mutation.action === 'CREATE') {
             const data = siteCreateSchema.safeParse(p);
             if (!id.success || !data.success) result = { clientUuid: mutation.clientUuid, status: 'REJECTED', message: 'Ungültige Standortdaten.' };
@@ -315,7 +315,7 @@ export async function createEmployee(req: Request, res: Response, next: NextFunc
 export async function updateEmployee(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const body = employeeUpdateSchema.parse(req.body);
 
     const entries = Object.entries(body).filter(([, value]) => value !== undefined);
@@ -354,8 +354,8 @@ export async function updateEmployee(req: Request, res: Response, next: NextFunc
 // ---------------------------------------------------------------------------
 
 const shiftCreateSchema = z.object({
-  siteId: z.string().uuid(),
-  employeeId: z.string().uuid().nullable().optional(),
+  siteId: z.string().guid(),
+  employeeId: z.string().guid().nullable().optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date muss YYYY-MM-DD sein.'),
   startTime: z.string().min(3).max(10),
   endTime: z.string().min(3).max(10),
@@ -368,12 +368,12 @@ const shiftCreateSchema = z.object({
 const shiftUpdateSchema = shiftCreateSchema.partial();
 
 const keyCreateSchema = z.object({
-  siteId: z.string().uuid(),
+  siteId: z.string().guid(),
   keyNumber: z.string().min(1).max(50),
   label: z.string().min(1).max(150),
   type: z.enum(['Master-Schlüssel', 'Transponder', 'Buntbart', 'Schrankenschlüssel']).default('Master-Schlüssel'),
   status: z.enum(['Im Tresor', 'Ausgegeben', 'Verlustmeldung']).default('Im Tresor'),
-  currentHolderId: z.string().uuid().nullable().optional(),
+  currentHolderId: z.string().guid().nullable().optional(),
   issuedAt: z.string().min(8).nullable().optional(),
   expectedReturn: z.string().min(8).nullable().optional()
 });
@@ -495,7 +495,7 @@ export async function createShift(req: Request, res: Response, next: NextFunctio
 export async function updateShift(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const body = shiftUpdateSchema.parse(req.body);
     const entries = Object.entries(body).filter(([, value]) => value !== undefined);
 
@@ -535,7 +535,7 @@ export async function updateShift(req: Request, res: Response, next: NextFunctio
 export async function deleteShift(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
 
     const result = await withTenantTransaction(tenantId, (client) =>
       client.query('DELETE FROM shifts WHERE id = $1 AND tenant_id = $2 RETURNING id', [id, tenantId])
@@ -606,7 +606,7 @@ export async function createKey(req: Request, res: Response, next: NextFunction)
 export async function updateKey(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const body = keyUpdateSchema.parse(req.body);
     const entries = Object.entries(body).filter(([, value]) => value !== undefined);
 
@@ -645,7 +645,7 @@ export async function updateKey(req: Request, res: Response, next: NextFunction)
 export async function deleteKey(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
 
     const result = await withTenantTransaction(tenantId, (client) =>
       client.query('DELETE FROM keys WHERE id = $1 AND tenant_id = $2 RETURNING id', [id, tenantId])
@@ -707,7 +707,7 @@ export async function createTask(req: Request, res: Response, next: NextFunction
 export async function updateTask(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const body = taskUpdateSchema.parse(req.body);
     const entries = Object.entries(body).filter(([, value]) => value !== undefined);
 
@@ -744,7 +744,7 @@ export async function updateTask(req: Request, res: Response, next: NextFunction
 export async function deleteTask(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
 
     const result = await withTenantTransaction(tenantId, (client) =>
       client.query('DELETE FROM tasks WHERE id = $1 AND tenant_id = $2 RETURNING id', [id, tenantId])

@@ -39,7 +39,9 @@ export async function authenticateJwt(req: Request, res: Response, next: NextFun
     const row=sessionRes.rows[0];
     req.user={ userId:row.user_id, email:row.email, tenantId:row.tenant_id, role:row.role_name, permissions:sessionRes.rows.map((x:any)=>x.code).filter(Boolean), sessionHash:tokenHash };
     next();
-  } catch { res.status(401).json({ success:false, message:'Sitzung ungültig oder abgelaufen.' }); }
+  } catch (error) {
+    next(error);
+  }
 }
 
 /**

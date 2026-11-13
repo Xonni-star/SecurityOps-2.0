@@ -67,7 +67,7 @@ export async function updateClient(req: Request, res: Response, next: NextFuncti
   try {
     const tenantId = req.user!.tenantId;
     const body = updateClientSchema.parse(req.body);
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const result = await withTenantTransaction(tenantId, async (client) => client.query(
       `UPDATE clients SET client_number = COALESCE($1, client_number), company_name = COALESCE($2, company_name),
        contact_person = COALESCE($3, contact_person), email = COALESCE($4, email), phone = COALESCE($5, phone),
@@ -92,7 +92,7 @@ export async function updateClient(req: Request, res: Response, next: NextFuncti
 export async function archiveClient(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const tenantId = req.user!.tenantId;
-    const id = z.string().uuid().parse(req.params.id);
+    const id = z.string().guid().parse(req.params.id);
     const body = z.object({ revisionVersion: z.number().int().positive() }).strict().parse(req.body);
     const result = await withTenantTransaction(tenantId, (client) => client.query(
       `UPDATE clients SET archived_at = CURRENT_TIMESTAMP, revision_version = revision_version + 1, updated_at = CURRENT_TIMESTAMP
@@ -112,7 +112,7 @@ export async function archiveClient(req: Request, res: Response, next: NextFunct
 
 const clientSyncSchema = z.object({
   deviceId: z.string().min(4).max(128).optional(),
-  mutations: z.array(z.object({ clientUuid: z.string().min(8).max(64), action: z.enum(['CREATE', 'UPDATE', 'DELETE']), baseVersion: z.number().int().positive(), payload: z.record(z.any()) })).min(1).max(100)
+  mutations: z.array(z.object({ clientUuid: z.string().min(8).max(64), action: z.enum(['CREATE', 'UPDATE', 'DELETE']), baseVersion: z.number().int().positive(), payload: z.record(z.string(), z.any()) })).min(1).max(100)
 }).strict();
 
 export async function syncClientMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -143,7 +143,7 @@ export async function syncClientMutations(req: Request, res: Response, next: Nex
         const p = mutation.payload;
         if (mutation.action === 'CREATE') {
           const data = createClientSchema.safeParse(p);
-          const id = z.string().uuid().safeParse(p.id);
+          const id = z.string().guid().safeParse(p.id);
           if (!data.success || !id.success) result = { clientUuid: mutation.clientUuid, status: 'REJECTED', message: 'Ungültige Kundendaten.' };
           else {
             const inserted = await db.query(`INSERT INTO clients (id, tenant_id, client_number, company_name, contact_person, email, phone, address, contract_start, contract_end, sla_level, client_mutation_id)
@@ -153,7 +153,7 @@ export async function syncClientMutations(req: Request, res: Response, next: Nex
             result = { clientUuid: mutation.clientUuid, serverId: existing.id, status: 'SYNCED', serverVersion: existing.revision_version };
           }
         } else {
-          const id = z.string().uuid().safeParse(p.id);
+          const id = z.string().guid().safeParse(p.id);
           if (!id.success) result = { clientUuid: mutation.clientUuid, status: 'REJECTED', message: 'Ungültige Kunden-ID.' };
           else if (mutation.action === 'UPDATE') {
             const changes = { ...p };

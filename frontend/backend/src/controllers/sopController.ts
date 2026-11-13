@@ -3,8 +3,8 @@ import { PoolClient } from 'pg';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 
-const uuid = z.string().uuid();
-const contentSchema = z.union([z.record(z.unknown()), z.string().max(50000)]);
+const uuid = z.string().guid();
+const contentSchema = z.union([z.record(z.string(), z.unknown()), z.string().max(50000)]);
 const optionalEntityId = uuid.or(z.literal('')).nullable().optional();
 const metadataSchema = {
   sopNumber: z.string().trim().min(1).max(100).optional(),

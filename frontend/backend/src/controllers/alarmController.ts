@@ -3,7 +3,7 @@ import { PoolClient } from 'pg';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 
-const uuid = z.string().uuid();
+const uuid = z.string().guid();
 const scenario = z.enum([
   'BMA - Brandmeldeanlage',
   'EMA - Einbruchsalarm',
