@@ -23,6 +23,7 @@ import { MobilePatrolScanner } from './MobilePatrolScanner';
 import { MobileShiftHandover } from './MobileShiftHandover';
 import { GuardBookModule } from './GuardBookModule';
 import { SOPModule } from './SOPModule';
+import { AlarmsModule } from './AlarmsModule';
 import { TasksModule } from './TasksModule';
 import { UserRole } from '../types';
 
@@ -44,7 +45,7 @@ export const MobileAppShell: React.FC = () => {
   const shifts = getTenantShifts();
   const tasks = getTenantTasks();
 
-  const [activeMobileView, setActiveMobileView] = useState<'home' | 'duty' | 'guardbook' | 'patrol' | 'handover' | 'sop' | 'tasks'>('home');
+  const [activeMobileView, setActiveMobileView] = useState<'home' | 'duty' | 'guardbook' | 'patrol' | 'handover' | 'sop' | 'tasks' | 'alarms'>('home');
 
   const unreadIncidents = guardBook.filter((g) => g.priority === 'Kritisch' && !g.resolved).length;
   const openTasks = tasks.filter((t) => t.status !== 'Erledigt').length;
@@ -115,6 +116,17 @@ export const MobileAppShell: React.FC = () => {
               </div>
 
               <div
+                onClick={() => setActiveMobileView('alarms')}
+                className="p-4 rounded-2xl bg-slate-900 border border-slate-800 cursor-pointer hover:border-rose-500 transition"
+              >
+                <div className="p-2 rounded-xl bg-rose-500/10 text-rose-400 w-fit mb-2">
+                  <ShieldAlert className="w-5 h-5" />
+                </div>
+                <div className="font-bold text-white text-sm">Notfallmanagement</div>
+                <div className="text-[11px] text-slate-400 mt-0.5">Alarme melden & reagieren</div>
+              </div>
+
+              <div
                 onClick={() => setActiveMobileView('handover')}
                 className="p-4 rounded-2xl bg-slate-900 border border-slate-800 cursor-pointer hover:border-blue-500 transition"
               >
@@ -165,6 +177,7 @@ export const MobileAppShell: React.FC = () => {
         {activeMobileView === 'guardbook' && <GuardBookModule />}
         {activeMobileView === 'sop' && <SOPModule />}
         {activeMobileView === 'tasks' && <TasksModule />}
+        {activeMobileView === 'alarms' && <AlarmsModule />}
       </div>
 
       {/* Sticky Mobile Bottom Navigation Bar (WCAG AA Compliant Touch-Targets) */}

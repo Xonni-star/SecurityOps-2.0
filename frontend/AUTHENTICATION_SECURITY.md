@@ -14,6 +14,12 @@ Login requires an allowlisted Origin. Every other state-changing method also req
 
 The API client always uses `credentials: include` and sends the CSRF header for mutations. It does not retain bearer credentials; it removes the legacy `secops_access_token` localStorage entry at startup. Tenant preferences and UI theme are not authentication credentials. A 401 clears in-memory auth/CSRF state without clearing IndexedDB; queued mutations remain available for retry after login. Server-side idempotency and revision/conflict processing are unchanged.
 
+## Alarm roles, site scope, and contact privacy
+
+Alarm routes use database-backed `alarm:*`, `emergency_plan:publish`, and `emergency_contact:*` permissions. In addition to tenant RLS, the alarm API restricts non-elevated users to sites assigned to the employee matching the authenticated email. Elevated role names still require each route's explicit permission. Contacts require `emergency_contact:read`; plan-version responses omit contact snapshots without that permission. Archiving an incident additionally requires `alarm:archive`, even when the caller can otherwise change incident status.
+
+Offline alarm plans and types are cached per tenant/user, but contact snapshots are stripped before persistence. Alarm actions can reference an existing authorized document; binary photo/file capture and upload for alarm records are not implemented.
+
 ## Deployment and remaining verification
 
 Production cookies require HTTPS (`Secure`). Configure exact frontend origins in `CORS_ORIGIN` and terminate TLS at the deployment proxy. Locally verified: PostgreSQL 16 migrations and database-backed Jest suite (10 suites / 148 tests), tenant isolation and sync/idempotency coverage, backend TypeScript build, frontend Vitest (24 tests) and production build, Docker Compose validation and both production image builds, full-stack smoke check, and root structure check. GitHub CI/CD remains pending publication and must pass for this exact commit. No claim of production readiness is made until full CI/CD succeeds. The current code revokes the logged-in session on logout; a separate administrative “revoke all sessions” operation is not exposed by the existing application and remains an explicit limitation.

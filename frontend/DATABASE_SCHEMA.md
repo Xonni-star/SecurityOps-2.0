@@ -41,3 +41,9 @@ Kategorien, Ordner und Dokumente haben zusammengesetzte Schlüssel/Fremdschlüss
 `document_audit_events` enthält Actor, Dokument, Mandant, Aktion, JSON-Details und Zeitstempel. `secops_app_user` darf Auditdaten nur lesen und einfügen. Zusätzlich weist ein Trigger `UPDATE` und `DELETE` zurück. Dokumente werden archiviert, nicht physisch gelöscht.
 
 Datei-Blobs werden getrennt von PostgreSQL unter einem zufälligen UUID-Schlüssel im privaten `DMS_STORAGE_PATH` abgelegt. Das Originaldateiname ist nur Metadatum. Das persistente Docker-Volume heißt `secops_documents`; Datei-Backups müssen zusammen mit dem Datenbankdump wiederhergestellt werden.
+
+## Alarm- und Notfallmanagement (Migration 016)
+
+`alarm_types`, `emergency_contacts`, `emergency_plan_versions`, `alarm_event_assignments`, `alarm_event_actions`, `alarm_event_status_history`, `alarm_escalation_rules`, `alarm_escalation_steps`, `alarm_escalation_jobs`, `alarm_notifications` und `alarm_mutation_receipts` sind tenantgebunden und erzwingen `ENABLE` plus `FORCE ROW LEVEL SECURITY`. Vorhandene `emergency_plans` und `alarm_incidents` erhalten Kunden-, Alarmtyp-, Versions- und Site-Fremdschlüssel. Zusammengesetzte FKs verhindern Zuordnungen über Mandanten- oder Kunde/Site-Grenzen hinweg.
+
+Planversionen, Aktionen und Statushistorie besitzen Datenbanktrigger gegen UPDATE/DELETE und nur INSERT-/SELECT-Rechte für die Anwendungsrolle. Die aktuelle Planfassung kann geändert werden; veröffentlichte Versionen bleiben als unveränderlicher Snapshot erhalten. Eskalationsjobs und Zustellversuche sind veränderliche Prozesszustände; sie sind nicht Teil der append-only Vorfallshistorie. Mutation-Quittungen enthalten einen Payload-Hash zur Idempotenzprüfung. Die Site-Autorisierung wird zusätzlich in der API erzwungen; RLS selbst begrenzt auf den Tenant.

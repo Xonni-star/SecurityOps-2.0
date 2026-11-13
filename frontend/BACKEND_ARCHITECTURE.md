@@ -30,6 +30,16 @@ Die API erzwingt die Berechtigungen `sop:*` und den Ablauf Entwurf → Prüfung 
 
 Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md) und [SOP_API.md](./SOP_API.md).
 
+## Alarm- und Notfallmanagement
+
+Migration `015_alarm_emergency_management.sql` stellt die Grundtabellen bereit; `016_alarm_lifecycle_and_offline.sql` ergänzt tenantgebundene Alarmarten, Notfallkontakt- und Planversionen, Zuweisungen, Status-/Maßnahmenhistorien, Eskalationsregeln/-jobs, Benachrichtigungsstatus und Idempotenzquittungen. Neue Tabellen erzwingen RLS. Planversionen, Aktionen und Statushistorie sind für die Anwendungsrolle append-only; der API-Workflow verwendet zusätzlich zusammengesetzte Tenant-FKs und Revisionen.
+
+`alarmWorkflowController.ts` prüft serverseitig RBAC und den Objektzugriff anhand `employee_site_assignments` (über die angemeldete Benutzer-E-Mail). Nur definierte übergeordnete Rollen erhalten tenantweiten Site-Scope. Kontaktabfragen benötigen ein eigenes Kontakt-Leserecht; Planversionsantworten enthalten ohne dieses Recht keine Kontaktsnapshots. Nicht aktive Kunden/Objekte können keine neuen Pläne oder Vorfälle erhalten.
+
+`alarmEscalationWorker.ts` verarbeitet fällige Jobs regelmäßig mit `FOR UPDATE SKIP LOCKED`, Leasing, begrenzten Wiederholungen und verzögertem Retry. In-App-Mitteilungen werden als Datenbankzustellung gespeichert. E-Mail und Push bleiben sichtbar `not_configured`, bis ein echter Provider eingerichtet ist. Der Worker wird mit dem Backendprozess gestartet und beim Herunterfahren gestoppt; er ersetzt keinen externen hochverfügbaren Job-Queue-Dienst.
+
+Offline-Mutationen werden zuerst in der bestehenden IndexedDB gespeichert und danach direkt oder über `/alarms/sync` mit denselben Mutation-IDs übertragen. Konflikte sind explizit und werden nicht als bestätigt dargestellt. Details der Routen und bekannten Grenzen stehen in [ALARM_EMERGENCY_API.md](./ALARM_EMERGENCY_API.md).
+
 ## Betrieb
 
 Die Standard-Dateigröße beträgt 10 MiB und ist über `DMS_MAX_FILE_SIZE_BYTES` bis maximal 100 MiB konfigurierbar. In Docker wird das persistente Volume `secops_documents` außerhalb des statischen Frontends eingebunden. Der Containerbenutzer `node` erhält ein privates Verzeichnis mit Modus `0700`. Der tägliche verschlüsselte Backup-Dienst sichert DB-Dump und Datei-Volume gemeinsam.
@@ -38,4 +48,4 @@ Es ist kein Virenscanner in der vorhandenen Deployment-Architektur enthalten. Di
 
 ## DMS-Beziehungen
 
-Die DMS-Beziehungstabelle akzeptiert nur vorhandene, tenantgebundene Backend-Entitäten; SOPs sind kein polymorpher Beziehungstyp. Stattdessen verweist eine Dienstanweisung über eine tenantgebundene Fremdschlüsselspalte auf ein vorhandenes DMS-Dokument. Alarm-/Notfallplan-Datensätze besitzen weiterhin keine serverseitige Fach-API.
+Die DMS-Beziehungstabelle akzeptiert nur vorhandene, tenantgebundene Backend-Entitäten; SOPs sind kein polymorpher Beziehungstyp. Stattdessen verweist eine Dienstanweisung über eine tenantgebundene Fremdschlüsselspalte auf ein vorhandenes DMS-Dokument. Alarmmaßnahmen können ein vorhandenes tenantgebundenes DMS-Dokument referenzieren; ein Offline-Datei-Upload für Alarme ist nicht implementiert.
