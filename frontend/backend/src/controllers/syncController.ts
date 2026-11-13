@@ -407,6 +407,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               } else {
                 const old = current.rows[0];
                 const updateSchema = z.object({
+                  id: z.string().guid(),
                   siteId: z.string().guid().optional(),
                   employeeId: z.string().guid().nullable().optional(),
                   shiftDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),

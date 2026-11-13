@@ -6,7 +6,7 @@ All endpoints are under `/api/v1`, require a bearer session, and use the exact p
 
 | Method and path | Permission | Purpose |
 |---|---|---|
-| `GET /planning/shifts` | `planning:read` | Paginated shifts; filters: `from`, `to`, `siteId`, `employeeId`, `planningStatus`, `page`, `pageSize` (max 200). |
+| `GET /planning/shifts` | `planning:read` | Paginated shifts; filters: `from`, `to`, `siteId`, `employeeId`, `planningStatus`, `page`, `pageSize` (max 200). Each row includes `required_count` for the shift's primary required qualification (defaults to `1` for legacy shifts) and `assigned_count`. |
 | `POST /planning/shifts` | `planning:manage` | Create a server-validated draft shift. |
 | `GET /planning/shifts/:id/assignments` | `planning:read` | Read staffing assignments. |
 | `POST /planning/shifts/:id/assignments` | `planning:manage` | Assign an employee using `expectedVersion`. |

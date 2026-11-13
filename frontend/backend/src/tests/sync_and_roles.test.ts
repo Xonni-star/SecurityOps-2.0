@@ -267,6 +267,13 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       expect(created.status).toBe(201);
       expect(created.body.data.shift.planning_status).toBe('draft');
 
+      const listed = await request(app).get('/api/v1/planning/shifts?from=2027-01-10&to=2027-01-10')
+        .set(authHeaders(testTokenA));
+      expect(listed.status).toBe(200);
+      expect(listed.body.data).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: created.body.data.shift.id, required_count: 2, assigned_count: 0 })
+      ]));
+
       const replay = await request(app).post('/api/v1/planning/shifts').set(authHeaders(testTokenA)).send(shiftInput);
       expect(replay.status).toBe(200);
       expect(replay.body.data.shift.id).toBe(created.body.data.shift.id);
@@ -434,6 +441,49 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     expect(res.status).toBe(200);
     expect(res.body.data[0].status).toBe('CONFLICT');
     expect(res.body.data[0].serverVersion).toBe(2);
+  });
+
+  test('Schicht-UPDATE im Offline-Sync akzeptiert die ID, validiert Felder und lehnt ungültige Daten ab', async () => {
+    const shiftId = await withTenantTransaction(testTenantA, async (tx) => {
+      const inserted = await tx.query(`
+        INSERT INTO shifts (tenant_id, site_id, shift_date, start_time, end_time, required_qualification, revision_version)
+        VALUES ($1, $2, '2027-02-03', '06:00', '14:00', 'Sachkunde', 1)
+        RETURNING id;
+      `, [testTenantA, siteAId]);
+      return inserted.rows[0].id;
+    });
+
+    const valid = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send({
+      deviceId: 'offline-device',
+      mutations: [{
+        clientUuid: `shift-update-${Date.now()}`,
+        entityType: 'shift',
+        action: 'UPDATE',
+        clientTimestamp: new Date().toISOString(),
+        baseVersion: 1,
+        payload: { id: shiftId, shiftDate: '2027-02-04', startTime: '08:00', endTime: '16:00' }
+      }]
+    });
+    expect(valid.status).toBe(200);
+    expect(valid.body.data[0]).toMatchObject({ status: 'SYNCED', serverId: shiftId, serverVersion: 2 });
+    const updated = await withTenantTransaction(testTenantA, tx =>
+      tx.query('SELECT shift_date::text, start_time::text FROM shifts WHERE tenant_id=$1 AND id=$2', [testTenantA, shiftId])
+    );
+    expect(updated.rows[0]).toMatchObject({ shift_date: '2027-02-04', start_time: '08:00:00' });
+
+    const malformed = await request(app).post('/api/v1/sync/push').set(authHeaders(testTokenA)).send({
+      deviceId: 'offline-device',
+      mutations: [{
+        clientUuid: `shift-invalid-${Date.now()}`,
+        entityType: 'shift',
+        action: 'UPDATE',
+        clientTimestamp: new Date().toISOString(),
+        baseVersion: 2,
+        payload: { id: shiftId, startTime: 'not-a-time' }
+      }]
+    });
+    expect(malformed.status).toBe(200);
+    expect(malformed.body.data[0]).toMatchObject({ status: 'REJECTED', serverId: shiftId });
   });
 
   // 5. Schichten: Versionsgesichertes DELETE

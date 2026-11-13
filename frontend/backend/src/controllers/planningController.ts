@@ -227,13 +227,17 @@ export async function listPlanningShifts(req: Request, res: Response, next: Next
                 s.shift_date,s.start_time,s.end_time,s.starts_at,s.ends_at,s.time_zone,
                 s.break_minutes,s.type,s.status,s.planning_status,s.required_qualification,
                 s.schedule_period_id,s.revision_version,
-                COALESCE(a.staff_count, CASE WHEN s.employee_id IS NULL THEN 0 ELSE 1 END) AS assigned_count
+                COALESCE(a.staff_count, CASE WHEN s.employee_id IS NULL THEN 0 ELSE 1 END) AS assigned_count,
+                COALESCE(r.required_count,1) AS required_count
            FROM shifts s
            JOIN sites st ON st.id=s.site_id AND st.tenant_id=s.tenant_id
            LEFT JOIN LATERAL (
              SELECT count(*)::int AS staff_count FROM shift_staffing_assignments sa
               WHERE sa.tenant_id=s.tenant_id AND sa.shift_id=s.id AND sa.status='assigned'
            ) a ON TRUE
+           LEFT JOIN shift_staffing_requirements r
+             ON r.tenant_id=s.tenant_id AND r.shift_id=s.id
+            AND r.qualification_type=s.required_qualification
           WHERE ${clauses.join(' AND ')}
           ORDER BY s.shift_date,s.start_time,s.id
           LIMIT $${pageValues.length - 1} OFFSET $${pageValues.length}`,
