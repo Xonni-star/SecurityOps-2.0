@@ -3,6 +3,7 @@ import { NextFunction, Request, Response } from 'express';
 import { PoolClient } from 'pg';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
+import { escapeCsvCell } from '../utils/csv';
 import {
   PlanningFinding,
   ShiftCandidate,
@@ -2225,22 +2226,21 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
       });
     });
     if (req.query.format === 'csv') {
-      const escape = (value: unknown) => {
-        let text = String(value ?? '');
-        if (/^[\s\u0000-\u001f\uFEFF]*[=+\-@]/.test(text)) text = `'${text}`;
-        return `"${text.replaceAll('"', '""')}"`;
-      };
       const csv = [
         ['employeeId', 'personnelNumber', 'firstName', 'lastName', 'assignedShifts', 'plannedHours',
           'actualHours', 'actualStatus', 'overtimeHours', 'overtimeStatus', 'plannedWeekendShifts',
           'actualWeekendShifts', 'plannedHolidayShifts', 'actualHolidayShifts', 'plannedNightShifts',
-          'actualNightShifts'].join(','),
-        ...rows.map(row => [
+          'actualNightShifts'].map(value => escapeCsvCell(value)).join(','),
+        ...rows.map(row => {
+          const values = [
           row.employee_id, row.personnel_number, row.first_name, row.last_name, row.assigned_shifts,
           row.planned_hours, row.actual_hours, row.actual_status, row.overtime_hours, row.overtime_status,
           row.planned_weekend_shifts, row.actual_weekend_shifts, row.planned_holiday_shifts,
           row.actual_holiday_shifts, row.planned_night_shifts, row.actual_night_shifts
-        ].map(escape).join(','))
+          ];
+          const textColumns = new Set([0, 1, 2, 3, 7, 9]);
+          return values.map((value, index) => escapeCsvCell(value, textColumns.has(index))).join(',');
+        })
       ].join('\r\n');
       res.type('text/csv').set('Content-Disposition', 'attachment; filename="planning-work-hours.csv"').send(csv);
       return;
