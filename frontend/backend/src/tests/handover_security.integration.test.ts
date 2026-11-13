@@ -13,6 +13,7 @@ const password = 'HandoverSecurityTest2026!';
 const suffix = randomUUID();
 const email = (name: string) => `handover-${name}-${suffix}@example.test`;
 const roleName = `HIT-${suffix}`;
+const hybridRoleName = `HIT-LINK-${suffix}`;
 
 const emails = {
   identityAdmin: email('identity-admin'),
@@ -29,6 +30,7 @@ const employeeIds: string[] = [];
 const handoverIds: string[] = [];
 let siteId: string | undefined;
 let clientId: string | undefined;
+let confirmerRoleId: string | undefined;
 let hybridRoleId: string | undefined;
 let tokens: Record<keyof typeof emails, string>;
 
@@ -102,20 +104,31 @@ beforeAll(async () => {
   const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
   const roleNames: Record<keyof typeof emails, string> = {
     identityAdmin: 'Personalverwaltung',
-    outgoing: 'Wachdienstmitarbeiter',
-    incoming: 'Wachdienstmitarbeiter',
-    outsider: 'Wachdienstmitarbeiter',
-    otherOutgoing: 'Wachdienstmitarbeiter',
+    outgoing: roleName,
+    incoming: roleName,
+    outsider: roleName,
+    otherOutgoing: roleName,
     incidentLead: 'Einsatzleitung',
-    hybridConfirmer: roleName
+    hybridConfirmer: hybridRoleName
   };
 
   const roleResult = await migrationPool.query(
-    `INSERT INTO roles (name,description) VALUES ($1,'Test-only confirmer with account-link permission')
+    `INSERT INTO roles (name,description) VALUES ($1,'Test-only handover confirmer')
      RETURNING id`,
     [roleName]
   );
-  hybridRoleId = roleResult.rows[0].id;
+  confirmerRoleId = roleResult.rows[0].id;
+  const hybridRoleResult = await migrationPool.query(
+    `INSERT INTO roles (name,description) VALUES ($1,'Test-only confirmer with account-link permission')
+     RETURNING id`,
+    [hybridRoleName]
+  );
+  hybridRoleId = hybridRoleResult.rows[0].id;
+  await migrationPool.query(
+    `INSERT INTO role_permissions (role_id,permission_id)
+     SELECT $1,id FROM permissions WHERE code IN ('handovers:confirm','handovers:read')`,
+    [confirmerRoleId]
+  );
   await migrationPool.query(
     `INSERT INTO role_permissions (role_id,permission_id)
      SELECT $1,id FROM permissions WHERE code IN ('employees:account:link','handovers:confirm')`,
@@ -130,8 +143,13 @@ beforeAll(async () => {
       [emails[key], passwordHash]
     );
     userIds[key] = user.rows[0].id;
-    const role = roleNames[key] === roleName
-      ? { rows: [{ id: hybridRoleId }] }
+    const customRoleId = roleNames[key] === roleName
+      ? confirmerRoleId
+      : roleNames[key] === hybridRoleName
+        ? hybridRoleId
+        : undefined;
+    const role = customRoleId
+      ? { rows: [{ id: customRoleId }] }
       : await migrationPool.query('SELECT id FROM roles WHERE name=$1', [roleNames[key]]);
     if (!role.rows.length) throw new Error(`Missing integration-test role: ${roleNames[key]}`);
     await migrationPool.query(
@@ -210,6 +228,10 @@ afterAll(async () => {
     if (hybridRoleId) {
       await cleanup.query('DELETE FROM role_permissions WHERE role_id=$1', [hybridRoleId]);
       await cleanup.query('DELETE FROM roles WHERE id=$1', [hybridRoleId]);
+    }
+    if (confirmerRoleId) {
+      await cleanup.query('DELETE FROM role_permissions WHERE role_id=$1', [confirmerRoleId]);
+      await cleanup.query('DELETE FROM roles WHERE id=$1', [confirmerRoleId]);
     }
   } finally {
     await cleanup.query('SET session_replication_role = origin');
