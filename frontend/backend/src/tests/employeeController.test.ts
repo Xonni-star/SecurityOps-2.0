@@ -1,6 +1,6 @@
 import { Request, NextFunction } from 'express';
 import { withTenantTransaction } from '../config/database';
-import { syncEmployeeMutations } from '../controllers/employeeController';
+import { linkEmployeeAccount, syncEmployeeMutations } from '../controllers/employeeController';
 
 jest.mock('../config/database', () => ({
   withTenantTransaction: jest.fn()
@@ -44,6 +44,56 @@ beforeEach(() => {
 });
 
 describe('employee sync site memberships', () => {
+  test('links an employee only to an account with membership in the same tenant', async () => {
+    transaction.query
+      .mockResolvedValueOnce({ rows: [{ revision_version: 3 }] })
+      .mockResolvedValueOnce({ rows: [{ '?column?': 1 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ id: employeeId, account_user_id: userId, revision_version: 4 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = response();
+    const req = {
+      params: { id: employeeId },
+      body: { userId, revisionVersion: 3 },
+      user: {
+        userId: '66666666-6666-4666-8666-666666666666', tenantId,
+        email: 'manager@example.test', role: 'Personalverwaltung',
+        permissions: ['employees:update'], sessionHash: 'hash'
+      },
+      ip: '127.0.0.1'
+    } as unknown as Request;
+
+    await linkEmployeeAccount(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.body.data).toEqual({ id: employeeId, account_user_id: userId, revision_version: 4 });
+    expect(transaction.query.mock.calls[1][0]).toContain('FROM user_roles WHERE user_id=$1 AND tenant_id=$2');
+    expect(transaction.query.mock.calls[3][0]).toContain('account_user_id=$1');
+    expect(transaction.query.mock.calls[4][0]).toContain('INSERT INTO audit_logs');
+  });
+
+  test('rejects account links without tenant membership before updating an employee', async () => {
+    transaction.query
+      .mockResolvedValueOnce({ rows: [{ revision_version: 3 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const res = response();
+    const req = {
+      params: { id: employeeId },
+      body: { userId, revisionVersion: 3 },
+      user: {
+        userId: '66666666-6666-4666-8666-666666666666', tenantId,
+        email: 'manager@example.test', role: 'Personalverwaltung',
+        permissions: ['employees:update'], sessionHash: 'hash'
+      }
+    } as unknown as Request;
+
+    await linkEmployeeAccount(req, res, next);
+
+    expect(res.statusCode).toBe(400);
+    expect(res.body.message).toMatch(/Mandanten/);
+    expect(transaction.query.mock.calls.some(([sql]) => String(sql).includes('UPDATE employees'))).toBe(false);
+  });
+
   test('CREATE persists validated assignedSiteIds in the employee transaction', async () => {
     transaction.query.mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })

@@ -114,6 +114,17 @@ export const initialModules: SecurityModuleManifest[] = [
     isCore: false
   },
   {
+    id: 'mod-handovers',
+    name: 'Übergabemanagement',
+    description: 'Objektbezogene Übergabeprotokolle, getrennte Bestätigungen, fortgeführte Aufgaben und Offline-Synchronisierung.',
+    version: '1.0.0',
+    category: 'OPERATIONS',
+    enabled: true,
+    requiredPermissions: [UserRole.ADMIN, UserRole.GF, UserRole.EINSATZLEITUNG, UserRole.OBJEKTLEITUNG, UserRole.GUARD, UserRole.AUDITOR],
+    dependencies: ['mod-core-dashboard'],
+    isCore: true
+  },
+  {
     id: 'mod-documents',
     name: 'Zentrales Dokumentenmanagement',
     description: 'Polymorphe Dokumentenablage für Kunden, Objekte, Mitarbeiter und Vorfälle.',

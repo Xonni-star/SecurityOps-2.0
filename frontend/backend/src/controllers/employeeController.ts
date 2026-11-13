@@ -13,8 +13,12 @@ const assignedSiteIdsSchema = z.array(z.string().uuid()).max(500)
   .refine(ids => new Set(ids).size === ids.length, 'Standort-IDs müssen eindeutig sein.');
 const employeeApiFields = employeeFields.extend({ assignedSiteIds: assignedSiteIdsSchema.optional() });
 const employeeColumns: Record<string,string> = { personnelNumber:'personnel_number', firstName:'first_name', lastName:'last_name', email:'email', phone:'phone', role:'role', status:'status', weeklyHours:'weekly_hours', hourlyRate:'hourly_rate', dateOfJoining:'date_of_joining' };
-const employeeSelect = 'id,tenant_id,personnel_number,first_name,last_name,email,phone,role,status,weekly_hours,hourly_rate,date_of_joining,archived_at,revision_version';
+const employeeSelect = 'id,tenant_id,personnel_number,first_name,last_name,email,phone,role,status,weekly_hours,hourly_rate,date_of_joining,account_user_id,archived_at,revision_version';
 const versionSchema = z.object({ revisionVersion: z.number().int().positive() }).strict();
+const employeeAccountSchema = z.object({
+  userId: z.string().uuid().nullable(),
+  revisionVersion: z.number().int().positive()
+}).strict();
 const qualificationFields = z.object({
   type: z.string().min(2).max(100), certificateNumber: z.string().max(100).nullable().optional(), issueDate: z.string().date().nullable().optional(),
   expiryDate: z.string().date().nullable().optional(), verified: z.boolean().default(false), documentReference: z.string().max(255).nullable().optional()
@@ -100,6 +104,82 @@ export async function updateEmployee(req: Request,res: Response,next: NextFuncti
     if ('conflict' in result) { res.status(result.conflict?409:404).json({success:false,message:result.conflict?'Mitarbeiter wurde geändert oder archiviert.':'Mitarbeiter nicht gefunden.',data:result.current}); return; }
     res.json({success:true,data:result.employee});
   }catch(error){next(error);}
+}
+
+export async function linkEmployeeAccount(req: Request,res: Response,next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const employeeId = z.string().uuid().parse(req.params.id);
+    const { userId, revisionVersion } = employeeAccountSchema.parse(req.body);
+    const result = await withTenantTransaction(tenantId, async db => {
+      const current = await db.query(
+        'SELECT revision_version, account_user_id FROM employees WHERE id=$1 AND tenant_id=$2 AND archived_at IS NULL FOR UPDATE',
+        [employeeId, tenantId]
+      );
+      if (!current.rows.length) return { kind: 'missing' as const };
+      if (Number(current.rows[0].revision_version) !== revisionVersion) return { kind: 'stale' as const };
+      if (
+        userId === req.user!.userId &&
+        req.user!.permissions.includes('handovers:confirm') &&
+        current.rows[0].account_user_id !== userId
+      ) return { kind: 'self-link-forbidden' as const };
+      if (userId) {
+        const membership = await db.query(
+          'SELECT 1 FROM user_roles WHERE user_id=$1 AND tenant_id=$2 LIMIT 1',
+          [userId, tenantId]
+        );
+        if (!membership.rows.length) return { kind: 'foreign-account' as const };
+        const alreadyLinked = await db.query(
+          'SELECT 1 FROM employees WHERE tenant_id=$1 AND account_user_id=$2 AND id<>$3 LIMIT 1',
+          [tenantId, userId, employeeId]
+        );
+        if (alreadyLinked.rows.length) return { kind: 'already-linked' as const };
+      }
+      const updated = await db.query(
+        `UPDATE employees SET account_user_id=$1, revision_version=revision_version+1,
+           updated_at=CURRENT_TIMESTAMP
+         WHERE id=$2 AND tenant_id=$3 AND revision_version=$4
+         RETURNING id, account_user_id, revision_version`,
+        [userId, employeeId, tenantId, revisionVersion]
+      );
+      if (!updated.rows.length) return { kind: 'stale' as const };
+      await db.query(
+        `INSERT INTO audit_logs
+           (tenant_id,user_email,role,action_type,severity,target_entity,details,ip_address)
+         VALUES ($1,$2,$3,'employee.account_linked','INFO',$4,$5,$6)`,
+        [
+          tenantId, req.user!.email, req.user!.role, employeeId,
+          JSON.stringify({
+            previousAccountUserId: current.rows[0].account_user_id,
+            accountUserId: userId
+          }), req.ip || 'unknown'
+        ]
+      );
+      return { kind: 'ok' as const, employee: updated.rows[0] };
+    });
+    if (result.kind !== 'ok') {
+      const status = result.kind === 'missing' ? 404
+        : result.kind === 'foreign-account' ? 400
+        : result.kind === 'self-link-forbidden' ? 403
+        : 409;
+      const message = {
+        missing: 'Aktiver Mitarbeiter nicht gefunden.',
+        stale: 'Mitarbeiter wurde zwischenzeitlich geändert.',
+        'foreign-account': 'Das Benutzerkonto gehört nicht zu diesem Mandanten.',
+        'already-linked': 'Das Benutzerkonto ist bereits einem anderen Mitarbeiter zugeordnet.',
+        'self-link-forbidden': 'Personen mit Bestätigungsrecht dürfen sich nicht selbst einem Mitarbeiter zuordnen.'
+      }[result.kind];
+      res.status(status).json({ success: false, message });
+      return;
+    }
+    res.json({ success: true, data: result.employee });
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505') {
+      res.status(409).json({ success: false, message: 'Das Benutzerkonto ist bereits einem anderen Mitarbeiter zugeordnet.' });
+      return;
+    }
+    next(error);
+  }
 }
 
 async function lifecycle(req:Request,res:Response,next:NextFunction,restore:boolean):Promise<void>{

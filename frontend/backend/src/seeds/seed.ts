@@ -137,6 +137,38 @@ export async function seedDatabase(): Promise<void> {
       );
     }
 
+    await client.query(
+      `INSERT INTO permissions (code,module,description)
+       VALUES ('employees:account:link','employees','Erlaubt Personalverwaltern die Zuordnung von Mitarbeiterkonten')
+       ON CONFLICT (code) DO NOTHING`
+    );
+    await client.query(
+      `INSERT INTO role_permissions (role_id,permission_id)
+       SELECT r.id,p.id FROM roles r CROSS JOIN permissions p
+       WHERE r.name='Personalverwaltung' AND p.code='employees:account:link'
+       ON CONFLICT DO NOTHING`
+    );
+    await client.query(`
+      INSERT INTO permissions (code,module,description) VALUES
+        ('handovers:read','handovers','Übergaben und Historie lesen'),
+        ('handovers:create','handovers','Übergaben erfassen'),
+        ('handovers:update','handovers','Unbestätigte Übergaben bearbeiten'),
+        ('handovers:confirm','handovers','Übergabe oder Übernahme bestätigen'),
+        ('handovers:tasks','handovers','Übergabeaufgaben verwalten'),
+        ('handovers:manage','handovers','Übergaben und DMS-Verknüpfungen verwalten')
+      ON CONFLICT (code) DO NOTHING
+    `);
+    await client.query(`
+      INSERT INTO role_permissions (role_id,permission_id)
+      SELECT r.id,p.id FROM roles r JOIN permissions p ON
+        (r.name IN ('Systemadministrator','Geschäftsführung','Einsatzleitung','Objektleitung')
+          AND p.code LIKE 'handovers:%')
+        OR (r.name='Wachdienstmitarbeiter'
+          AND p.code IN ('handovers:read','handovers:create','handovers:confirm','handovers:tasks'))
+        OR (r.name='Auditor' AND p.code='handovers:read')
+      ON CONFLICT DO NOTHING
+    `);
+
     // Berechtigungen der Rolle Einsatzleitung zuordnen
     const einsatzRole = await client.query("SELECT id FROM roles WHERE name = 'Einsatzleitung'");
     if (einsatzRole.rows.length > 0) {

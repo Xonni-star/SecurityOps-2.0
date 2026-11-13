@@ -7,6 +7,10 @@
 - **Offline Data Storage**: Native IndexedDB (`SecurityOps2_OfflineVault`) for offline guardbooks, queues and scans
 - **REST Client**: Centralized `apiClient` supporting JWT Bearer claims and multi-tenant isolation headers
 
+## Übergabemanagement
+
+`HandoversModule.tsx` ist die responsive Desktop-/Tablet-/Mobiloberfläche; `MobileShiftHandover.tsx` bindet dieselbe Funktionalität in die vorhandene Mitarbeiter-App ein. Die Liste, Filter und Kennzahlen werden aus `/api/v1/handovers` geladen. Erfassung erfolgt zuerst in der vorhandenen IndexedDB-Outbox und wird danach über `/api/v1/handovers/sync` übertragen. Nur serverseitig geladene Übergaben gelten als synchronisiert. Ereignisse, Aufgaben und DMS-Verweise werden über die Handover-API nachgeladen; Offline-Statusmeldungen unterscheiden ausstehend, Konflikt und Fehler.
+
 ---
 
 ## 2. Multi-Tenant UI Isolation Contract

@@ -1,7 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
-import crypto from 'crypto';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
+import { createHandover, handoverCreateSchema, HandoverConflictError } from '../services/handoverService';
+import { computePayloadHash } from '../services/syncHash';
+
+export { canonicalStringify, computePayloadHash } from '../services/syncHash';
 
 export class ConflictError extends Error {
   statusCode = 409;
@@ -42,28 +45,27 @@ export interface SyncResultItem {
   message?: string;
 }
 
+export function hasMutationPermission(
+  entityType: z.infer<typeof syncMutationItemSchema>['entityType'],
+  permissions: string[]
+): boolean {
+  const permissionByEntity = {
+    guardbook: 'logbook:create',
+    shift: 'shifts:manage',
+    task: 'tasks:manage',
+    key: 'keys:manage',
+    patrol: 'patrol:create',
+    handover: 'handovers:create'
+  } as const;
+  return permissions.includes(permissionByEntity[entityType]) ||
+    (entityType === 'handover' && permissions.includes('handover:create'));
+}
+
 /**
  * Kanonische, rekursive Serialisierung:
  * Sortiert alle Schlüssel verschachtelter Objekte und normalisiert Arrays deterministisch,
  * damit identische Datenstrukturen unabhängig von Key-Reihenfolgen denselben SHA-256-Hash erzeugen.
  */
-export function canonicalStringify(data: any): string {
-  if (data === null || typeof data !== 'object') {
-    return JSON.stringify(data);
-  }
-  if (Array.isArray(data)) {
-    return '[' + data.map(canonicalStringify).join(',') + ']';
-  }
-  const keys = Object.keys(data).sort();
-  const entries = keys.map((key) => `${JSON.stringify(key)}:${canonicalStringify(data[key])}`);
-  return '{' + entries.join(',') + '}';
-}
-
-export function computePayloadHash(payload: Record<string, any>): string {
-  const canonical = canonicalStringify(payload);
-  return crypto.createHash('sha256').update(canonical, 'utf8').digest('hex');
-}
-
 /**
  * POST /api/v1/sync/push
  * Verarbeitet Push-Mutationen und speichert Quittungen in sync_idempotency_receipts
@@ -79,16 +81,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
-        const permissionByEntity = {
-          guardbook: 'logbook:create',
-          shift: 'shifts:manage',
-          task: 'tasks:manage',
-          key: 'keys:manage',
-          patrol: 'patrol:create',
-          handover: 'handover:create'
-        } as const;
-        const requiredPermission = permissionByEntity[mut.entityType];
-        if (!req.user!.permissions.includes(requiredPermission)) {
+        if (!hasMutationPermission(mut.entityType, req.user!.permissions)) {
           results.push({
             clientUuid: mut.clientUuid,
             serverId: 'none',
@@ -121,11 +114,25 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
             receipt.action !== mut.action ||
             receipt.payload_hash !== payloadHash
           ) {
+            const serverPayload = mut.entityType === 'handover' && /^[0-9a-f-]{36}$/i.test(receipt.server_id)
+              ? (await client.query(
+                `SELECT id,site_id,area,shift_id,occurred_at,general_text,incidents,important_notes,
+                        safety_information,status,revision_version
+                 FROM handovers WHERE tenant_id=$1 AND id=$2`,
+                [tenantId, receipt.server_id]
+              )).rows[0]
+              : receipt.response_json;
             results.push({
               clientUuid: mut.clientUuid,
               serverId: receipt.server_id,
-              status: 'REJECTED',
+              status: mut.entityType === 'handover' ? 'CONFLICT' : 'REJECTED',
               serverVersion: receipt.server_version,
+              conflictData: mut.entityType === 'handover' ? {
+                serverVersion: receipt.server_version,
+                clientVersion: mut.baseVersion,
+                serverPayload,
+                clientPayload: mut.payload
+              } : undefined,
               message: 'Integritätsverletzung: Mutation-ID wurde mit abweichendem Inhalt oder Vorgang wiederverwendet.'
             });
             continue;
@@ -605,35 +612,61 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         // 6. HANDOVER
         else if (mut.entityType === 'handover') {
           if (mut.action === 'CREATE') {
-            const insHandover = await client.query(
-              `INSERT INTO shift_handovers (tenant_id, site_id, relieving_guard_id, relieved_guard_id, handover_time, key_register_checked, open_incidents_count, remarks, acknowledged, client_mutation_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-               ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
-               RETURNING id`,
-              [
-                tenantId,
-                mut.payload.siteId,
-                mut.payload.relievingGuardId,
-                mut.payload.relievedGuardId || userId,
-                mut.payload.handoverTime || mut.clientTimestamp,
-                mut.payload.keyRegisterChecked ?? true,
-                mut.payload.openIncidentsCount || 0,
-                mut.payload.remarks || null,
-                mut.payload.acknowledged ?? true,
-                mut.clientUuid
-              ]
-            );
-
-            const hId = insHandover.rows.length > 0
-              ? insHandover.rows[0].id
-              : (await client.query('SELECT id FROM shift_handovers WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
-
-            itemResult = {
-              clientUuid: mut.clientUuid,
-              serverId: hId || 'unknown',
-              status: 'SYNCED',
-              serverVersion: 1
-            };
+            const legacy = mut.payload.outgoingEmployeeId
+              ? mut.payload
+              : {
+                siteId: mut.payload.siteId,
+                occurredAt: mut.payload.handoverTime || mut.clientTimestamp,
+                outgoingEmployeeId: mut.payload.relievedGuardId,
+                incomingEmployeeId: mut.payload.relievingGuardId,
+                generalText: mut.payload.remarks || '',
+                incidents: `Offene Vorkommnisse: ${mut.payload.openIncidentsCount || 0}`,
+                importantNotes: '',
+                safetyInformation: mut.payload.keyRegisterChecked === false
+                  ? 'Schlüsselregister wurde nicht bestätigt.'
+                  : 'Schlüsselregister wurde geprüft.'
+              };
+            try {
+              const input = handoverCreateSchema.parse({
+                ...legacy,
+                clientMutationId: mut.clientUuid,
+                capturedAt: mut.payload.capturedAt || mut.clientTimestamp
+              });
+              const created = await createHandover(client, tenantId, userId, input);
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: created.id,
+                status: 'SYNCED',
+                serverVersion: created.revisionVersion,
+                message: created.created ? undefined : 'Bereits vorhanden (idempotent bestätigt)'
+              };
+            } catch (error) {
+              if (error instanceof HandoverConflictError) {
+                itemResult = {
+                  clientUuid: mut.clientUuid,
+                  serverId: 'none',
+                  status: 'CONFLICT',
+                  serverVersion: error.serverVersion,
+                  conflictData: {
+                    serverVersion: error.serverVersion,
+                    clientVersion: mut.baseVersion,
+                    serverPayload: error.serverPayload,
+                    clientPayload: mut.payload
+                  },
+                  message: error.message
+                };
+              } else if (error instanceof z.ZodError || (error as any)?.statusCode >= 400 && (error as any)?.statusCode < 500) {
+                itemResult = {
+                  clientUuid: mut.clientUuid,
+                  serverId: 'none',
+                  status: 'REJECTED',
+                  serverVersion: mut.baseVersion,
+                  message: error instanceof z.ZodError ? 'Übergabedaten sind ungültig.' : (error as Error).message
+                };
+              } else {
+                throw error;
+              }
+            }
           } else {
             itemResult = {
               clientUuid: mut.clientUuid,
@@ -685,6 +718,19 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
       message: `${results.length} Synchronisationsoperation(en) verarbeitet`,
       data: results
     });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function pushHandoverMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const body = syncPushBatchSchema.parse(req.body);
+    if (body.mutations.some(mutation => mutation.entityType !== 'handover')) {
+      throw Object.assign(new Error('Dieser Endpunkt akzeptiert ausschließlich Übergabemutationen.'), { statusCode: 400 });
+    }
+    req.body = body;
+    return pushSyncMutations(req, res, next);
   } catch (error) {
     next(error);
   }

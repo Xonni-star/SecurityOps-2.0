@@ -21,6 +21,10 @@ Alarmmeldungen, Maßnahmen und Statusänderungen verwenden ebenfalls dieselbe Da
 
 Notfallpläne, Alarmarten und erlaubte Sites werden benutzerspezifisch zwischengespeichert; Kontaktinformationen werden vor dem Cache entfernt. Offline-Alarme sind lokal erfasst, nicht serverseitig alarmiert oder zugestellt. Vorhandene Dokumente können online als Maßnahme referenziert werden, aber Fotos/Dateien für einen Alarm offline aufzunehmen und später hochzuladen ist nicht implementiert.
 
+Übergaben verwenden denselben `outbox`-Store mit `entityType='handover'`, stabiler Client-ID, Mandant, Benutzer, Erfassungszeitpunkt und Payload. Der Store schreibt zuerst transaktionssicher in IndexedDB; danach überträgt der bestehende Sync-Manager die Mutationen an `POST /api/v1/handovers/sync`. `SYNCED` entfernt die Outbox-Mutation, `CONFLICT` und `FAILED` bleiben lokal erhalten. Eine Wiederverwendung einer Client-ID mit abweichendem Inhalt wird nicht als Erfolg behandelt. Lokale Einträge sind sichtbar als „ausstehend“, nie als serverbestätigt.
+
+Die Handover-Outbox ermöglicht Offline-Erfassung des Übergabeprotokolls und initialer Aufgaben. Bestätigungen, spätere Aufgabenänderungen und DMS-Verknüpfungen benötigen eine Online-Verbindung. Die Erfassung setzt eine aktive Sitzung und zuvor geladene Objekt-/Mitarbeiter-Stammdaten voraus; nach App-Neustart ohne Netzwerk können Sitzung und Stammdaten nicht wiederhergestellt werden. Eine verspätete Erfassung ändert keine bestätigten Serverprotokolle; Korrekturen werden als Historienereignis hinzugefügt.
+
 ---
 
 ## 3. Datenintegrität & Append-Only Modell

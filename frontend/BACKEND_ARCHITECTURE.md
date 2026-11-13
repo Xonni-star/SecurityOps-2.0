@@ -26,9 +26,15 @@ Migration `013_sop_instructions.sql` ergänzt tenantgebundene Dienstanweisungen,
 
 Die API erzwingt die Berechtigungen `sop:*` und den Ablauf Entwurf → Prüfung → Freigabe → Veröffentlichung. Ersteller und Einreicher der konkreten Version dürfen diese nicht prüfen oder freigeben; der Prüfer darf dieselbe Version nicht freigeben. Bestätigungen werden dem authentifizierten Konto und einer konkreten SOP-Version zugeordnet. Der SOP-Datensatz kann tenantgebunden auf ein vorhandenes DMS-Dokument verweisen; Dateien werden nicht dupliziert. Offline-Bestätigungen werden im `sopAcknowledgements`-Store der vorhandenen IndexedDB vorgemerkt und erst nach serverseitiger Bestätigung als abgeschlossen behandelt. Erinnerungen werden beim Abruf berechnet; es gibt keinen zeitgesteuerten Scheduler oder automatische Eskalationszustellung.
 
+## Übergabemanagement
+
+Migration `017_handover_management.sql` ergänzt tenantgebundene Übergaben, Teilnehmer, Bestätigungen, Aufgaben und DMS-Verknüpfungen. Die Version 017 lässt 015/016 für den offenen Alarm-PR #12 frei; die Übergabe-Branch basiert weiterhin ausschließlich auf `main`. Alle sieben neuen Tabellen erzwingen RLS, nutzen zusammengesetzte Tenant-FKs und erhalten nur die für den Anwendungsbetrieb erforderlichen Rechte. Bestätigungen, Teilnehmer, Dokumentverknüpfungen sowie Ereignis- und Aufgabenhistorien sind append-only. Ein bestätigter Übergabeinhalt kann nicht aktualisiert werden; eine Korrektur wird als separates Ereignis protokolliert.
+
+Die Übergabe-API verwendet `handovers:*`-RBAC und den Statusfluss `pending_handover_confirmation` → `pending_takeover_acknowledgement` → `completed`. Bestätigen darf nur das zugeordnete Mitarbeiterkonto. Bearbeitungen vor der Bestätigung sind versionsgeprüft; Aufgabenänderungen ebenso. Offene Aufgaben bleiben dem Ursprungsprotokoll und Objekt zugeordnet und werden bei Folgeübergaben am selben Objekt angezeigt. DMS-Dateien werden nicht kopiert, sondern über einen tenantgebundenen FK verknüpft. Synchronisierte Erfassungen laufen über die bestehende `sync_idempotency_receipts`-Tabelle und die IndexedDB-Outbox. Es gibt keine konfigurierte E-Mail-/Push-Zustellung; der Status wird in der Oberfläche angezeigt.
+
 ## REST-API
 
-Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md) und [SOP_API.md](./SOP_API.md).
+Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md), [SOP_API.md](./SOP_API.md) und [HANDOVERS_API.md](./HANDOVERS_API.md).
 
 ## Alarm- und Notfallmanagement
 

@@ -1,0 +1,109 @@
+# Übergabemanagement – API und Betriebsverhalten
+
+Alle Routen sind unter `/api/v1` verfügbar, verwenden die bestehende Session-/CSRF-Authentifizierung und übernehmen den Mandanten ausschließlich aus der authentifizierten Sitzung. JSON-Antworten verwenden `{ success, data, message? }`. Schreiboperationen werden zusätzlich durch serverseitiges `handovers:*`-RBAC und PostgreSQL `FORCE ROW LEVEL SECURITY` geschützt.
+
+## Statusfluss
+
+| Status | Bedeutung |
+|---|---|
+| `pending_handover_confirmation` | Übergabe erfasst; Bestätigung der abgebenden Person steht aus |
+| `pending_takeover_acknowledgement` | Übergabe bestätigt; Übernahmebestätigung der ablösenden Person steht aus |
+| `completed` | Beide getrennten Bestätigungen sind serverseitig gespeichert |
+
+Die Bestätigung ist an `employees.account_user_id` gebunden; E-Mail-Adressen werden nicht als Identitätsnachweis verwendet. Der Link wird explizit und mandantengeprüft über `PATCH /api/v1/employees/:id/account` hergestellt. Nur die Rolle `Personalverwaltung` erhält `employees:account:link`; ein allgemeines Recht zum Bearbeiten von Mitarbeitern reicht nicht. Benutzer mit `handovers:confirm` dürfen ihr eigenes Konto nicht neu einem Mitarbeiter zuordnen. Bestehende Mitarbeiter werden nicht anhand von E-Mail-Adressen automatisch zugeordnet. Nach der ersten Bestätigung sind die Protokollinhalte gesperrt. Rückfragen und Korrekturen werden als zusätzliche Historienereignisse gespeichert.
+
+## Routen
+
+| Methode und Pfad | Recht | Zweck |
+|---|---|---|
+| `GET /handovers` | `handovers:read` | Gefilterte, sortierte und paginierte Liste |
+| `GET /handovers/dashboard` | `handovers:read` | Kennzahlen für heutige/ausstehende Übergaben und Aufgaben |
+| `GET /handovers/:id` | `handovers:read` | Protokoll und Teilnehmer |
+| `POST /handovers` | `handovers:create` | Idempotente Online-Erfassung |
+| `PATCH /handovers/:id` | `handovers:update` | Optimistische Änderung eines noch unbestätigten Protokolls |
+| `POST /handovers/:id/confirm` | `handovers:confirm` | Bestätigung der Übergabe durch die abgebende Person mit `expectedRevisionVersion` |
+| `POST /handovers/:id/acknowledge` | `handovers:confirm` | Bestätigung der Übernahme durch die ablösende Person mit `expectedRevisionVersion` |
+| `PATCH /employees/:id/account` | `employees:account:link` | Explizite Zuordnung oder Aufhebung des Mitarbeiter-Benutzerkonto-Links (Personalverwaltung) |
+| `POST /handovers/:id/questions` | `handovers:confirm` | Rückfrage als Historienereignis dokumentieren |
+| `POST /handovers/:id/corrections` | `handovers:manage` | Korrektur als Historienereignis dokumentieren |
+| `GET /handovers/:id/events` | `handovers:read` | Chronologische Historie, `limit`/`offset` |
+| `GET /handovers/:id/tasks` | `handovers:read` | Aufgaben des Protokolls und am Objekt weitergeführte offene Aufgaben |
+| `POST /handovers/:id/tasks` | `handovers:tasks` | Aufgabe anlegen |
+| `PATCH /handover-tasks/:id` | `handovers:tasks` | Aufgabe mit `expectedVersion` ändern |
+| `GET /handovers/:id/documents` | `handovers:read`, `documents:read` | Verknüpfte DMS-Dokumente lesen |
+| `POST /handovers/:id/documents` | `handovers:manage`, `documents:read` | Vorhandenes DMS-Dokument ohne Dateiduplikat verknüpfen |
+| `POST /handovers/sync` | `handovers:create` (legacy `handover:create` ebenfalls akzeptiert) | Idempotente Übergabe-Outbox-Mutationen synchronisieren |
+
+Listenparameter:
+
+- `siteId`, `employeeId`, `status`, `from`, `to`, `search`
+- `openTasks=true|false`, `pendingConfirmation=true|false`
+- `sort=occurred_at_desc|occurred_at_asc`
+- `limit=1..100` (Standard 50), `offset` (Standard 0)
+
+Die Suche berücksichtigt Objekt, Bereich, Protokolltexte und Teilnehmer. Datumsgrenzen sind inklusive (`to` umfasst den gesamten Kalendertag). Kennzahlen für überfällige Aufgaben werden serverseitig anhand `due_at < CURRENT_TIMESTAMP` berechnet.
+
+Bestätigungsrouten erwarten `{ "clientMutationId": "stable-id", "expectedRevisionVersion": 3, "capturedAt": "2026-11-13T06:01:00.000Z" }`. `expectedRevisionVersion` muss der in der UI angezeigten Revision entsprechen; Prüfung und Replay erfolgen unter Sperre der Übergabe.
+
+Die Kontozuordnung akzeptiert `{ "userId": "UUID oder null", "revisionVersion": 3 }`. Das Konto muss bereits mindestens eine Rolle im selben Mandanten besitzen und darf dort nicht einem anderen Mitarbeiter zugeordnet sein. Der Endpunkt verlangt das dedizierte Recht `employees:account:link`, das nur an `Personalverwaltung` vergeben wird; `employees:update` reicht nicht. Eine Person mit `handovers:confirm` kann das eigene Konto nicht neu einem Mitarbeiter zuordnen. Die Zuordnung erhöht die Mitarbeiterversion und erzeugt einen Audit-Eintrag. Ohne explizite Zuordnung ist eine Teilnahmebestätigung nicht zulässig.
+
+## Erfassung
+
+`POST /handovers` akzeptiert mindestens:
+
+```json
+{
+  "siteId": "UUID",
+  "area": "Pforte",
+  "shiftId": "UUID oder null",
+  "occurredAt": "2026-11-13T06:00:00.000Z",
+  "outgoingEmployeeId": "UUID",
+  "incomingEmployeeId": "UUID",
+  "generalText": "Übergabetext",
+  "incidents": "Besondere Vorkommnisse",
+  "importantNotes": "Wichtige Hinweise",
+  "safetyInformation": "Sicherheitsinformationen",
+  "capturedAt": "2026-11-13T06:01:00.000Z",
+  "clientMutationId": "uuid-or-stable-client-id",
+  "tasks": []
+}
+```
+
+`tasks` kann bei der Erfassung bis zu 30 initiale Aufgaben enthalten. Jede Aufgabe hat `title`, `description`, `assignedEmployeeId`, `priority` (`low`, `normal`, `high`, `urgent`), optional `dueAt` und optional eine eigene Client-ID. Wiederholungen mit gleichem Tenant, gleicher Client-ID und gleichem Payload liefern denselben Datensatz zurück; eine abweichende Wiederverwendung liefert `409`. Bei Folgeübergaben werden nur offene Aufgaben aus derselben oder einer chronologisch früheren Übergabe desselben Objekts weitergeführt; Aufgaben späterer Übergaben werden nicht angezeigt.
+
+Eine spätere Entwurfsänderung benötigt `expectedVersion`. Aufgabenänderungen benötigen ebenfalls `expectedVersion`; Statuswerte sind `open`, `in_progress`, `done` und `cancelled`. Erledigte/abgebrochene Aufgaben erhalten ein serverseitiges `completed_at`. Nicht abgeschlossene Aufgaben bleiben beim Ursprungsprotokoll und werden für Folgeübergaben desselben Objekts als weitergeführt zurückgegeben.
+
+## Offline-Synchronisierung
+
+Die Oberfläche speichert eine neue Übergabe zuerst in `SecurityOps2_OfflineVault.outbox` und sendet sie danach an:
+
+```json
+{
+  "deviceId": "device-id",
+  "mutations": [{
+    "clientUuid": "same-id-as-the-outbox-entry",
+    "entityType": "handover",
+    "action": "CREATE",
+    "clientTimestamp": "2026-11-13T06:01:00.000Z",
+    "baseVersion": 1,
+    "payload": { "siteId": "UUID", "outgoingEmployeeId": "UUID", "incomingEmployeeId": "UUID" }
+  }]
+}
+```
+
+Die tatsächliche Payload muss dem Erfassungsschema entsprechen. Der Server speichert die Antwort in `sync_idempotency_receipts`; Advisory Locks und eindeutige Client-ID-Constraints schützen parallele Wiederholungen. `SYNCED` wird erst nach Commit quittiert. Bei abweichendem Inhalt zu einer bereits genutzten Client-ID antwortet der Server mit `CONFLICT` samt Versions-/Payloadvergleich. `REJECTED` und `CONFLICT` überschreiben keine vorhandene Übergabe. Die UI hält Konflikte und Fehler lokal sichtbar; eine unveränderliche Übergabe wird nicht durch „USE_LOCAL“ überschrieben. Eine Korrektur wird separat als Ereignis erfasst.
+
+Die Synchronisierung entfernt eine Outbox-Mutation erst nach Serverquittung. Statusanzeige: lokal gespeichert / Synchronisierung ausstehend / synchronisiert / Konflikt / fehlgeschlagen. Bestätigungen senden die angezeigte `expectedRevisionVersion`; der Server prüft sie unter Sperre der Übergabe vor einer neuen Bestätigung und vor einem idempotenten Replay. Wiederholungen sind nur dann idempotent erfolgreich, wenn Konto, Aktion, Übergabe, erwartete Revision, Mutations-ID und Payload-Hash exakt übereinstimmen. Eine veraltete UI-Revision oder eine andere Mutations-ID für eine bereits bestätigte Aktion wird mit `409` abgewiesen. Statusbestätigungen, spätere Aufgabenänderungen und DMS-Verknüpfungen erfordern eine Online-Verbindung. Externe E-Mail- oder Push-Benachrichtigungen sind nicht konfiguriert; die Anwendung behauptet keine Zustellung.
+
+## Daten- und Sicherheitsgrenzen
+
+Migration `017_handover_management.sql` führt sieben tenantgebundene Tabellen mit `ENABLE` und `FORCE ROW LEVEL SECURITY`, zusammengesetzten Tenant-FKs und Least-Privilege-Rechten ein. Protokoll, Teilnehmer, Bestätigungen, Aufgabenänderungen und DMS-Verweise werden historisiert. Bestätigungs-, Teilnehmer-, Ereignis- und Dokumentverknüpfungen sind append-only. Es werden nur vorhandene, nicht archivierte DMS-Dokumente desselben Mandanten referenziert; Datei-Uploads oder -Kopien erfolgen nicht durch das Handover-Modul.
+
+## Einschränkungen
+
+- Keine externe E-Mail-/Push-Zustellung.
+- Die Offline-Outbox unterstützt neue Übergaben samt initialen Aufgaben. Nachträgliche Bestätigungen, Aufgabenänderungen und DMS-Verknüpfungen sind online-only.
+- Offline-Erfassung setzt eine aktive angemeldete Sitzung und zuvor geladene Objekt-/Mitarbeiter-Stammdaten voraus. Eine App-Neustart-Wiederherstellung von Sitzung und Stammdaten ohne Netzwerk wird von der bestehenden Auth-/Datenladearchitektur nicht unterstützt.
+- DMS-Dateien und Metadaten werden nicht offline repliziert.
+- Status- und Historienansichten verwenden begrenzte Seitengrößen; Aufgaben werden aktuell als Objektliste ohne eigene Pagination geladen.
+- Dies ist eine Repository-Implementierung, keine produktive Bereitstellung oder Betriebsfreigabe.

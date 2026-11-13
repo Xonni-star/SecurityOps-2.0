@@ -14,6 +14,7 @@ import * as resourceController from './controllers/resourceController';
 import * as employeeController from './controllers/employeeController';
 import * as documentController from './controllers/documentController';
 import * as sopController from './controllers/sopController';
+import * as handoverController from './controllers/handoverController';
 import * as alarmWorkflowController from './controllers/alarmWorkflowController';
 
 export const app = express();
@@ -113,6 +114,7 @@ app.delete('/api/v1/tasks/:id', authenticateJwt, requirePermission('tasks:manage
 app.get('/api/v1/employees', authenticateJwt, requirePermission('employees:read'), employeeController.listEmployees);
 app.post('/api/v1/employees', authenticateJwt, requirePermission('employees:create'), employeeController.createEmployee);
 app.patch('/api/v1/employees/:id', authenticateJwt, requirePermission('employees:update'), employeeController.updateEmployee);
+app.patch('/api/v1/employees/:id/account', authenticateJwt, requirePermission('employees:account:link'), employeeController.linkEmployeeAccount);
 app.post('/api/v1/employees/:id/archive', authenticateJwt, requirePermission('employees:archive'), employeeController.archiveEmployee);
 app.post('/api/v1/employees/:id/restore', authenticateJwt, requirePermission('employees:restore'), employeeController.restoreEmployee);
 app.post('/api/v1/employees/:id/qualifications', authenticateJwt, requirePermission('qualifications:manage'), employeeController.createQualification);
@@ -165,6 +167,24 @@ app.post('/api/v1/sops/:id/withdraw', authenticateJwt, requirePermission('sop:pu
 app.post('/api/v1/sops/:id/archive', authenticateJwt, requirePermission('sop:archive'), sopController.archiveSop);
 app.get('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:read'), sopController.listAssignments);
 app.post('/api/v1/sops/:id/assignments', authenticateJwt, requirePermission('sop:assign'), sopController.assignSop);
+
+// Handovers and carried-forward tasks
+app.get('/api/v1/handovers/dashboard', authenticateJwt, requirePermission('handovers:read'), handoverController.getHandoverDashboard);
+app.get('/api/v1/handovers', authenticateJwt, requirePermission('handovers:read'), handoverController.listHandovers);
+app.post('/api/v1/handovers', authenticateJwt, requirePermission('handovers:create'), handoverController.createHandoverEndpoint);
+app.post('/api/v1/handovers/sync', authenticateJwt, syncController.pushHandoverMutations);
+app.get('/api/v1/handovers/:id', authenticateJwt, requirePermission('handovers:read'), handoverController.getHandover);
+app.patch('/api/v1/handovers/:id', authenticateJwt, requirePermission('handovers:update'), handoverController.updateHandover);
+app.post('/api/v1/handovers/:id/confirm', authenticateJwt, requirePermission('handovers:confirm'), handoverController.confirmHandover);
+app.post('/api/v1/handovers/:id/acknowledge', authenticateJwt, requirePermission('handovers:confirm'), handoverController.acknowledgeHandover);
+app.post('/api/v1/handovers/:id/questions', authenticateJwt, requirePermission('handovers:confirm'), handoverController.addHandoverQuestion);
+app.post('/api/v1/handovers/:id/corrections', authenticateJwt, requirePermission('handovers:manage'), handoverController.addHandoverCorrection);
+app.get('/api/v1/handovers/:id/events', authenticateJwt, requirePermission('handovers:read'), handoverController.listHandoverEvents);
+app.get('/api/v1/handovers/:id/tasks', authenticateJwt, requirePermission('handovers:read'), handoverController.listHandoverTasks);
+app.post('/api/v1/handovers/:id/tasks', authenticateJwt, requirePermission('handovers:tasks'), handoverController.createHandoverTaskEndpoint);
+app.patch('/api/v1/handover-tasks/:id', authenticateJwt, requirePermission('handovers:tasks'), handoverController.updateHandoverTaskEndpoint);
+app.get('/api/v1/handovers/:id/documents', authenticateJwt, requirePermission('handovers:read'), requirePermission('documents:read'), handoverController.listHandoverDocuments);
+app.post('/api/v1/handovers/:id/documents', authenticateJwt, requirePermission('handovers:manage'), requirePermission('documents:read'), handoverController.linkHandoverDocument);
 
 // Alarm- und Notfallmanagement
 app.get('/api/v1/alarm-types', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmTypes);
