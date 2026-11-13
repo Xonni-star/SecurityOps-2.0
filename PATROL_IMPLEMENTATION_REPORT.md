@@ -9,9 +9,12 @@
 - Round start, scans, completion, deviation records, immutable events, server-side RBAC, and dashboard/history filters.
 - IndexedDB outbox for offline start/scan/completion/exception mutations; cached route/checkpoint/round state; reload/restart recovery; dependency-ordered replay; reconnect-triggered sync; idempotency; and preserved conflict states.
 - A 30-second backend schedule worker materializes occurrences with a unique tenant/route/version/time key. Conditional state updates and `FOR UPDATE ... SKIP LOCKED` make missed/abandoned processing safe across worker instances. System deviations and append-only occurrence events are recorded idempotently and appear in the Patrol views.
+- Non-manager scan/exception history is restricted server-side to the caller's own rounds/records or currently assigned sites; filters only narrow that base scope. Manager, audit, and analytics permissions retain their tenant-wide scope.
+- Start/scan/completion capture times are limited to a 24-hour offline age and five-minute future drift. Scans are checked against accepted round start, client-captured and server-received times remain separate, and the two-minute duplicate rule uses trusted `server_received_at`. The schedule worker waits 24 hours plus five minutes beyond a deadline before missed/abandoned terminalization, allowing timely offline mutations to reconcile.
+- `GET /patrol/events` includes immutable schedule-occurrence events under its existing permission, tenant, and site filters. Planned-occurrence status has its own UI control and is sent only to that endpoint.
 - Patrol sync conflicts can be resolved by accepting the server state or, with exception permission, recording a new token-free immutable exception containing the useful local note. Conflict receipts are separate and idempotent; unresolved authorization/data failures keep the outbox entry.
 - Existing, active, same-site DMS documents can be linked online to a round. This uses the private DMS blob/document workflow; it does not capture photos or buffer binary files offline.
-- Optional scan GPS, completion remarks, scan-attempt audit without raw tokens, and tests for group authorization, schedule de-duplication, missed/abandoned rounds, attachment idempotency, and Patrol conflict resolution.
+- Optional scan GPS, completion remarks, scan-attempt audit without raw tokens, and tests for group authorization, schedule de-duplication/grace reconciliation, missed/abandoned rounds, event-history visibility, scan/exception read scoping, timestamp limits, manipulated duplicate times, occurrence status filtering, attachment idempotency, and Patrol conflict resolution.
 - Migrations 026–029 add schedule occurrences/events, employee groups and route snapshots, DMS attachment links, and the DMS relationship delete permission required by its existing setter. Tenant-owned tables use RLS and FORCE RLS.
 
 ## Acceptance status and limitations
@@ -36,11 +39,12 @@ Still not implemented or verified: direct photo capture and offline binary attac
 Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) remains open against `main`. The verified project base is `5608b9010096ebac06a000ed2a2870dadd66ab60`; implementation commit `51d836443d25c51284782a6be91b06ec1fd8559d` is pushed. No merge was performed.
 
 - Backend TypeScript build: passed.
-- Full Backend Jest: 20 suites, 219 tests passed.
+- Full Backend Jest: 20 suites, 219 tests passed. The Patrol integration suite passed with the additional security, grace-window, event-history, and occurrence-filter regressions. Jest still reports an open `TCPWRAP` handle from the existing migration-pool test setup after successful completion.
 - PostgreSQL migration/RLS suite: 65 tests passed.
 - Patrol API integration: passed, including parallel schedule materialization/processing, missed and abandoned handling, employee-group authorization, DMS attachment linking, and both idempotent conflict-resolution choices.
 - Frontend Vitest: 11 files, 56 tests passed, including IndexedDB reopen/restart recovery and automatic sync on reconnect.
 - Frontend production build: passed. Existing Vite `__dirname` and large-chunk warnings remain.
+- Focused frontend TypeScript check of `store.ts` and `components/PatrolModule.tsx`: passed with `tsc --noEmit`; React declaration dev-dependencies were added to the frontend package to make the check possible.
 - Production Compose configuration validation: passed.
 - Backend and frontend/proxy production Docker image builds: passed. These are build checks only; no deployment or runtime readiness was established.
 - `git diff --check`: passed.

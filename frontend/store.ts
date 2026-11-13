@@ -4,6 +4,8 @@ import {
   Client,
   Site,
   Employee,
+  Qualification,
+  AbsenceRecord,
   Shift,
   GuardBookEntry,
   SOPDocument,
@@ -134,18 +136,19 @@ function createAlarmMutationId(): string {
 function mapLocalAlarmIncident(
   mutation: StoredAlarmMutation,
   plans: EmergencyPlan[],
-  sites: AlarmSite[],
+  sites: Array<{ id: string; name: string; customerId?: string; clientId?: string }>,
   types: AlarmType[]
 ): AlarmIncident | null {
   if (mutation.type !== 'incident_report') return null;
   const payload = mutation.payload;
   const siteId = String(payload.siteId ?? '');
+  const site = sites.find(item => item.id === siteId);
   const type = types.find(item => item.id === payload.alarmTypeId);
   const plan = plans.find(item => item.id === payload.emergencyPlanId);
   return {
     id: `local:${mutation.clientMutationId}`,
     tenantId: mutation.tenantId,
-    customerId: sites.find(item => item.id === siteId)?.customerId,
+    customerId: site?.customerId ?? site?.clientId,
     siteId,
     siteName: sites.find(item => item.id === siteId)?.name ?? 'Objekt (offline erfasst)',
     emergencyPlanId: typeof payload.emergencyPlanId === 'string' ? payload.emergencyPlanId : null,
@@ -597,7 +600,7 @@ interface SecurityOpsStore {
   syncQueue: OfflineQueueItem[];
   enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'> & { id?: string }) => Promise<void>;
   triggerManualSync: () => Promise<{ success: number; failed: number; conflicts: number }>;
-  resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER') => Promise<void>;
+  resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION') => Promise<void>;
   clearCompletedSyncs: () => void;
 
   // Plugins

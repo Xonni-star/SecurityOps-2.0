@@ -23,6 +23,13 @@ let routeId = '';
 let roundId = '';
 let recoveryRoundId = '';
 let abandonedRoundId = '';
+let scopeSiteId = '';
+let scopeCheckpointId = '';
+let scopeEmployeeId = '';
+let scopeUserId = '';
+let scopeRoundId = '';
+let graceCheckpointId = '';
+let graceRoundId = '';
 
 beforeAll(async () => {
   const orphanedOccurrences = await migrationPool.query(
@@ -93,10 +100,14 @@ beforeAll(async () => {
 });
 
 async function login(): Promise<string> {
+  return loginAs(userEmail, SEED_PASSWORD);
+}
+
+async function loginAs(email: string, password: string): Promise<string> {
   const response = await request(app)
     .post('/api/v1/auth/login')
     .set('Origin', 'http://localhost:3000')
-    .send({ email: userEmail, password: SEED_PASSWORD });
+    .send({ email, password });
   expect(response.status).toBe(200);
   const cookies = response.headers['set-cookie'];
   const sessionCookie = (Array.isArray(cookies) ? cookies : [cookies || ''])
@@ -114,27 +125,32 @@ afterAll(async () => {
   const db = await migrationPool.connect();
   try {
     await db.query('SET session_replication_role = replica');
-    const scanIds = checkpointId
-      ? (await db.query('SELECT id FROM patrol_scans WHERE tenant_id=$1 AND checkpoint_uuid=$2', [TENANT_ID, checkpointId]))
+    const checkpointIds = [checkpointId, scopeCheckpointId, graceCheckpointId].filter(Boolean);
+    const scanIds = checkpointIds.length
+      ? (await db.query('SELECT id FROM patrol_scans WHERE tenant_id=$1 AND checkpoint_uuid=ANY($2::uuid[])', [TENANT_ID, checkpointIds]))
         .rows.map(row => row.id)
       : [];
-    const exceptionIds = checkpointId
-      ? (await db.query('SELECT id FROM patrol_exceptions WHERE tenant_id=$1 AND checkpoint_id=$2', [TENANT_ID, checkpointId]))
+    const exceptionIds = checkpointIds.length
+      ? (await db.query('SELECT id FROM patrol_exceptions WHERE tenant_id=$1 AND checkpoint_id=ANY($2::uuid[])', [TENANT_ID, checkpointIds]))
         .rows.map(row => row.id)
       : [];
     const versionIds = routeId
       ? (await db.query('SELECT id FROM patrol_route_versions WHERE tenant_id=$1 AND route_id=$2', [TENANT_ID, routeId]))
         .rows.map(row => row.id)
       : [];
-    const roundIds = [roundId, recoveryRoundId, abandonedRoundId].filter(Boolean);
-    const entityIds = [checkpointId, routeId, ...roundIds, ...scanIds, ...exceptionIds, ...versionIds].filter(Boolean);
+    const roundIds = [roundId, recoveryRoundId, abandonedRoundId, scopeRoundId, graceRoundId].filter(Boolean);
+    const entityIds = [checkpointId, scopeCheckpointId, graceCheckpointId, routeId, ...roundIds, ...scanIds, ...exceptionIds, ...versionIds].filter(Boolean);
     if (entityIds.length) {
       await db.query('DELETE FROM patrol_events WHERE tenant_id=$1 AND entity_id=ANY($2::uuid[])', [TENANT_ID, entityIds]);
     }
-    if (siteId) {
+    const cleanupSiteIds = [siteId, scopeSiteId].filter(Boolean);
+    if (cleanupSiteIds.length) {
+      await db.query('DELETE FROM patrol_events WHERE tenant_id=$1 AND site_id=ANY($2::uuid[])', [TENANT_ID, cleanupSiteIds]);
+    }
+    for (const cleanupSiteId of [siteId, scopeSiteId].filter(Boolean)) {
       const occurrenceIds = (await db.query(
         'SELECT id FROM patrol_schedule_occurrences WHERE tenant_id=$1 AND site_id=$2',
-        [TENANT_ID, siteId]
+        [TENANT_ID, cleanupSiteId]
       )).rows.map(row => row.id);
       if (occurrenceIds.length) {
         await db.query(
@@ -146,11 +162,11 @@ afterAll(async () => {
           [TENANT_ID, occurrenceIds]
         );
       }
-      await db.query('DELETE FROM patrol_exceptions WHERE tenant_id=$1 AND site_id=$2', [TENANT_ID, siteId]);
+      await db.query('DELETE FROM patrol_exceptions WHERE tenant_id=$1 AND site_id=$2', [TENANT_ID, cleanupSiteId]);
     }
-    if (checkpointId) {
-      await db.query('DELETE FROM patrol_exceptions WHERE tenant_id=$1 AND checkpoint_id=$2', [TENANT_ID, checkpointId]);
-      await db.query('DELETE FROM patrol_scans WHERE tenant_id=$1 AND checkpoint_uuid=$2', [TENANT_ID, checkpointId]);
+    if (checkpointIds.length) {
+      await db.query('DELETE FROM patrol_exceptions WHERE tenant_id=$1 AND checkpoint_id=ANY($2::uuid[])', [TENANT_ID, checkpointIds]);
+      await db.query('DELETE FROM patrol_scans WHERE tenant_id=$1 AND checkpoint_uuid=ANY($2::uuid[])', [TENANT_ID, checkpointIds]);
     }
     if (roundIds.length) await db.query('DELETE FROM patrol_attachments WHERE tenant_id=$1 AND round_id=ANY($2::uuid[])', [TENANT_ID, roundIds]);
     if (roundIds.length) await db.query('DELETE FROM patrol_rounds WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [TENANT_ID, roundIds]);
@@ -176,10 +192,18 @@ afterAll(async () => {
       await db.query('DELETE FROM patrol_employee_groups WHERE tenant_id=$1 AND id=$2', [TENANT_ID, employeeGroupId]);
     }
     if (siteId) await db.query('DELETE FROM patrol_scan_attempts WHERE tenant_id=$1 AND site_id=$2', [TENANT_ID, siteId]);
-    if (checkpointId) await db.query('DELETE FROM patrol_checkpoints WHERE tenant_id=$1 AND id=$2', [TENANT_ID, checkpointId]);
+    if (checkpointIds.length) await db.query('DELETE FROM patrol_checkpoints WHERE tenant_id=$1 AND id=ANY($2::uuid[])', [TENANT_ID, checkpointIds]);
+    if (scopeEmployeeId) {
+      await db.query('DELETE FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2', [TENANT_ID, scopeEmployeeId]);
+      await db.query('DELETE FROM employees WHERE tenant_id=$1 AND id=$2', [TENANT_ID, scopeEmployeeId]);
+    }
     if (employeeId) {
       await db.query('DELETE FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2', [TENANT_ID, employeeId]);
       await db.query('DELETE FROM employees WHERE tenant_id=$1 AND id=$2', [TENANT_ID, employeeId]);
+    }
+    if (scopeSiteId) {
+      await db.query('DELETE FROM employee_site_assignments WHERE tenant_id=$1 AND site_id=$2', [TENANT_ID, scopeSiteId]);
+      await db.query('DELETE FROM sites WHERE tenant_id=$1 AND id=$2', [TENANT_ID, scopeSiteId]);
     }
     if (siteId) await db.query('DELETE FROM sites WHERE tenant_id=$1 AND id=$2', [TENANT_ID, siteId]);
     if (clientId) await db.query('DELETE FROM clients WHERE tenant_id=$1 AND id=$2', [TENANT_ID, clientId]);
@@ -188,6 +212,11 @@ afterAll(async () => {
       await db.query('DELETE FROM user_roles WHERE user_id=$1', [userId]);
       await db.query('DELETE FROM audit_logs WHERE tenant_id=$1 AND user_email=$2', [TENANT_ID, userEmail]);
       await db.query('DELETE FROM users WHERE id=$1', [userId]);
+    }
+    if (scopeUserId) {
+      await db.query('DELETE FROM user_sessions WHERE user_id=$1', [scopeUserId]);
+      await db.query('DELETE FROM user_roles WHERE user_id=$1', [scopeUserId]);
+      await db.query('DELETE FROM users WHERE id=$1', [scopeUserId]);
     }
   } finally {
     await db.query('SET session_replication_role = origin');
@@ -466,10 +495,14 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
     expect.objectContaining({ id: validScan.body.data[0].serverId, guard_id: employeeId })
   ]));
   const storedScan = await migrationPool.query(
-    'SELECT latitude,longitude FROM patrol_scans WHERE tenant_id=$1 AND id=$2',
+    `SELECT latitude,longitude,scanned_at,client_captured_at,server_received_at
+       FROM patrol_scans WHERE tenant_id=$1 AND id=$2`,
     [TENANT_ID, validScan.body.data[0].serverId]
   );
   expect(storedScan.rows[0]).toMatchObject({ latitude: '52.520000', longitude: '13.405000' });
+  expect(new Date(storedScan.rows[0].client_captured_at).toISOString()).toBe(scanCapturedAt);
+  expect(new Date(storedScan.rows[0].scanned_at).toISOString()).toBe(scanCapturedAt);
+  expect(storedScan.rows[0].server_received_at).toEqual(expect.any(Date));
   const lateScanException = await migrationPool.query(
     `SELECT category,description FROM patrol_exceptions
       WHERE tenant_id=$1 AND round_id=$2 AND checkpoint_id=$3 AND category='late_checkpoint'`,
@@ -481,7 +514,7 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
   expect(repeatedScan.body.data[0].serverId).toBe(validScan.body.data[0].serverId);
 
   const duplicateScanMutationId = mutationId();
-  const duplicateScan = await pushScan(duplicateScanMutationId, token, 1);
+  const duplicateScan = await pushScan(duplicateScanMutationId, token, 1, roundId, { scannedAt: capturedAt });
   expect(duplicateScan.body.data[0].status).toBe('CONFLICT');
   const duplicateAudit = await migrationPool.query(
     'SELECT outcome,reason_code FROM patrol_scan_attempts WHERE tenant_id=$1 AND client_mutation_id=$2',
@@ -561,6 +594,178 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
     .set(authorizedHeaders());
   expect(attemptDashboard.body.data.scanAttempts).toMatchObject({ total: 4, rejected: 2, duplicate: 2 });
 
+  const staleScan = await pushScan(mutationId(), token, 1, roundId, {
+    scannedAt: new Date(Date.now() - 25 * 60 * 60_000).toISOString()
+  });
+  expect(staleScan.body.data[0].status).toBe('REJECTED');
+  expect(staleScan.body.data[0].message).toContain('zulässigen Offline-');
+  const futureScan = await pushScan(mutationId(), token, 1, roundId, {
+    scannedAt: new Date(Date.now() + 6 * 60_000).toISOString()
+  });
+  expect(futureScan.body.data[0].status).toBe('REJECTED');
+  const outOfRoundScan = await pushScan(mutationId(), token, 1, roundId, {
+    scannedAt: new Date(Date.parse(capturedAt) - 6 * 60_000).toISOString()
+  });
+  expect(outOfRoundScan.body.data[0].status).toBe('REJECTED');
+
+  const scopeSite = await migrationPool.query(
+    `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+     VALUES ($1,$2,$3,'Patrol private scope site','Private test address') RETURNING id`,
+    [TENANT_ID, clientId, `PATROL-SCOPE-${suffix}`]
+  );
+  scopeSiteId = scopeSite.rows[0].id;
+  await migrationPool.query(
+    'INSERT INTO employee_site_assignments (tenant_id,employee_id,site_id) VALUES ($1,$2,$3)',
+    [TENANT_ID, employeeId, scopeSiteId]
+  );
+  const guardEmail = `patrol-guard-${suffix}@example.test`;
+  const guardPasswordHash = await argon2.hash(SEED_PASSWORD);
+  const guardUser = await migrationPool.query(
+    `INSERT INTO users (email,password_hash,first_name,last_name,phone)
+     VALUES ($1,$2,'Patrol','Guard Scope','+49 30 002') RETURNING id`,
+    [guardEmail, guardPasswordHash]
+  );
+  scopeUserId = guardUser.rows[0].id;
+  const guardRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter'");
+  if (!guardRole.rows.length) throw new Error('Patrol guard integration role is missing.');
+  await migrationPool.query(
+    'INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)',
+    [scopeUserId, guardRole.rows[0].id, TENANT_ID]
+  );
+  const guardEmployee = await migrationPool.query(
+    `INSERT INTO employees
+       (tenant_id,personnel_number,first_name,last_name,email,phone,role,status,date_of_joining,account_user_id)
+     VALUES ($1,$2,'Patrol','Guard Scope',$3,'+49 30 002','Wachdienstmitarbeiter','Aktiv',CURRENT_DATE,$4)
+     RETURNING id`,
+    [TENANT_ID, `PATROL-GUARD-${suffix}`, guardEmail, scopeUserId]
+  );
+  scopeEmployeeId = guardEmployee.rows[0].id;
+  await migrationPool.query(
+    'INSERT INTO employee_site_assignments (tenant_id,employee_id,site_id) VALUES ($1,$2,$3)',
+    [TENANT_ID, scopeEmployeeId, siteId]
+  );
+  const scopeCheckpoint = await request(app)
+    .post('/api/v1/patrol/checkpoints')
+    .set(authorizedHeaders())
+    .send({ siteId: scopeSiteId, code: `SC-${suffix}`, name: 'Private scope checkpoint' });
+  expect(scopeCheckpoint.status).toBe(201);
+  scopeCheckpointId = scopeCheckpoint.body.data.id;
+  const privateToken = scopeCheckpoint.body.data.scanPayload.split(':').at(-1) as string;
+  const guardCredential = await loginAs(guardEmail, SEED_PASSWORD);
+  const guardHeaders = authHeaders(guardCredential);
+  const guardStartedAt = new Date(Date.now() - 60_000).toISOString();
+  const guardRound = await request(app)
+    .post('/api/v1/patrol/rounds')
+    .set(guardHeaders)
+    .send({
+      siteId,
+      startedAt: guardStartedAt,
+      clientMutationId: mutationId()
+    });
+  expect(guardRound.status).toBe(201);
+  scopeRoundId = guardRound.body.data.id;
+  const guardScanMutationId = mutationId();
+  const guardScanAt = new Date().toISOString();
+  const guardScan = await request(app)
+    .post('/api/v1/sync/push')
+    .set(guardHeaders)
+    .send({
+      deviceId: `patrol-guard-${suffix}`,
+      mutations: [{
+        clientUuid: guardScanMutationId,
+        entityType: 'patrol',
+        action: 'CREATE',
+        clientTimestamp: guardScanAt,
+        baseVersion: 1,
+        payload: {
+          siteId,
+          checkpointId,
+          roundId: scopeRoundId,
+          method: 'QR_CODE',
+          checkpointToken: token,
+          checkpointTokenVersion: 1,
+          scannedAt: guardScanAt
+        }
+      }]
+    });
+  expect(guardScan.body.data[0].status).toBe('SYNCED');
+  const guardException = await request(app)
+    .post('/api/v1/patrol/exceptions')
+    .set(guardHeaders)
+    .send({
+      siteId,
+      roundId: scopeRoundId,
+      category: 'hazard',
+      description: 'Guard-owned scoped exception',
+      clientMutationId: mutationId(),
+      capturedAt: guardScanAt
+    });
+  expect(guardException.status).toBe(201);
+
+  const privateScan = await pushMutation(mutationId(), 'CREATE', {
+    siteId: scopeSiteId,
+    checkpointId: scopeCheckpointId,
+    method: 'QR_CODE',
+    checkpointToken: privateToken,
+    checkpointTokenVersion: 1,
+    scannedAt: new Date().toISOString()
+  });
+  expect(privateScan.body.data[0].status).toBe('SYNCED');
+  const privateException = await request(app)
+    .post('/api/v1/patrol/exceptions')
+    .set(authorizedHeaders())
+    .send({
+      siteId: scopeSiteId,
+      category: 'hazard',
+      description: 'Manager-only private site exception',
+      clientMutationId: mutationId(),
+      capturedAt: new Date().toISOString()
+    });
+  expect(privateException.status).toBe(201);
+  const unrelatedSiteHistory = await request(app)
+    .get(`/api/v1/patrol/events?siteId=${scopeSiteId}`)
+    .set(authorizedHeaders());
+  expect(unrelatedSiteHistory.body.data).not.toEqual(expect.arrayContaining([
+    expect.objectContaining({ entity_type: 'schedule_occurrence' })
+  ]));
+  await migrationPool.query(
+    'DELETE FROM employee_site_assignments WHERE tenant_id=$1 AND employee_id=$2 AND site_id=$3',
+    [TENANT_ID, scopeEmployeeId, siteId]
+  );
+
+  const guardVisibleScans = await request(app).get('/api/v1/patrol/scans').set(guardHeaders);
+  expect(guardVisibleScans.body.data.map((scan: { id: string }) => scan.id)).toEqual([
+    guardScan.body.data[0].serverId
+  ]);
+  const guardVisibleExceptions = await request(app).get('/api/v1/patrol/exceptions').set(guardHeaders);
+  expect(guardVisibleExceptions.body.data.map((exception: { id: string }) => exception.id)).toEqual([
+    guardException.body.data.id
+  ]);
+  const filteredForeignScans = await request(app)
+    .get(`/api/v1/patrol/scans?siteId=${scopeSiteId}&employeeId=${employeeId}`)
+    .set(guardHeaders);
+  expect(filteredForeignScans.body.data).toEqual([]);
+  const filteredForeignExceptions = await request(app)
+    .get(`/api/v1/patrol/exceptions?siteId=${scopeSiteId}&employeeId=${employeeId}`)
+    .set(guardHeaders);
+  expect(filteredForeignExceptions.body.data).toEqual([]);
+  const narrowedOwnScans = await request(app)
+    .get(`/api/v1/patrol/scans?siteId=${siteId}&employeeId=${employeeId}`)
+    .set(guardHeaders);
+  expect(narrowedOwnScans.body.data).toEqual([]);
+  const managerPrivateScans = await request(app)
+    .get(`/api/v1/patrol/scans?siteId=${scopeSiteId}`)
+    .set(authorizedHeaders());
+  expect(managerPrivateScans.body.data).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: privateScan.body.data[0].serverId })
+  ]));
+  const managerPrivateExceptions = await request(app)
+    .get(`/api/v1/patrol/exceptions?siteId=${scopeSiteId}&category=hazard`)
+    .set(authorizedHeaders());
+  expect(managerPrivateExceptions.body.data).toEqual(expect.arrayContaining([
+    expect.objectContaining({ id: privateException.body.data.id })
+  ]));
+
   const exceptionMutationId = mutationId();
   const exceptionPayload = {
     siteId,
@@ -625,12 +830,19 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
   });
   expect(new Date(completionTimes.rows[0].completed_at).toISOString()).toBe(completedAt);
   const completedOccurrence = await migrationPool.query(
-    `SELECT status,resolved_at FROM patrol_schedule_occurrences
+    `SELECT id,status,resolved_at FROM patrol_schedule_occurrences
       WHERE tenant_id=$1 AND round_id=$2`,
     [TENANT_ID, roundId]
   );
   expect(completedOccurrence.rows).toHaveLength(1);
   expect(completedOccurrence.rows[0].status).toBe('completed');
+  const occurrenceHistory = await request(app)
+    .get(`/api/v1/patrol/events?siteId=${siteId}&from=${new Date(Date.now() - 24 * 60 * 60_000).toISOString().slice(0, 10)}`)
+    .set(authorizedHeaders());
+  expect(occurrenceHistory.body.data).toEqual(expect.arrayContaining([
+    expect.objectContaining({ entity_type: 'schedule_occurrence', action: 'round_started' }),
+    expect.objectContaining({ entity_type: 'schedule_occurrence', action: 'round_completed' })
+  ]));
   const durationException = await migrationPool.query(
     `SELECT description FROM patrol_exceptions
       WHERE tenant_id=$1 AND round_id=$2 AND checkpoint_id=$3 AND category='late_checkpoint'`,
@@ -667,6 +879,24 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
   const recoveryCompletionMutationId = mutationId();
   const recoveryCompletedAt = new Date(Date.parse(capturedAt) + 12 * 60_000).toISOString();
   const completionNote = 'Integration completion note';
+  const staleCompletion = await pushMutation(mutationId(), 'UPDATE', {
+    recordType: 'round_complete',
+    roundId: recoveryRoundId,
+    completedAt: new Date(Date.now() - 25 * 60 * 60_000).toISOString()
+  });
+  expect(staleCompletion.body.data[0].status).toBe('REJECTED');
+  const futureCompletion = await pushMutation(mutationId(), 'UPDATE', {
+    recordType: 'round_complete',
+    roundId: recoveryRoundId,
+    completedAt: new Date(Date.now() + 6 * 60_000).toISOString()
+  });
+  expect(futureCompletion.body.data[0].status).toBe('REJECTED');
+  const outOfRoundCompletion = await pushMutation(mutationId(), 'UPDATE', {
+    recordType: 'round_complete',
+    roundId: recoveryRoundId,
+    completedAt: new Date(Date.parse(capturedAt) - 6 * 60_000).toISOString()
+  });
+  expect(outOfRoundCompletion.body.data[0].status).toBe('REJECTED');
   const directCompletion = await request(app)
     .post(`/api/v1/patrol/rounds/${recoveryRoundId}/complete`)
     .set(authorizedHeaders())
@@ -778,6 +1008,80 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
     [TENANT_ID, siteId]
   );
   expect(missedOccurrences.rows[0].total).toBeGreaterThanOrEqual(1);
+  const missedOccurrenceList = await request(app)
+    .get(`/api/v1/patrol/scheduled-occurrences?siteId=${siteId}&routeId=${routeId}&status=missed`)
+    .set(authorizedHeaders());
+  expect(missedOccurrenceList.body.data.length).toBeGreaterThan(0);
+  expect(missedOccurrenceList.body.data.every((occurrence: { status: string }) => occurrence.status === 'missed')).toBe(true);
+  const scheduledOccurrenceList = await request(app)
+    .get(`/api/v1/patrol/scheduled-occurrences?siteId=${siteId}&routeId=${routeId}&status=scheduled`)
+    .set(authorizedHeaders());
+  expect(scheduledOccurrenceList.body.data.every((occurrence: { status: string }) => occurrence.status === 'scheduled')).toBe(true);
+
+  const graceScheduledAt = new Date(Date.now() - 23 * 60 * 60_000);
+  const graceWindowEndsAt = new Date(graceScheduledAt.getTime() + 10 * 60_000);
+  const graceDeadlineAt = new Date(graceScheduledAt.getTime() + 30 * 60_000);
+  const graceOccurrence = await migrationPool.query(
+    `INSERT INTO patrol_schedule_occurrences
+       (tenant_id,site_id,route_id,route_version,scheduled_at,window_ends_at,deadline_at)
+     VALUES ($1,$2,$3,2,$4,$5,$6) RETURNING id`,
+    [TENANT_ID, siteId, routeId, graceScheduledAt, graceWindowEndsAt, graceDeadlineAt]
+  );
+  await withTenantTransaction(TENANT_ID, db =>
+    processTenantPatrolSchedules(db, TENANT_ID, new Date(graceDeadlineAt.getTime() + 23 * 60 * 60_000))
+  );
+  const occurrenceDuringGrace = await migrationPool.query(
+    'SELECT status FROM patrol_schedule_occurrences WHERE tenant_id=$1 AND id=$2',
+    [TENANT_ID, graceOccurrence.rows[0].id]
+  );
+  expect(occurrenceDuringGrace.rows[0].status).toBe('scheduled');
+  graceRoundId = mutationId();
+  const graceStart = await request(app)
+    .post('/api/v1/patrol/rounds')
+    .set(authorizedHeaders())
+    .send({
+      roundId: graceRoundId,
+      siteId,
+      routeId,
+      routeVersion: 2,
+      startedAt: graceScheduledAt.toISOString(),
+      clientMutationId: mutationId()
+    });
+  expect(graceStart.status).toBe(201);
+  const occurrenceAfterDelayedStart = await migrationPool.query(
+    'SELECT status,round_id FROM patrol_schedule_occurrences WHERE tenant_id=$1 AND id=$2',
+    [TENANT_ID, graceOccurrence.rows[0].id]
+  );
+  expect(occurrenceAfterDelayedStart.rows[0]).toMatchObject({ status: 'in_progress', round_id: graceRoundId });
+  const graceCheckpoint = await request(app)
+    .post('/api/v1/patrol/checkpoints')
+    .set(authorizedHeaders())
+    .send({ siteId, code: `GR-${suffix}`, name: 'Offline grace checkpoint' });
+  expect(graceCheckpoint.status).toBe(201);
+  graceCheckpointId = graceCheckpoint.body.data.id;
+  const graceToken = graceCheckpoint.body.data.scanPayload.split(':').at(-1) as string;
+  const delayedScanAt = new Date(graceScheduledAt.getTime() + 5 * 60_000).toISOString();
+  const delayedScan = await pushMutation(mutationId(), 'CREATE', {
+    siteId,
+    checkpointId: graceCheckpointId,
+    roundId: graceRoundId,
+    method: 'QR_CODE',
+    checkpointToken: graceToken,
+    checkpointTokenVersion: 1,
+    scannedAt: delayedScanAt
+  });
+  expect(delayedScan.body.data[0].status).toBe('SYNCED');
+  const graceCompletion = await pushMutation(mutationId(), 'UPDATE', {
+    recordType: 'round_complete',
+    roundId: graceRoundId,
+    completedAt: new Date(graceScheduledAt.getTime() + 20 * 60_000).toISOString()
+  });
+  expect(graceCompletion.body.data[0].status).toBe('SYNCED');
+  const graceProcessedOccurrence = await migrationPool.query(
+    'SELECT status FROM patrol_schedule_occurrences WHERE tenant_id=$1 AND id=$2',
+    [TENANT_ID, graceOccurrence.rows[0].id]
+  );
+  expect(graceProcessedOccurrence.rows[0].status).toBe('completed');
 
   const disabled = await request(app)
     .patch(`/api/v1/patrol/checkpoints/${checkpointId}/status`)

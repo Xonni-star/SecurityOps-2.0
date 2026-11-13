@@ -4,6 +4,7 @@ import { pool, withTenantTransaction } from '../config/database';
 import { computePayloadHash } from './syncHash';
 
 const POLL_INTERVAL_MS = 30_000;
+const PATROL_SYNC_GRACE_MS = 24 * 60 * 60 * 1000 + 5 * 60 * 1000;
 let timer: NodeJS.Timeout | null = null;
 let running = false;
 
@@ -128,12 +129,13 @@ export async function processTenantPatrolSchedules(
   now = new Date()
 ): Promise<{ materialized: number; missed: number; abandoned: number }> {
   const materialized = await materializePatrolOccurrences(db, tenantId, now, 7, 7);
+  const terminalizationCutoff = new Date(now.getTime() - PATROL_SYNC_GRACE_MS).toISOString();
   const missed = await db.query(
     `UPDATE patrol_schedule_occurrences
         SET status='missed',resolved_at=$2,updated_at=$2
-      WHERE tenant_id=$1 AND status='scheduled' AND deadline_at <= $2
+      WHERE tenant_id=$1 AND status='scheduled' AND deadline_at <= $3
       RETURNING id,site_id,route_id,route_version,round_id,scheduled_at`,
-    [tenantId, now.toISOString()]
+    [tenantId, now.toISOString(), terminalizationCutoff]
   );
   for (const occurrence of missed.rows) {
     await writeSystemDeviation(
@@ -156,7 +158,7 @@ export async function processTenantPatrolSchedules(
       WHERE o.tenant_id=$1 AND o.status='in_progress' AND o.deadline_at <= $2
         AND r.status='in_progress'
       FOR UPDATE OF o,r SKIP LOCKED`,
-    [tenantId, now.toISOString()]
+    [tenantId, terminalizationCutoff]
   );
   for (const occurrence of stale.rows) {
     const changed = await db.query(

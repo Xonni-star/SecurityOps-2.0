@@ -8,6 +8,8 @@ import { materializePatrolOccurrences } from '../services/patrolScheduleWorker';
 
 const uuid = z.string().uuid();
 const dateTime = z.string().datetime({ offset: true });
+const MAX_OFFLINE_SYNC_AGE_MS = 24 * 60 * 60 * 1000;
+const MAX_CLIENT_CLOCK_DRIFT_MS = 5 * 60 * 1000;
 type PatrolScanAttemptReason =
   | 'invalid_payload'
   | 'unassigned_employee'
@@ -214,6 +216,20 @@ function statusError(
   return Object.assign(new Error(message), { statusCode, patrolScanAttemptCode });
 }
 
+function validatePatrolCaptureTime(capturedAt: string, lowerBound?: string | Date): number {
+  if (!dateTime.safeParse(capturedAt).success) {
+    throw statusError(400, 'Erfassungszeitpunkt ist ungültig.', 'invalid_capture_time');
+  }
+  const capturedTime = Date.parse(capturedAt);
+  const now = Date.now();
+  if (capturedTime < now - MAX_OFFLINE_SYNC_AGE_MS ||
+      capturedTime > now + MAX_CLIENT_CLOCK_DRIFT_MS ||
+      (lowerBound !== undefined && capturedTime < Date.parse(String(lowerBound)) - MAX_CLIENT_CLOCK_DRIFT_MS)) {
+    throw statusError(400, 'Erfassungszeitpunkt liegt außerhalb des zulässigen Offline- oder Rundgangszeitfensters.', 'invalid_capture_time');
+  }
+  return capturedTime;
+}
+
 function createToken(): string {
   return crypto.randomBytes(32).toString('base64url');
 }
@@ -268,11 +284,8 @@ export async function recordPatrolScan(
 
   const input = parsed.data;
   const capturedAt = input.scannedAt || clientTimestamp;
-  if (!dateTime.safeParse(capturedAt).success) throw statusError(400, 'Erfassungszeitpunkt ist ungültig.', 'invalid_capture_time');
+  validatePatrolCaptureTime(capturedAt);
   const capturedTime = Date.parse(capturedAt);
-  if (capturedTime > Date.now() + 5 * 60 * 1000) {
-    throw statusError(400, 'Erfassungszeitpunkt liegt unzulässig in der Zukunft.', 'invalid_capture_time');
-  }
 
   const employee = await db.query(
     `SELECT e.id
@@ -298,7 +311,9 @@ export async function recordPatrolScan(
       [input.roundId, tenantId, input.siteId, userId]
     );
     if (!round.rows.length) throw statusError(409, 'Kontrollgang ist nicht aktiv oder gehört nicht zu diesem Objekt/Konto.', 'round_unavailable');
-    roundContext = round.rows[0];
+    const context = round.rows[0];
+    roundContext = context;
+    validatePatrolCaptureTime(capturedAt, context.started_at);
   }
 
   const checkpoint = await db.query(
@@ -324,10 +339,9 @@ export async function recordPatrolScan(
   const duplicate = await db.query(
     `SELECT id FROM patrol_scans
       WHERE tenant_id=$1 AND checkpoint_uuid=$2 AND guard_id=$3
-        AND scanned_at >= $4::timestamptz - interval '2 minutes'
-        AND scanned_at <= $4::timestamptz + interval '2 minutes'
+        AND server_received_at >= CURRENT_TIMESTAMP - interval '2 minutes'
       LIMIT 1`,
-    [tenantId, input.checkpointId, guardId, capturedAt]
+    [tenantId, input.checkpointId, guardId]
   );
   if (duplicate.rows.length) {
     throw statusError(409, 'Dieser Kontrollpunkt wurde von Ihnen innerhalb des Zwei-Minuten-Fensters bereits erfasst.', 'duplicate_scan');
@@ -1034,6 +1048,9 @@ export async function archiveRoute(req: Request, res: Response, next: NextFuncti
 export async function listScans(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const filters = listQuerySchema.parse(req.query);
+    const includeAll = req.user!.permissions.includes('patrol:manage') ||
+      req.user!.permissions.includes('patrol:audit') ||
+      req.user!.permissions.includes('patrol:analytics:read');
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const result = await db.query(
         `SELECT p.id,p.site_id,s.name AS site_name,p.checkpoint_uuid AS checkpoint_id,
@@ -1042,17 +1059,28 @@ export async function listScans(req: Request, res: Response, next: NextFunction)
            FROM patrol_scans p JOIN sites s ON s.id=p.site_id AND s.tenant_id=p.tenant_id
            LEFT JOIN patrol_rounds r ON r.id=p.round_id AND r.tenant_id=p.tenant_id
           WHERE p.tenant_id=$1
-            AND ($2::uuid IS NULL OR p.site_id=$2)
-            AND ($3::uuid IS NULL OR s.client_id=$3)
-            AND ($4::uuid IS NULL OR p.guard_id=$4)
-            AND ($5::uuid IS NULL OR r.route_id=$5)
-            AND ($6::text IS NULL OR r.status=$6)
-            AND ($7::date IS NULL OR p.scanned_at >= $7::date)
-            AND ($8::date IS NULL OR p.scanned_at < $8::date + interval '1 day')
-          ORDER BY p.scanned_at DESC,p.id DESC LIMIT $9 OFFSET $10`,
-        [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
-          filters.routeId || null, filters.status || null, filters.from || null, filters.to || null,
-          filters.limit, filters.offset]
+            AND ($2::boolean OR r.guard_user_id=$3 OR EXISTS (
+              SELECT 1 FROM employees own
+              WHERE own.tenant_id=p.tenant_id AND own.account_user_id=$3 AND own.id=p.guard_id
+                AND own.archived_at IS NULL
+            ) OR EXISTS (
+              SELECT 1 FROM employees assigned
+              JOIN employee_site_assignments esa
+                ON esa.tenant_id=assigned.tenant_id AND esa.employee_id=assigned.id
+              WHERE assigned.tenant_id=p.tenant_id AND assigned.account_user_id=$3
+                AND assigned.archived_at IS NULL AND esa.site_id=p.site_id
+            ))
+            AND ($4::uuid IS NULL OR p.site_id=$4)
+            AND ($5::uuid IS NULL OR s.client_id=$5)
+            AND ($6::uuid IS NULL OR p.guard_id=$6)
+            AND ($7::uuid IS NULL OR r.route_id=$7)
+            AND ($8::text IS NULL OR r.status=$8)
+            AND ($9::date IS NULL OR p.scanned_at >= $9::date)
+            AND ($10::date IS NULL OR p.scanned_at < $10::date + interval '1 day')
+          ORDER BY p.scanned_at DESC,p.id DESC LIMIT $11 OFFSET $12`,
+        [req.user!.tenantId, includeAll, req.user!.userId, filters.siteId || null,
+          filters.clientId || null, filters.employeeId || null, filters.routeId || null,
+          filters.status || null, filters.from || null, filters.to || null, filters.limit, filters.offset]
       );
       return result.rows;
     });
@@ -1247,6 +1275,9 @@ export async function listScheduledOccurrences(req: Request, res: Response, next
 export async function listExceptions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const filters = listQuerySchema.parse(req.query);
+    const includeAll = req.user!.permissions.includes('patrol:manage') ||
+      req.user!.permissions.includes('patrol:audit') ||
+      req.user!.permissions.includes('patrol:analytics:read');
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const result = await db.query(
         `SELECT e.id,e.site_id,s.name AS site_name,e.round_id,e.scan_id,e.checkpoint_id,
@@ -1258,18 +1289,26 @@ export async function listExceptions(req: Request, res: Response, next: NextFunc
            LEFT JOIN employees employee ON employee.tenant_id=e.tenant_id
               AND employee.account_user_id=COALESCE(round.guard_user_id,e.created_by_user_id)
           WHERE e.tenant_id=$1
-            AND ($2::uuid IS NULL OR e.site_id=$2)
-            AND ($3::uuid IS NULL OR s.client_id=$3)
-            AND ($4::uuid IS NULL OR employee.id=$4)
-            AND ($5::uuid IS NULL OR round.route_id=$5)
-            AND ($6::text IS NULL OR round.status=$6)
-            AND ($7::date IS NULL OR e.created_at >= $7::date)
-            AND ($8::date IS NULL OR e.created_at < $8::date + interval '1 day')
-            AND ($9::text IS NULL OR e.category=$9)
-          ORDER BY e.created_at DESC,e.id DESC LIMIT $10 OFFSET $11`,
-        [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
-          filters.routeId || null, filters.status || null, filters.from || null, filters.to || null,
-          filters.category || null, filters.limit, filters.offset]
+            AND ($2::boolean OR round.guard_user_id=$3 OR e.created_by_user_id=$3 OR EXISTS (
+              SELECT 1 FROM employees assigned
+              JOIN employee_site_assignments esa
+                ON esa.tenant_id=assigned.tenant_id AND esa.employee_id=assigned.id
+              WHERE assigned.tenant_id=e.tenant_id AND assigned.account_user_id=$3
+                AND assigned.archived_at IS NULL AND esa.site_id=e.site_id
+            ))
+            AND ($4::uuid IS NULL OR e.site_id=$4)
+            AND ($5::uuid IS NULL OR s.client_id=$5)
+            AND ($6::uuid IS NULL OR employee.id=$6)
+            AND ($7::uuid IS NULL OR round.route_id=$7)
+            AND ($8::text IS NULL OR round.status=$8)
+            AND ($9::date IS NULL OR e.created_at >= $9::date)
+            AND ($10::date IS NULL OR e.created_at < $10::date + interval '1 day')
+            AND ($11::text IS NULL OR e.category=$11)
+          ORDER BY e.created_at DESC,e.id DESC LIMIT $12 OFFSET $13`,
+        [req.user!.tenantId, includeAll, req.user!.userId, filters.siteId || null,
+          filters.clientId || null, filters.employeeId || null, filters.routeId || null,
+          filters.status || null, filters.from || null, filters.to || null, filters.category || null,
+          filters.limit, filters.offset]
       );
       return result.rows;
     });
@@ -1356,8 +1395,7 @@ export async function recordPatrolRoundStart(
   const parsed = roundSchema.omit({ clientMutationId: true }).safeParse(payload);
   if (!parsed.success) throw statusError(400, 'Kontrollgangsstart ist unvollständig oder ungültig.');
   const input = parsed.data;
-  const startedAt = Date.parse(input.startedAt);
-  if (startedAt > Date.now() + 5 * 60 * 1000) throw statusError(400, 'Startzeit liegt unzulässig in der Zukunft.');
+  validatePatrolCaptureTime(input.startedAt);
 
   const assignment = await db.query(
     `SELECT e.id FROM employees e
@@ -1513,8 +1551,6 @@ export async function recordPatrolRoundCompletion(
   const parsed = roundCompletionSchema.safeParse(payload);
   if (!parsed.success) throw statusError(400, 'Kontrollgangsabschluss ist unvollständig oder ungültig.');
   const input = parsed.data;
-  const completedTime = Date.parse(input.completedAt);
-  if (completedTime > Date.now() + 5 * 60 * 1000) throw statusError(400, 'Abschlusszeit liegt unzulässig in der Zukunft.');
 
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
     `${tenantId}:patrol:round-complete:${clientMutationId}`
@@ -1552,6 +1588,7 @@ export async function recordPatrolRoundCompletion(
   if (round.rows[0].status !== 'in_progress') {
     throw statusError(409, 'Kontrollgang ist nicht mehr aktiv.');
   }
+  validatePatrolCaptureTime(input.completedAt, round.rows[0].started_at);
   const result = await db.query(
     `UPDATE patrol_rounds
         SET status='completed',completed_at=$1,completion_client_captured_at=$1,
@@ -1754,12 +1791,24 @@ export async function listEvents(req: Request, res: Response, next: NextFunction
     const filters = listQuerySchema.parse(req.query);
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
       const result = await db.query(
-        `SELECT id,site_id,actor_user_id,entity_type,entity_id,action,details,occurred_at
-           FROM patrol_events
-          WHERE tenant_id=$1 AND ($2::uuid IS NULL OR site_id=$2)
-            AND ($3::date IS NULL OR occurred_at >= $3::date)
-            AND ($4::date IS NULL OR occurred_at < $4::date + interval '1 day')
-          ORDER BY occurred_at DESC,id DESC LIMIT $5 OFFSET $6`,
+        `SELECT history.id,history.site_id,history.actor_user_id,history.entity_type,
+                history.entity_id,history.action,history.details,history.occurred_at
+           FROM (
+             SELECT id,site_id,actor_user_id,entity_type,entity_id,action,details,occurred_at
+               FROM patrol_events
+              WHERE tenant_id=$1
+             UNION ALL
+             SELECT event.id,occurrence.site_id,event.actor_user_id,'schedule_occurrence',
+                    event.occurrence_id,event.action,event.details,event.occurred_at
+               FROM patrol_schedule_occurrence_events event
+               JOIN patrol_schedule_occurrences occurrence
+                 ON occurrence.tenant_id=event.tenant_id AND occurrence.id=event.occurrence_id
+              WHERE event.tenant_id=$1
+           ) history
+          WHERE ($2::uuid IS NULL OR history.site_id=$2)
+            AND ($3::date IS NULL OR history.occurred_at >= $3::date)
+            AND ($4::date IS NULL OR history.occurred_at < $4::date + interval '1 day')
+          ORDER BY history.occurred_at DESC,history.id DESC LIMIT $5 OFFSET $6`,
         [req.user!.tenantId, filters.siteId || null, filters.from || null, filters.to || null, filters.limit, filters.offset]
       );
       return result.rows;

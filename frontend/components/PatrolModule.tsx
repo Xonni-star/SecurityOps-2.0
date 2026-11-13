@@ -136,6 +136,7 @@ export const PatrolModule: React.FC = () => {
   const [employeeId, setEmployeeId] = useState('');
   const [routeId, setRouteId] = useState('');
   const [status, setStatus] = useState('');
+  const [occurrenceStatus, setOccurrenceStatus] = useState('');
   const [category, setCategory] = useState('');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -187,6 +188,9 @@ export const PatrolModule: React.FC = () => {
   const filters = useMemo(() => queryString({
     siteId, clientId, employeeId, routeId, status, category, from, to
   }), [siteId, clientId, employeeId, routeId, status, category, from, to]);
+  const occurrenceFilters = useMemo(() => queryString({
+    siteId, clientId, employeeId, routeId, status: occurrenceStatus, from, to
+  }), [siteId, clientId, employeeId, routeId, occurrenceStatus, from, to]);
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
@@ -200,7 +204,7 @@ export const PatrolModule: React.FC = () => {
         canReadScanAttempts
           ? apiClient.get<PatrolScanAttempt[]>(`/patrol/scan-attempts${filters}`)
           : Promise.resolve([]),
-        apiClient.get<PatrolScheduledOccurrence[]>(`/patrol/scheduled-occurrences${filters}`)
+        apiClient.get<PatrolScheduledOccurrence[]>(`/patrol/scheduled-occurrences${occurrenceFilters}`)
       ]);
       setStats(dashboardData);
       setCheckpoints(checkpointData);
@@ -216,7 +220,7 @@ export const PatrolModule: React.FC = () => {
     } finally {
       setLoading(false);
     }
-  }, [canReadScanAttempts, filters, siteId]);
+  }, [canReadScanAttempts, filters, occurrenceFilters, siteId]);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -602,6 +606,11 @@ export const PatrolModule: React.FC = () => {
         <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Rundgangstatus
           <select value={status} onChange={event => setStatus(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
             <option value="">Alle Status</option><option value="in_progress">Laufend</option><option value="completed">Abgeschlossen</option><option value="abandoned">Abgebrochen</option>
+          </select>
+        </label>
+        <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Status geplanter Kontrollen
+          <select value={occurrenceStatus} onChange={event => setOccurrenceStatus(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
+            <option value="">Alle geplanten Status</option><option value="scheduled">Geplant</option><option value="missed">Verpasst</option>
           </select>
         </label>
         <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Abweichungstyp
