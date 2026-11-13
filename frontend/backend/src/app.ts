@@ -5,6 +5,7 @@ import helmet from 'helmet';
 import { env } from './config/env';
 import { pool } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
+import { createApiRateLimiter } from './middleware/apiRateLimit';
 import { authenticateJwt, requireAnyPermission, requirePermission } from './middleware/auth';
 import * as authController from './controllers/authController';
 import * as clientController from './controllers/clientController';
@@ -59,6 +60,7 @@ const corsOptions: CorsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.use('/api/v1', createApiRateLimiter(env.RATE_LIMIT_MAX));
 app.use(express.json({ limit: '15mb' }));
 
 // Health- & Readiness-Endpunkt
@@ -107,6 +109,7 @@ app.get('/api/v1/planning/shifts', authenticateJwt, requirePermission('planning:
 app.post('/api/v1/planning/shifts', authenticateJwt, requirePermission('planning:manage'), planningController.createPlanningShift);
 app.get('/api/v1/planning/shifts/:id/assignments', authenticateJwt, requirePermission('planning:read'), planningController.listShiftAssignments);
 app.post('/api/v1/planning/shifts/:id/assignments', authenticateJwt, requirePermission('planning:manage'), planningController.assignEmployee);
+app.get('/api/v1/planning/shifts/:id/staffing-suggestions', authenticateJwt, requirePermission('planning:read'), planningController.listStaffingSuggestions);
 app.get('/api/v1/planning/findings', authenticateJwt, requirePermission('planning:read'), planningController.listPlanningFindings);
 app.get('/api/v1/planning/periods', authenticateJwt, requirePermission('planning:read'), planningController.listSchedulePeriods);
 app.post('/api/v1/planning/periods', authenticateJwt, requirePermission('planning:manage'), planningController.createSchedulePeriod);
@@ -124,6 +127,7 @@ app.post('/api/v1/planning/exceptions/:exceptionId/decision',
   authenticateJwt, requirePermission('planning:exceptions:approve'), planningController.decideRuleException);
 app.post('/api/v1/planning/templates', authenticateJwt, requirePermission('planning:manage'), planningController.createShiftTemplate);
 app.get('/api/v1/planning/templates', authenticateJwt, requirePermission('planning:read'), planningController.listShiftTemplates);
+app.patch('/api/v1/planning/templates/:templateId', authenticateJwt, requirePermission('planning:manage'), planningController.updateShiftTemplate);
 app.post('/api/v1/planning/templates/:templateId/apply', authenticateJwt, requirePermission('planning:manage'), planningController.applyShiftTemplate);
 app.get('/api/v1/planning/reports/work-hours', authenticateJwt, requirePermission('planning:reports:read'), planningController.workHoursReport);
 app.get('/api/v1/planning/reports/coverage', authenticateJwt, requirePermission('planning:reports:read'), planningController.coverageReport);
@@ -141,6 +145,8 @@ app.post('/api/v1/planning/cover-requests/:requestId/decision',
   authenticateJwt, requirePermission('planning:covers:approve'), planningController.decideCoverRequest);
 app.post('/api/v1/planning/shifts/:id/actual-time',
   authenticateJwt, requirePermission('planning:actuals:manage'), planningController.recordActualTime);
+app.get('/api/v1/planning/shifts/:id/actual-time',
+  authenticateJwt, requirePermission('planning:read'), planningController.getActualTime);
 
 app.get('/api/v1/keys', authenticateJwt, requirePermission('keys:read'), resourceController.listKeys);
 app.post('/api/v1/keys', authenticateJwt, requirePermission('keys:manage'), resourceController.createKey);
