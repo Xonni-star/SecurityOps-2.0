@@ -164,6 +164,12 @@ export interface Shift {
   actualEnd?: string;
   conflictReason?: string;
   revisionVersion?: number;
+  planningStatus?: 'draft' | 'validated' | 'published' | 'cancelled';
+  schedulePeriodId?: string;
+  assignedCount?: number;
+  requiredStaffCount?: number;
+  syncStatus?: SyncStatus;
+  pendingDelete?: boolean;
 }
 
 export type IncidentWorkflowStage =
@@ -670,6 +676,7 @@ export interface ResponseEnvelope<T = any> {
   success: boolean;
   message: string;
   data?: T;
+  code?: string;
   errors?: string[];
 }
 

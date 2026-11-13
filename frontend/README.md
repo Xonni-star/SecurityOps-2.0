@@ -10,6 +10,14 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 - **SecurityOps TypeScript-Backend**: `frontend/backend/` (bzw. `backend/` bei flacher Monorepo-Struktur). Enthält die vollwertige Node.js/Express/TypeScript REST-API (`/api/v1`), PostgreSQL RLS-Transaktionen und die Idempotenz-Engine.
 - Es gibt kein separates Root-Proxy-Backend. Alle SecurityOps-Backend-Befehle werden unter `frontend/backend/` ausgeführt.
 
+## Dienst- und Einsatzplanung (Phase 2)
+
+`components/RosterModule.tsx` ist unter der bestehenden Route `roster` eingebunden. Die Oberfläche bietet Monats-, Wochen- und Tageskalender, Zeit-/Mitarbeiter-/Objekt-/Kundenansichten, Suche und Filter, Entwürfe, periodengebundene Planung, Wiederholung/Vorlagen, Zuweisungen, Tauschanträge, serverseitige Befunde, Veröffentlichung, Coverage-/Arbeitszeitberichte sowie CSV- und Druckausgabe. Planung, Revisionen, Befunde und Freigaben werden über die Planning-API und die vorhandene Berechtigungsprüfung abgewickelt; lokale Eingaben gelten nicht als Freigabe.
+
+Der Offline-Cache ist nach Mandant und Benutzer getrennt. Die Outbox unterstützt einzelne, unbesetzte Entwurfsanlagen ohne Periode (Besetzungsbedarf 1) sowie Draft-Änderungen mit Server-ID und Basisrevision. Offline-Updates ändern weder Periodenzuordnung noch Mindestbesetzung; Mutation und Folgeänderung bleiben sichtbar ausstehend und ungeprüft, bis der Server synchronisiert. Zuweisung, Tauschentscheidung und Veröffentlichung benötigen Online-Serverprüfung. Konflikte und Ablehnungen bleiben in der Outbox sichtbar.
+
+Die aktuelle Backend-API bietet keinen Vorlagen-Listenendpunkt und keine Rule-Profile-Verwaltung im Frontend. Berichte enthalten geplante Stunden/Wochenenddienste und Coverage, aber keine Abrechnung von Ist-/Überstunden sowie keine vollständigen Qualifikations-, Abwesenheits-, Feiertags- oder Nachtarbeitsauswertungen. Es gibt keine automatische Einsatzempfehlung und keine Rechtskonformitätsbestätigung. Browser-/Gerätekompatibilität, produktiver Rollout und fachliche/rechtliche Abnahme sind nicht durch Frontend-Tests belegt. Details und Prüfumfang: [Phase-2-Abschlussbericht](../PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md) und [API-Vertrag](./backend/SERVICE_PLANNING_API.md).
+
 ## Alarm- und Notfallmanagement
 
 `AlarmsModule.tsx` verwendet die tenant- und objektbezogene Alarm-API. Notfallpläne haben unveränderliche Versionen, Entwurfs-/Veröffentlichungsstatus und Gültigkeitszeiträume. Alarmvorfälle besitzen append-only Status-/Maßnahmenhistorien, Objektzuweisungen und nachvollziehbare Zustellstatus. Der Backend-Prozess startet einen PostgreSQL-basierten Eskalationsworker. Offline-Meldungen, Maßnahmen und Statusänderungen werden in der vorhandenen IndexedDB `SecurityOps2_OfflineVault` vorgemerkt und mit stabilen Mutations-IDs synchronisiert. E-Mail/Push-Provider und Offline-Datei-Uploads sind nicht konfiguriert bzw. implementiert; Zustellung wird dafür nicht vorgetäuscht.

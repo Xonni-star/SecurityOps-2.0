@@ -7,12 +7,23 @@ export class ApiError extends Error {
   status: number;
   errors?: string[];
   isNetworkError: boolean;
+  code?: string;
+  data?: unknown;
 
-  constructor(status: number, message: string, errors?: string[], isNetworkError = false) {
+  constructor(
+    status: number,
+    message: string,
+    errors?: string[],
+    isNetworkError = false,
+    code?: string,
+    data?: unknown
+  ) {
     super(message);
     this.status = status;
     this.errors = errors;
     this.isNetworkError = isNetworkError;
+    this.code = code;
+    this.data = data;
   }
 }
 
@@ -83,7 +94,10 @@ class ApiClient {
         throw new ApiError(
           response.status,
           envelope.message || 'API-Anfrage fehlgeschlagen',
-          envelope.errors
+          envelope.errors,
+          false,
+          envelope.code,
+          envelope.data
         );
       }
 

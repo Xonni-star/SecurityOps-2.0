@@ -1,7 +1,15 @@
 # Technische Spezifikation: Dienstplanung
 
-**Status:** Zielbild zur späteren Integration; keine Dienstplanungslogik wird mit Phase 1 implementiert.  
-**Ausgangslage:** `shifts` enthält heute Datum und Uhrzeit als getrennte Werte, Objekt, optionale Mitarbeiterzuordnung, Qualifikationsanforderung, Status und Revisionsnummer. CRUD und mandantenbezogene Zuordnung existieren. Es gibt keine serverseitige Prüfung auf Schichtüberschneidungen, Ruhezeiten, Arbeitszeitkonten oder Tarifprofile. Die vorhandenen Qualifikations- und Abwesenheitsdaten sind anschlussfähig, ersetzen aber keine Planungsprüfung.
+**Status:** Phase 2 implementiert Planungsoberfläche und API-gestützte Entwurfs-, Zuweisungs- und Veröffentlichungsabläufe. Das System ist nicht produktionsabgenommen und trifft keine Rechtskonformitätsaussage.
+**Ausgangslage:** Das Phase-2-Backend erweitert `shifts` um aufgelöste Zeitpunkte, Planungsstatus, Mindestbesetzung, Revisionen und Prüf-/Auditdaten. Die API-Verträge, Berechtigungen und bekannten Grenzen stehen in [SERVICE_PLANNING_API.md](./backend/SERVICE_PLANNING_API.md); Frontend-Umfang und Verifikation in [PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md](../PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md).
+
+## Aktueller Implementierungsstand
+
+Die bestehende `roster`-Route zeigt Monats-, Wochen- und Tagesansichten mit Gruppierung nach Zeit, Mitarbeiter, Objekt oder Kunde, Filtern und Suche. Entwürfe können angelegt, bearbeitet, kopiert und wiederholt werden; Perioden, Templates, Zuweisungen, Tauschanträge, Prüfhinweise, Coverage- und Arbeitszeitberichte sowie CSV-/Druckausgabe verwenden die Planning-API. Serverseitige Befunde und Revisionskonflikte werden dargestellt. Zuweisungen und Veröffentlichung erfordern Online-Serverprüfung.
+
+Der mandanten- und benutzerspezifische IndexedDB-Cache ermöglicht das Lesen der zuletzt geladenen Planung. Die Outbox erlaubt einzelne unbesetzte Entwurfsanlagen ohne Periodenbindung und Mindestbesetzung 1 sowie Draft-Updates mit Schicht-ID und Basisrevision. Offline-Updates lassen die Mindestbesetzung und Periodenzuordnung unverändert; Offline-Änderungen bleiben ausstehend und ungeprüft. Sie werden bei Verbindung serverseitig validiert; Konflikte/Ablehnungen werden nicht als Erfolg dargestellt.
+
+Die Backend-API stellt keine Vorlagenliste bereit; es gibt keine UI zur Pflege von Regelprofilen. Berichte bieten geplante Stunden/Wochenenddienste und Coverage, aber keine Ist-/Überstundenabrechnung oder vollständigen Qualifikations-, Abwesenheits-, Feiertags- und Nachtarbeitsaufschlüsselungen. Automatische Personalvorschläge, externe Rechts-/Tarifdaten und eine Rechtskonformitätsbestätigung sind nicht implementiert. Die responsive UI wurde nicht auf realen Mobilgeräten oder unter allen Browsern geprüft; Rollout und fachliche/rechtliche Abnahme sind offen.
 
 ## Ziele und Grenzen
 
@@ -55,6 +63,6 @@ Offline darf ein Entwurf erfasst und als ausstehend markiert werden. Eine verbin
 6. Offline-Sync bestätigt erst nach erfolgreicher Serverprüfung und erhält Quittung/ Konfliktstatus über Wiederholungen hinweg.
 7. Profiländerungen sind versioniert, zeitlich wirksam und auf Testdaten nachvollziehbar; fachliche Freigabe wird vor einem Produktiveinsatz dokumentiert.
 
-## Ausdrücklich nicht Teil dieser Phase
+## Grenzen und Voraussetzungen
 
-Keine neuen Dienstplanungsregeln, automatischen Vorschläge, ArbZG-/Tarifprüfungen, neuen Tabellen oder Endpunkte werden in Phase 1 umgesetzt. Vor einer Umsetzung sind die Regelquellen und Zuständigkeiten je Mandant zu bestimmen und fachlich/rechtlich freizugeben.
+Die serverseitige Validierung prüft nur die implementierten Planungsregeln und vorhandenen Mitarbeiter-, Qualifikations-, Abwesenheits- und Objektzuordnungsdaten. Konfigurierbare Profile liefern keine externen Rechts- oder Tarifgrenzen; Mandanten müssen Regeln und Quellen fachlich festlegen und freigeben. Ein erfolgreich synchronisierter Entwurf ist nicht automatisch veröffentlicht oder rechtlich freigegeben. Vor dem Produktiveinsatz sind Browser-/Geräteverhalten, Betriebs-/Backupkonfiguration und die fachliche sowie rechtliche Abnahme separat zu verifizieren.
