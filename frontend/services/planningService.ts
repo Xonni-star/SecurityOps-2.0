@@ -62,6 +62,59 @@ export interface ShiftSwap {
   decision_note?: string | null;
 }
 
+export type PlanningRuleCode =
+  | 'minimum_rest_minutes'
+  | 'maximum_shift_minutes'
+  | 'maximum_weekly_minutes'
+  | 'minimum_break_minutes'
+  | 'break_after_minutes'
+  | 'disallowed_weekdays'
+  | 'sunday_work_allowed'
+  | 'holiday_dates'
+  | 'night_window_start_minute'
+  | 'night_window_end_minute'
+  | 'night_work_allowed';
+
+export interface PlanningRule {
+  code: PlanningRuleCode;
+  value: number | boolean | Array<number | string>;
+  source: string;
+  severity: 'warning' | 'blocking';
+}
+
+export interface RuleProfileRow {
+  id: string;
+  name: string;
+  scope: Record<string, unknown>;
+  active: boolean;
+  created_by: string;
+  created_at: string;
+  version_id?: string | null;
+  version_number?: number | null;
+  effective_from?: string | null;
+  effective_until?: string | null;
+  source_name?: string | null;
+  source_reference?: string | null;
+  rules?: PlanningRule[] | null;
+  version_status?: 'draft' | 'approved' | string | null;
+  approved_by?: string | null;
+  approved_at?: string | null;
+}
+
+export interface RuleProfileVersion {
+  id: string;
+  profile_id: string;
+  version_number: number;
+  effective_from: string;
+  effective_until?: string | null;
+  source_name: string;
+  source_reference: string;
+  rules: PlanningRule[];
+  status: 'draft' | 'approved' | string;
+  approved_by?: string | null;
+  approved_at?: string | null;
+}
+
 export interface SyncReceipt {
   status: 'SYNCED' | 'CONFLICT' | 'REJECTED';
   serverId: string;
@@ -255,6 +308,38 @@ export const planningApi = {
     '/planning/findings',
     new URLSearchParams(shiftId ? { shiftId } : {})
   ),
+  listRuleProfiles: () => getAllPages<RuleProfileRow>(
+    '/planning/rule-profiles',
+    new URLSearchParams()
+  ),
+  createRuleProfile: (input: {
+    name: string;
+    scope?: Record<string, unknown>;
+    effectiveFrom: string;
+    effectiveUntil?: string;
+    sourceName: string;
+    sourceReference: string;
+    rules: PlanningRule[];
+  }) => apiClient.post<{
+    profile: { id: string; name: string; scope: Record<string, unknown> };
+    version: RuleProfileVersion;
+  }>(
+    '/planning/rule-profiles', input
+  ),
+  createRuleProfileVersion: (profileId: string, input: {
+    effectiveFrom: string;
+    effectiveUntil?: string;
+    sourceName: string;
+    sourceReference: string;
+    rules: PlanningRule[];
+  }) => apiClient.post<RuleProfileVersion>(
+    `/planning/rule-profiles/${encodeURIComponent(profileId)}/versions`, input
+  ),
+  approveRuleProfileVersion: (profileId: string, versionId: string) =>
+    apiClient.post<RuleProfileVersion>(
+      `/planning/rule-profiles/${encodeURIComponent(profileId)}/versions/${encodeURIComponent(versionId)}/approve`,
+      {}
+    ),
   listAssignments: (shiftId: string) => apiClient.get<ShiftAssignment[]>(
     `/planning/shifts/${encodeURIComponent(shiftId)}/assignments`
   ),

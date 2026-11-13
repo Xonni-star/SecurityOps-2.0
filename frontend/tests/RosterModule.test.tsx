@@ -9,6 +9,10 @@ const mocks = vi.hoisted(() => ({
   listAssignments: vi.fn(),
   listFindings: vi.fn(),
   listSwaps: vi.fn(),
+  listRuleProfiles: vi.fn(),
+  createRuleProfile: vi.fn(),
+  createRuleProfileVersion: vi.fn(),
+  approveRuleProfileVersion: vi.fn(),
   createShift: vi.fn(),
   updateShift: vi.fn(),
   deleteShift: vi.fn(),
@@ -78,6 +82,10 @@ vi.mock('../services/planningService', async importOriginal => {
       listAssignments: mocks.listAssignments,
       listFindings: mocks.listFindings,
       listSwaps: mocks.listSwaps,
+      listRuleProfiles: mocks.listRuleProfiles,
+      createRuleProfile: mocks.createRuleProfile,
+      createRuleProfileVersion: mocks.createRuleProfileVersion,
+      approveRuleProfileVersion: mocks.approveRuleProfileVersion,
       createShift: mocks.createShift,
       updateShift: mocks.updateShift,
       deleteShift: mocks.deleteShift,
@@ -147,6 +155,7 @@ describe('RosterModule', () => {
         permissions: [
           'planning:read', 'planning:manage', 'planning:publish',
           'planning:reports:read', 'planning:swaps:manage', 'planning:swaps:approve',
+          'planning:rules:manage', 'planning:rules:approve',
           'shifts:manage'
         ]
       },
@@ -171,6 +180,10 @@ describe('RosterModule', () => {
     mocks.listAssignments.mockResolvedValue([]);
     mocks.listFindings.mockResolvedValue([]);
     mocks.listSwaps.mockResolvedValue([]);
+    mocks.listRuleProfiles.mockResolvedValue([]);
+    mocks.createRuleProfile.mockResolvedValue({});
+    mocks.createRuleProfileVersion.mockResolvedValue({});
+    mocks.approveRuleProfileVersion.mockResolvedValue({});
     mocks.createPeriod.mockResolvedValue(period);
     mocks.createTemplate.mockResolvedValue({ id: 'template-a' });
     mocks.applyTemplate.mockResolvedValue({ occurrences: [] });
@@ -253,6 +266,108 @@ describe('RosterModule', () => {
     expect(container.querySelector('[aria-label="Berichtsabdeckung"]')?.textContent).toContain('Ist-Stunden und Überstunden');
     expect(container.querySelector('[aria-label="Berichtsabdeckung"]')?.textContent).toContain('Qualifikations- und Abwesenheitsauswertung');
     expect(container.textContent).not.toContain('Überstunden: 0');
+  });
+
+  test('creates sourced, effective-dated rule profiles without supplying default thresholds', async () => {
+    await act(async () => root.render(<RosterModule />));
+    const openButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Regelprofile'));
+    if (!openButton) throw new Error('Regelprofile fehlen');
+    await act(async () => openButton.click());
+    const createButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Neues Regelprofil'));
+    if (!createButton) throw new Error('Regelprofil erstellen fehlt');
+    await act(async () => createButton.click());
+
+    const fill = async (label: string, value: string) => {
+      const input = container.querySelector<HTMLInputElement>(`[aria-label="${label}"]`);
+      if (!input) throw new Error(`${label} fehlt`);
+      await act(async () => setInput(input, value));
+    };
+    await fill('Profilname', 'Arbeitszeitprofil');
+    await fill('Quellenname', 'Betriebsvereinbarung');
+    await fill('Quellenreferenz', 'BV-2026-01');
+    await fill('Regelwert', '720');
+    await fill('Quelle der Regel', 'Abschnitt 4');
+
+    const addRule = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Regel hinzufügen'));
+    if (!addRule) throw new Error('Regel hinzufügen fehlt');
+    await act(async () => addRule.click());
+    const submit = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Entwurfsrevision speichern'));
+    if (!submit) throw new Error('Speichern fehlt');
+    await act(async () => submit.click());
+
+    expect(mocks.createRuleProfile).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'Arbeitszeitprofil',
+      scope: {},
+      sourceName: 'Betriebsvereinbarung',
+      sourceReference: 'BV-2026-01',
+      rules: [{
+        code: 'minimum_rest_minutes',
+        value: 720,
+        source: 'Abschnitt 4',
+        severity: 'blocking'
+      }]
+    }));
+    expect(container.textContent).toContain('Regelprofil und erste Entwurfsrevision gespeichert');
+  });
+
+  test('delegates rule-profile creator approval restrictions to the server and displays its rejection', async () => {
+    mocks.listRuleProfiles.mockResolvedValue([{
+      id: 'profile-a',
+      name: 'Arbeitszeitprofil',
+      scope: {},
+      active: true,
+      created_by: 'user-b',
+      created_at: '2026-11-01T00:00:00Z',
+      version_id: 'version-a',
+      version_number: 1,
+      effective_from: '2026-11-01',
+      source_name: 'Betriebsvereinbarung',
+      source_reference: 'BV-2026-01',
+      rules: [{ code: 'minimum_rest_minutes', value: 720, source: 'Abschnitt 4', severity: 'blocking' }],
+      version_status: 'draft'
+    }]);
+    mocks.approveRuleProfileVersion.mockRejectedValueOnce(new ApiError(
+      403, 'Eine Regelprofilrevision darf nicht durch ihren Ersteller freigegeben werden.'
+    ));
+    await act(async () => root.render(<RosterModule />));
+    const openButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Regelprofile'));
+    if (!openButton) throw new Error('Regelprofile fehlen');
+    await act(async () => openButton.click());
+    const approveButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Revision freigeben'));
+    if (!approveButton) throw new Error('Freigabe fehlt');
+    await act(async () => approveButton.click());
+
+    expect(mocks.approveRuleProfileVersion).toHaveBeenCalledWith('profile-a', 'version-a');
+    expect(container.textContent).toContain('darf nicht durch ihren Ersteller freigegeben werden');
+  });
+
+  test('does not expose cached rule profiles or mutations while offline', async () => {
+    mocks.storeState.isOnline = false;
+    mocks.listRuleProfiles.mockResolvedValue([{
+      id: 'profile-a',
+      name: 'Online-Profil',
+      scope: {},
+      active: true,
+      created_by: 'user-b',
+      created_at: '2026-11-01T00:00:00Z',
+      version_id: 'version-a',
+      version_number: 1,
+      effective_from: '2026-11-01',
+      source_name: 'Policy',
+      source_reference: 'policy-2026',
+      rules: [],
+      version_status: 'draft'
+    }]);
+    await act(async () => root.render(<RosterModule />));
+    const openButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Regelprofile'));
+    if (!openButton) throw new Error('Regelprofile fehlen');
+    await act(async () => openButton.click());
+
+    expect(container.textContent).not.toContain('Online-Profil');
+    expect(container.textContent).toContain('nicht offline gespeichert oder freigegeben');
+    const createButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Neues Regelprofil'));
+    expect(createButton?.disabled).toBe(true);
+    expect(mocks.listRuleProfiles).not.toHaveBeenCalled();
   });
 
   test('queues only a supported offline draft create and labels it pending, not approved', async () => {

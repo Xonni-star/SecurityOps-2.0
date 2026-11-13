@@ -1,9 +1,11 @@
-import { describe, expect, test } from 'vitest';
-import { ApiError } from '../services/apiClient';
+import { afterEach, describe, expect, test, vi } from 'vitest';
+import { ApiError, apiClient } from '../services/apiClient';
 import {
-  calendarRange, mergeOutboxShifts, planningErrorDetails, reconcileShiftMutation, shiftCalendarDate
+  calendarRange, mergeOutboxShifts, planningApi, planningErrorDetails, reconcileShiftMutation, shiftCalendarDate
 } from '../services/planningService';
 import type { OutboxMutation } from '../services/indexedDbService';
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('service planning helpers', () => {
   test('calculates month, ISO-style Monday week, and day navigation ranges', () => {
@@ -88,5 +90,43 @@ describe('service planning helpers', () => {
     expect(reconcileShiftMutation(pending, mutation, {
       status: 'CONFLICT', serverId: 'server-shift-id', serverVersion: 2
     })[0]).toMatchObject({ id: 'local-shift-id', syncStatus: 'conflict' });
+  });
+
+  test('uses the documented rule-profile list, version, and approval contracts', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue([]);
+    const post = vi.spyOn(apiClient, 'post').mockResolvedValue({});
+    const rule = {
+      code: 'minimum_rest_minutes' as const,
+      value: 720,
+      source: 'Policy section 4',
+      severity: 'blocking' as const
+    };
+
+    await planningApi.listRuleProfiles();
+    await planningApi.createRuleProfile({
+      name: 'Profile A',
+      scope: {},
+      effectiveFrom: '2026-11-01',
+      sourceName: 'Policy',
+      sourceReference: 'policy-2026',
+      rules: [rule]
+    });
+    await planningApi.createRuleProfileVersion('profile/a', {
+      effectiveFrom: '2027-01-01',
+      sourceName: 'Policy',
+      sourceReference: 'policy-2027',
+      rules: [rule]
+    });
+    await planningApi.approveRuleProfileVersion('profile/a', 'version a');
+
+    expect(get).toHaveBeenCalledWith('/planning/rule-profiles?page=1&pageSize=200');
+    expect(post).toHaveBeenNthCalledWith(1, '/planning/rule-profiles', expect.objectContaining({ name: 'Profile A', rules: [rule] }));
+    expect(post).toHaveBeenNthCalledWith(2, '/planning/rule-profiles/profile%2Fa/versions', {
+      effectiveFrom: '2027-01-01',
+      sourceName: 'Policy',
+      sourceReference: 'policy-2027',
+      rules: [rule]
+    });
+    expect(post).toHaveBeenNthCalledWith(3, '/planning/rule-profiles/profile%2Fa/versions/version%20a/approve', {});
   });
 });

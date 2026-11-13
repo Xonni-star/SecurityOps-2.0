@@ -10,7 +10,7 @@ import { offlineVault, OutboxMutation } from '../services/indexedDbService';
 import {
   calendarRange, CoverageRow, mapPlanningShift, mergeOutboxShifts, PlanningFinding,
   planningApi, planningErrorDetails, PlanningShift, SchedulePeriod, ShiftAssignment,
-  ShiftSwap, shiftCalendarDate
+  PlanningRule, PlanningRuleCode, RuleProfileRow, ShiftSwap, shiftCalendarDate
 } from '../services/planningService';
 
 type CalendarView = 'month' | 'week' | 'day';
@@ -34,6 +34,48 @@ interface ShiftFormState {
   repeatCount: number;
   repeatEveryDays: number;
 }
+
+interface RuleVersionInput {
+  effectiveFrom: string;
+  effectiveUntil?: string;
+  sourceName: string;
+  sourceReference: string;
+  rules: PlanningRule[];
+}
+
+interface RuleProfileInput extends RuleVersionInput {
+  name: string;
+  scope: Record<string, unknown>;
+}
+
+const ruleCodeLabels: Record<PlanningRuleCode, string> = {
+  minimum_rest_minutes: 'Mindest-Ruhezeit (Minuten)',
+  maximum_shift_minutes: 'Maximale Schichtdauer (Minuten)',
+  maximum_weekly_minutes: 'Maximale Wochenarbeitszeit (Minuten)',
+  minimum_break_minutes: 'Mindestpause (Minuten)',
+  break_after_minutes: 'Pause spätestens nach (Minuten)',
+  disallowed_weekdays: 'Nicht erlaubte Wochentage (0=So bis 6=Sa)',
+  sunday_work_allowed: 'Sonntagsarbeit erlaubt',
+  holiday_dates: 'Feiertage (lokale Datumswerte)',
+  night_window_start_minute: 'Beginn Nachtzeit (Minuten ab Mitternacht)',
+  night_window_end_minute: 'Ende Nachtzeit (Minuten ab Mitternacht)',
+  night_work_allowed: 'Nachtarbeit erlaubt'
+};
+
+const numericRuleCodes = new Set<PlanningRuleCode>([
+  'minimum_rest_minutes',
+  'maximum_shift_minutes',
+  'maximum_weekly_minutes',
+  'minimum_break_minutes',
+  'break_after_minutes',
+  'night_window_start_minute',
+  'night_window_end_minute'
+]);
+
+const booleanRuleCodes = new Set<PlanningRuleCode>([
+  'sunday_work_allowed',
+  'night_work_allowed'
+]);
 
 const fieldClass = 'w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-blue-400 focus:outline-none';
 const buttonClass = 'inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-slate-700 disabled:cursor-not-allowed disabled:opacity-50';
@@ -97,6 +139,8 @@ export const RosterModule: React.FC = () => {
   const canReport = permissions.includes('planning:reports:read');
   const canRequestSwap = permissions.includes('planning:swaps:manage');
   const canDecideSwap = permissions.includes('planning:swaps:approve');
+  const canManageRules = permissions.includes('planning:rules:manage');
+  const canApproveRules = permissions.includes('planning:rules:approve');
 
   const [view, setView] = useState<CalendarView>('month');
   const [groupView, setGroupView] = useState<GroupView>('time');
@@ -152,6 +196,11 @@ export const RosterModule: React.FC = () => {
   const [workHours, setWorkHours] = useState<Record<string, any>[]>([]);
   const [reportCoverage, setReportCoverage] = useState<CoverageRow[]>([]);
   const [reportLoading, setReportLoading] = useState(false);
+  const [ruleProfilesOpen, setRuleProfilesOpen] = useState(false);
+  const [ruleProfiles, setRuleProfiles] = useState<RuleProfileRow[]>([]);
+  const [ruleProfilesLoading, setRuleProfilesLoading] = useState(false);
+  const [ruleProfilesError, setRuleProfilesError] = useState('');
+  const [ruleProfilesMessage, setRuleProfilesMessage] = useState('');
 
   const loadOutbox = useCallback(async () => {
     const items = await offlineVault.getOutbox(currentTenantId, 'shift');
@@ -261,6 +310,73 @@ export const RosterModule: React.FC = () => {
   useEffect(() => {
     void refresh();
   }, [refresh, lastSyncTime]);
+
+  useEffect(() => {
+    if (!isOnline) setRuleProfiles([]);
+  }, [isOnline]);
+
+  const loadRuleProfiles = async () => {
+    if (!canRead) return;
+    if (!isOnline) {
+      setRuleProfilesError('Regelprofile werden aus Sicherheitsgründen nicht offline gespeichert oder freigegeben.');
+      return;
+    }
+    setRuleProfilesLoading(true);
+    setRuleProfilesError('');
+    try {
+      setRuleProfiles(await planningApi.listRuleProfiles());
+    } catch (error) {
+      setRuleProfilesError(planningErrorDetails(error).message);
+    } finally {
+      setRuleProfilesLoading(false);
+    }
+  };
+
+  const saveRuleProfile = async (input: RuleProfileInput, profileId?: string): Promise<boolean> => {
+    if (!canManageRules || !isOnline) return false;
+    setRuleProfilesError('');
+    setRuleProfilesMessage('');
+    try {
+      if (profileId) {
+        const { name: _name, scope: _scope, ...version } = input;
+        await planningApi.createRuleProfileVersion(profileId, version);
+        setRuleProfilesMessage('Neue Regelprofilrevision als Entwurf gespeichert. Sie ist noch nicht freigegeben.');
+      } else {
+        await planningApi.createRuleProfile(input);
+        setRuleProfilesMessage('Regelprofil und erste Entwurfsrevision gespeichert. Die Revision ist noch nicht freigegeben.');
+      }
+      await loadRuleProfiles();
+      return true;
+    } catch (error) {
+      const detail = planningErrorDetails(error);
+      setRuleProfilesError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+      return false;
+    }
+  };
+
+  const approveRuleProfileVersion = async (profile: RuleProfileRow, versionId: string): Promise<boolean> => {
+    if (!canApproveRules || !isOnline) return false;
+    if (!window.confirm(`Regelprofil „${profile.name}“ Revision freigeben? Nur nach fachlicher Prüfung der Quelle und Werte bestätigen.`)) return false;
+    setRuleProfilesError('');
+    setRuleProfilesMessage('');
+    try {
+      await planningApi.approveRuleProfileVersion(profile.id, versionId);
+      setRuleProfilesMessage('Regelprofilrevision serverseitig freigegeben.');
+      await loadRuleProfiles();
+      return true;
+    } catch (error) {
+      const detail = planningErrorDetails(error);
+      setRuleProfilesError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+      return false;
+    }
+  };
+
+  const openRuleProfiles = () => {
+    setRuleProfilesOpen(true);
+    setRuleProfilesError('');
+    setRuleProfilesMessage('');
+    void loadRuleProfiles();
+  };
 
   const activePeriod = periods.find(period => period.id === selectedPeriodId);
   const coverageByShift = useMemo(() => new Map(coverage.map(row => [row.shift_id, row])), [coverage]);
@@ -719,6 +835,7 @@ export const RosterModule: React.FC = () => {
           {canReport && <button className={buttonClass} disabled={!isOnline || reportLoading} onClick={() => void loadReports()}>
             {reportLoading ? <LoaderCircle className="animate-spin" size={14} /> : <FileText size={14} />} Berichte
           </button>}
+          {canRead && <button className={buttonClass} onClick={openRuleProfiles}>Regelprofile</button>}
           {canReport && <button className={buttonClass} disabled={!isOnline} onClick={() => void downloadHoursCsv()}><Download size={14} /> CSV</button>}
           <button className={buttonClass} onClick={() => window.print()}><Printer size={14} /> Drucken</button>
           <button className={buttonClass} disabled={loading} onClick={() => void refresh()} aria-label="Dienstplan aktualisieren">
@@ -954,9 +1071,289 @@ export const RosterModule: React.FC = () => {
           </section>
         </div>
       </Dialog>}
+
+      {ruleProfilesOpen && <Dialog title="Versionierte Regelprofile" onClose={() => setRuleProfilesOpen(false)}>
+        <RuleProfileManager
+          profiles={ruleProfiles}
+          loading={ruleProfilesLoading}
+          error={ruleProfilesError}
+          message={ruleProfilesMessage}
+          canManage={canManageRules}
+          canApprove={canApproveRules}
+          isOnline={isOnline}
+          onReload={() => void loadRuleProfiles()}
+          onSave={saveRuleProfile}
+          onApprove={approveRuleProfileVersion}
+        />
+      </Dialog>}
     </section>
   );
 };
+
+function RuleProfileManager({
+  profiles, loading, error, message, canManage, canApprove, isOnline, onReload, onSave, onApprove
+}: {
+  profiles: RuleProfileRow[];
+  loading: boolean;
+  error: string;
+  message: string;
+  canManage: boolean;
+  canApprove: boolean;
+  isOnline: boolean;
+  onReload: () => void;
+  onSave: (input: RuleProfileInput, profileId?: string) => Promise<boolean>;
+  onApprove: (profile: RuleProfileRow, versionId: string) => Promise<boolean>;
+}) {
+  const [target, setTarget] = useState<{ mode: 'create' } | { mode: 'version'; profileId: string } | null>(null);
+  const [name, setName] = useState('');
+  const [scopeText, setScopeText] = useState('{}');
+  const [effectiveFrom, setEffectiveFrom] = useState(localDate(new Date()));
+  const [effectiveUntil, setEffectiveUntil] = useState('');
+  const [sourceName, setSourceName] = useState('');
+  const [sourceReference, setSourceReference] = useState('');
+  const [rules, setRules] = useState<PlanningRule[]>([]);
+  const [ruleCode, setRuleCode] = useState<PlanningRuleCode>('minimum_rest_minutes');
+  const [ruleValue, setRuleValue] = useState('');
+  const [ruleSource, setRuleSource] = useState('');
+  const [ruleSeverity, setRuleSeverity] = useState<'warning' | 'blocking'>('blocking');
+  const [validationError, setValidationError] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [approvingVersionId, setApprovingVersionId] = useState('');
+
+  const groupedProfiles = useMemo(() => {
+    const groups = new Map<string, { profile: RuleProfileRow; versions: RuleProfileRow[] }>();
+    for (const row of profiles) {
+      const current = groups.get(row.id);
+      if (current) {
+        if (row.version_id) current.versions.push(row);
+      } else {
+        groups.set(row.id, { profile: row, versions: row.version_id ? [row] : [] });
+      }
+    }
+    return [...groups.values()].sort((a, b) => a.profile.name.localeCompare(b.profile.name, 'de'));
+  }, [profiles]);
+
+  const startCreate = () => {
+    setTarget({ mode: 'create' });
+    setName('');
+    setScopeText('{}');
+    setEffectiveFrom(localDate(new Date()));
+    setEffectiveUntil('');
+    setSourceName('');
+    setSourceReference('');
+    setRules([]);
+    setRuleValue('');
+    setRuleSource('');
+    setValidationError('');
+  };
+
+  const startVersion = (profileId: string) => {
+    setTarget({ mode: 'version', profileId });
+    setName('');
+    setScopeText('{}');
+    setEffectiveFrom(localDate(new Date()));
+    setEffectiveUntil('');
+    setSourceName('');
+    setSourceReference('');
+    setRules([]);
+    setRuleValue('');
+    setRuleSource('');
+    setValidationError('');
+  };
+
+  const addRule = () => {
+    setValidationError('');
+    const source = ruleSource.trim();
+    if (source.length < 2 || source.length > 255) {
+      setValidationError('Jede Regel benötigt eine Quellenangabe (2–255 Zeichen).');
+      return;
+    }
+
+    let value: PlanningRule['value'];
+    if (numericRuleCodes.has(ruleCode)) {
+      const parsed = Number(ruleValue);
+      if (!ruleValue.trim() || !Number.isFinite(parsed) || parsed < 0) {
+        setValidationError('Für diese Regel ist ein endlicher, nicht negativer Zahlenwert erforderlich.');
+        return;
+      }
+      value = parsed;
+    } else if (booleanRuleCodes.has(ruleCode)) {
+      if (ruleValue !== 'true' && ruleValue !== 'false') {
+        setValidationError('Bitte einen booleschen Wert auswählen.');
+        return;
+      }
+      value = ruleValue === 'true';
+    } else {
+      const entries = ruleValue.split(',').map(entry => entry.trim()).filter(Boolean);
+      if (entries.length === 0) {
+        setValidationError('Bitte mindestens einen Listenwert eingeben.');
+        return;
+      }
+      if (ruleCode === 'disallowed_weekdays') {
+        const weekdays = entries.map(Number);
+        if (weekdays.some(day => !Number.isInteger(day) || day < 0 || day > 6)) {
+          setValidationError('Wochentage müssen ganze Zahlen von 0 bis 6 sein (0 = Sonntag).');
+          return;
+        }
+        value = weekdays;
+      } else {
+        if (entries.some(date => !/^\d{4}-\d{2}-\d{2}$/.test(date))) {
+          setValidationError('Feiertage müssen lokale ISO-Datumswerte im Format JJJJ-MM-TT sein.');
+          return;
+        }
+        value = entries;
+      }
+    }
+
+    setRules(current => [...current, {
+      code: ruleCode,
+      value,
+      source,
+      severity: ruleSeverity
+    }]);
+    setRuleValue('');
+    setRuleSource('');
+  };
+
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    setValidationError('');
+    if (!isOnline || !canManage) return;
+    if (rules.length === 0 || rules.length > 100) {
+      setValidationError('Eine Regelprofilrevision benötigt mindestens eine Regel.');
+      return;
+    }
+    if (effectiveUntil && effectiveUntil < effectiveFrom) {
+      setValidationError('Das Ende der Wirksamkeit darf nicht vor dem Beginn liegen.');
+      return;
+    }
+
+    let scope: Record<string, unknown> = {};
+    if (target?.mode === 'create') {
+      try {
+        const parsed: unknown = JSON.parse(scopeText);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Der Geltungsbereich muss ein JSON-Objekt sein.');
+        }
+        scope = parsed as Record<string, unknown>;
+      } catch (parseError) {
+        setValidationError(parseError instanceof Error ? parseError.message : 'Ungültiges JSON im Geltungsbereich.');
+        return;
+      }
+      if (name.trim().length < 2 || name.trim().length > 160) {
+        setValidationError('Der Profilname muss 2 bis 160 Zeichen lang sein.');
+        return;
+      }
+    }
+    if (sourceName.trim().length < 2 || sourceName.trim().length > 255 ||
+        sourceReference.trim().length < 2 || sourceReference.trim().length > 2000) {
+      setValidationError('Quellenname und Quellenreferenz sind erforderlich (mindestens 2 Zeichen).');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const input: RuleProfileInput = {
+        name: target?.mode === 'create' ? name.trim() : '',
+        scope,
+        effectiveFrom,
+        effectiveUntil: effectiveUntil || undefined,
+        sourceName: sourceName.trim(),
+        sourceReference: sourceReference.trim(),
+        rules
+      };
+      const saved = await onSave(input, target?.mode === 'version' ? target.profileId : undefined);
+      if (saved) setTarget(null);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const approve = async (profile: RuleProfileRow, versionId: string) => {
+    setApprovingVersionId(versionId);
+    try {
+      await onApprove(profile, versionId);
+    } finally {
+      setApprovingVersionId('');
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {!isOnline && <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200" role="status">Regelprofile werden nicht offline gespeichert oder freigegeben.</p>}
+      {error && <p className="rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200" role="alert">{error}</p>}
+      {message && <p className="rounded-lg border border-blue-500/30 bg-blue-500/10 p-3 text-xs text-blue-200" role="status">{message}</p>}
+      <div className="flex flex-wrap justify-between gap-2">
+        <p className="max-w-xl text-xs text-amber-200">Regelwerte benötigen eine belegte Quelle und fachliche Prüfung. Es werden keine gesetzlichen oder tariflichen Grenzwerte vorgegeben; die Freigabe ist keine Rechtskonformitätsbestätigung.</p>
+        <div className="flex gap-2">
+          <button type="button" className={buttonClass} disabled={!isOnline || loading} onClick={onReload}>{loading ? 'Laden…' : 'Aktualisieren'}</button>
+          {canManage && <button type="button" className={primaryButtonClass} disabled={!isOnline} onClick={startCreate}>Neues Regelprofil</button>}
+        </div>
+      </div>
+
+      {loading && profiles.length === 0
+        ? <p className="py-6 text-center text-xs text-slate-400" role="status">Regelprofile werden geladen…</p>
+        : groupedProfiles.length === 0
+          ? <p className="rounded-lg border border-dashed border-slate-700 p-6 text-center text-xs text-slate-400">Keine Regelprofile verfügbar.</p>
+          : <div className="space-y-3">{groupedProfiles.map(({ profile, versions }) => (
+            <section key={profile.id} className="rounded-xl border border-slate-800 bg-slate-950 p-3">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-slate-100">{profile.name}</h3>
+                  <p className="text-[11px] text-slate-500">Geltungsbereich: {JSON.stringify(profile.scope ?? {})} · {profile.active ? 'Aktiv' : 'Inaktiv'}</p>
+                </div>
+                {canManage && <button type="button" className={buttonClass} disabled={!isOnline} onClick={() => startVersion(profile.id)}>Neue Revision</button>}
+              </div>
+              {versions.length === 0
+                ? <p className="mt-2 text-xs text-slate-500">Keine Revision verfügbar.</p>
+                : <div className="mt-3 space-y-2">{[...versions].sort((a, b) => Number(b.version_number ?? 0) - Number(a.version_number ?? 0)).map(version => (
+                  <article key={version.version_id} className="rounded-lg border border-slate-800 p-3 text-xs">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div className="font-semibold text-slate-200">Revision {version.version_number ?? '—'} · {version.version_status ?? 'unbekannt'} · wirksam ab {version.effective_from?.slice(0, 10) ?? '—'}{version.effective_until ? ` bis ${version.effective_until.slice(0, 10)}` : ''}</div>
+                      {version.version_id && version.version_status === 'draft' && canApprove && <button type="button" className={buttonClass} disabled={!isOnline || approvingVersionId === version.version_id} onClick={() => void approve(profile, version.version_id!)}>{approvingVersionId === version.version_id ? 'Freigabe…' : 'Revision freigeben'}</button>}
+                    </div>
+                    <p className="mt-1 break-words text-slate-400">Quelle: {version.source_name ?? 'nicht angegeben'} · {version.source_reference ?? 'keine Referenz'}</p>
+                    {!isOnline && version.version_status === 'draft' && <p className="mt-1 text-amber-300">Offline nicht freigegeben.</p>}
+                    <ul className="mt-2 space-y-1 text-slate-300">{(version.rules ?? []).map((rule, index) => <li key={`${rule.code}-${index}`}>{ruleCodeLabels[rule.code] ?? rule.code}: <code>{JSON.stringify(rule.value)}</code> · {rule.severity} · Quelle: {rule.source}</li>)}</ul>
+                  </article>
+                ))}</div>}
+              {canApprove && <p className="mt-2 text-[10px] text-slate-500">Der Server verweigert die Freigabe durch den Ersteller der jeweiligen Revision.</p>}
+            </section>
+          ))}</div>}
+
+      {target && <form onSubmit={event => void submit(event)} className="space-y-3 rounded-xl border border-blue-500/30 bg-slate-950 p-3">
+        <h3 className="text-sm font-bold text-slate-100">{target.mode === 'create' ? 'Regelprofil und erste Revision erstellen' : 'Neue Entwurfsrevision erstellen'}</h3>
+        {target.mode === 'create' && <>
+          <label className="block text-xs text-slate-300">Profilname<input aria-label="Profilname" required minLength={2} maxLength={160} className={`${fieldClass} mt-1`} value={name} onChange={event => setName(event.target.value)} /></label>
+          <label className="block text-xs text-slate-300">Geltungsbereich (JSON-Objekt, optional)<textarea aria-label="Geltungsbereich JSON" rows={2} className={`${fieldClass} mt-1 font-mono`} value={scopeText} onChange={event => setScopeText(event.target.value)} /></label>
+        </>}
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="text-xs text-slate-300">Wirksam ab<input aria-label="Wirksam ab" required type="date" className={`${fieldClass} mt-1`} value={effectiveFrom} onChange={event => setEffectiveFrom(event.target.value)} /></label>
+          <label className="text-xs text-slate-300">Wirksam bis (optional)<input aria-label="Wirksam bis" type="date" className={`${fieldClass} mt-1`} value={effectiveUntil} onChange={event => setEffectiveUntil(event.target.value)} /></label>
+          <label className="text-xs text-slate-300">Quellenname<input aria-label="Quellenname" required minLength={2} maxLength={255} className={`${fieldClass} mt-1`} value={sourceName} onChange={event => setSourceName(event.target.value)} /></label>
+          <label className="text-xs text-slate-300">Quellenreferenz<input aria-label="Quellenreferenz" required minLength={2} maxLength={2000} className={`${fieldClass} mt-1`} value={sourceReference} onChange={event => setSourceReference(event.target.value)} /></label>
+        </div>
+
+        <fieldset className="space-y-2 rounded-lg border border-slate-800 p-3">
+          <legend className="px-1 text-xs font-semibold text-slate-300">Regel mit Quellenkennzeichnung hinzufügen</legend>
+          <label className="block text-xs text-slate-400">Regeltyp<select className={`${fieldClass} mt-1`} value={ruleCode} onChange={event => { setRuleCode(event.target.value as PlanningRuleCode); setRuleValue(''); }}><option value="minimum_rest_minutes">{ruleCodeLabels.minimum_rest_minutes}</option>{(Object.keys(ruleCodeLabels) as PlanningRuleCode[]).filter(code => code !== 'minimum_rest_minutes').map(code => <option key={code} value={code}>{ruleCodeLabels[code]}</option>)}</select></label>
+          {booleanRuleCodes.has(ruleCode)
+            ? <label className="block text-xs text-slate-400">Wert<select className={`${fieldClass} mt-1`} value={ruleValue} onChange={event => setRuleValue(event.target.value)}><option value="">Wert auswählen</option><option value="true">Ja</option><option value="false">Nein</option></select></label>
+            : <label className="block text-xs text-slate-400">{numericRuleCodes.has(ruleCode) ? 'Wert (Zahl)' : ruleCode === 'disallowed_weekdays' ? 'Wochentage, kommasepariert (0–6)' : 'Lokale Datumswerte, kommasepariert (JJJJ-MM-TT)'}<input aria-label="Regelwert" type={numericRuleCodes.has(ruleCode) ? 'number' : 'text'} min={numericRuleCodes.has(ruleCode) ? 0 : undefined} step={numericRuleCodes.has(ruleCode) ? 'any' : undefined} className={`${fieldClass} mt-1`} value={ruleValue} onChange={event => setRuleValue(event.target.value)} /></label>}
+          <label className="block text-xs text-slate-400">Quelle dieser Regel<input aria-label="Quelle der Regel" minLength={2} maxLength={255} className={`${fieldClass} mt-1`} value={ruleSource} onChange={event => setRuleSource(event.target.value)} /></label>
+          <div className="flex flex-wrap items-end justify-between gap-2">
+            <label className="text-xs text-slate-400">Schweregrad<select className={`${fieldClass} mt-1`} value={ruleSeverity} onChange={event => setRuleSeverity(event.target.value as 'warning' | 'blocking')}><option value="blocking">Blockierend</option><option value="warning">Hinweis</option></select></label>
+            <button type="button" className={buttonClass} onClick={addRule}>Regel hinzufügen</button>
+          </div>
+          {rules.length > 0 && <ul className="space-y-1 text-xs text-slate-300">{rules.map((rule, index) => <li key={`${rule.code}-${index}`} className="flex flex-wrap items-center justify-between gap-2 rounded bg-slate-900 p-2"><span>{ruleCodeLabels[rule.code]}: {JSON.stringify(rule.value)} · {rule.severity} · Quelle: {rule.source}</span><button type="button" className="text-rose-300" aria-label={`Regel ${index + 1} entfernen`} onClick={() => setRules(current => current.filter((_, currentIndex) => currentIndex !== index))}>Entfernen</button></li>)}</ul>}
+        </fieldset>
+        {validationError && <p role="alert" className="text-xs text-rose-300">{validationError}</p>}
+        <p className="text-[11px] text-amber-200">Die Revision beginnt im Status Entwurf. Eine Freigabe erfolgt getrennt durch den Server; eine lokale Eingabe ersetzt keine rechtliche oder fachliche Bewertung.</p>
+        <div className="flex justify-end gap-2"><button type="button" className={buttonClass} disabled={saving} onClick={() => setTarget(null)}>Abbrechen</button><button className={primaryButtonClass} disabled={saving || !isOnline}>{saving ? 'Speichern…' : 'Entwurfsrevision speichern'}</button></div>
+      </form>}
+    </div>
+  );
+}
 
 function ShiftCard({
   shift, coverage, canManage, isOnline, onDetails, onEdit, onCopy, onDelete
