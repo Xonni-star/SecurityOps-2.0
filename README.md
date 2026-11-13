@@ -1,11 +1,11 @@
 # SecurityOps 2.0 — Sicherheitsdienstverwaltung
 
-Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Übergabemanagement, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
+Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen nach **DIN 77200** und **§ 34a GewO**: Dienstplanung, Objekt- und Mitarbeiterverwaltung, digitales Wachbuch, Übergabe- und Kontrollgangsmanagement, Schlüssel- und Aufgabenverwaltung sowie Offline-Synchronisation für den mobilen Einsatz.
 
 > **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.**
-> DMS, SOP/Dienstanweisungen, Alarm-/Notfallmanagement und Übergabemanagement sind im Repository implementiert, aber nicht deployed oder für Produktion freigegeben. Streifenkontrollen bleiben offen.
+> DMS, SOP/Dienstanweisungen, Alarm-/Notfallmanagement, Übergaben und Kontrollgänge sind im Repository implementiert, aber nicht deployed oder für Produktion freigegeben. Implementierung und lokale Tests sind kein Produktionsnachweis.
 > Historischer Gesamtstatus: [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md); aktuelle SOP-Umsetzung: [SOP_IMPLEMENTATION_REPORT.md](./SOP_IMPLEMENTATION_REPORT.md); Alarm-/Notfallmanagement: [Implementierungsbericht](./ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md).
-> Übergabemanagement ist in PR #13 implementiert, aber noch nicht gemergt oder deployed; Details: [Handovers-API](./frontend/HANDOVERS_API.md).
+> PR #12 (Alarm) und PR #13 (Übergaben) sind in `main` gemergt; das belegt weder einen Produktions-Rollout noch eine Einsatzfreigabe. Details: [Handovers-API](./frontend/HANDOVERS_API.md) und [Kontrollgang-Modul](./frontend/PATROL_MANAGEMENT.md).
 
 ---
 
@@ -87,8 +87,8 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Dokumente | implementiert, lokal verifiziert; nicht deployed | Mandantengeschützte PostgreSQL-Verwaltung, private Dateispeicherung, Versionen, Kategorien, Ordner, Audit und REST-API; Einschränkungen siehe [DMS-Bericht](./DMS_IMPLEMENTATION_REPORT.md) |
 | SOPs | implementiert, nicht deployed | Versionierter Prüf-/Freigabe-Workflow, Zuweisungen, Bestätigungen, JSON-Berichte; Einschränkungen siehe [SOP-API](./frontend/SOP_API.md) und [Implementierungsbericht](./SOP_IMPLEMENTATION_REPORT.md) |
 | Alarme/Notfallpläne | implementiert, lokal verifiziert; nicht deployed | Versionierte und veröffentlichbare objektbezogene Notfallpläne, konfigurierbare Alarmarten, vollständiger Alarmstatus-/Maßnahmenverlauf, site-scoped Zugriff, Offline-Outbox und serverseitiger Eskalationsworker; E-Mail/Push sind nicht konfiguriert und lokale Datei-Uploads fehlen. Details: [API](./frontend/ALARM_EMERGENCY_API.md), [Bericht](./ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md) |
-| Übergaben | implementiert auf offenem PR #13; nicht deployed | Mandantengeschützte Protokolle, getrennte Bestätigungen, Historie, übernommene Aufgaben, DMS-Links und IndexedDB-Sync; Details siehe [Handovers-API](./frontend/HANDOVERS_API.md) |
-| Streifenkontrollen | offen | Nur lokales Mobile-Modul |
+| Übergaben | in `main` integriert; nicht deployed | Mandantengeschützte Protokolle, getrennte Bestätigungen, Historie, übernommene Aufgaben, DMS-Links und IndexedDB-Sync; Details siehe [Handovers-API](./frontend/HANDOVERS_API.md) |
+| Kontrollgänge | Implementierung in offenem PR #14; nicht deployed | Tenant-Isolation/RLS, QR-/NFC-/manuelle Erfassung, versionierte Routen, Gruppen-Zuweisung, geplante Vorkommen mit Missed/Abandoned-Erkennung, persistente Offline-Erfassung inkl. Konfliktbehandlung und Online-DMS-Verknüpfung; Foto-/Offline-Binärupload und externe Benachrichtigung sind nicht konfiguriert. Grenzen und Prüfresultate siehe [Kontrollgang-Modul](./frontend/PATROL_MANAGEMENT.md) und [Implementierungsbericht](./PATROL_IMPLEMENTATION_REPORT.md). |
 | Benutzer/Rechte | teilweise | Login/RBAC vorhanden; Verwaltungs-API offen |
 | Offline-Sync | teilweise | Outbox vorhanden; nicht alle Module angebunden |
 

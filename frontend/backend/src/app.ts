@@ -5,7 +5,7 @@ import helmet from 'helmet';
 import { env } from './config/env';
 import { pool } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
-import { authenticateJwt, requirePermission } from './middleware/auth';
+import { authenticateJwt, requireAnyPermission, requirePermission } from './middleware/auth';
 import * as authController from './controllers/authController';
 import * as clientController from './controllers/clientController';
 import * as guardbookController from './controllers/guardbookController';
@@ -16,6 +16,7 @@ import * as documentController from './controllers/documentController';
 import * as sopController from './controllers/sopController';
 import * as handoverController from './controllers/handoverController';
 import * as alarmWorkflowController from './controllers/alarmWorkflowController';
+import * as patrolController from './controllers/patrolController';
 
 export const app = express();
 
@@ -206,6 +207,35 @@ app.get('/api/v1/emergency-plans/:id/events', authenticateJwt, requirePermission
 app.get('/api/v1/alarms', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmIncidentsV2);
 app.post('/api/v1/alarms', authenticateJwt, requirePermission('alarm:report'), alarmWorkflowController.reportAlarmIncidentV2);
 app.post('/api/v1/alarms/sync', authenticateJwt, alarmWorkflowController.syncAlarmMutations);
+
+// Patrol operations: tenant RLS is applied by each controller transaction.
+app.get('/api/v1/patrol/dashboard', authenticateJwt, requireAnyPermission('patrol:dashboard:read', 'patrol:analytics:read', 'patrol:read'), patrolController.getDashboard);
+app.get('/api/v1/patrol/checkpoints', authenticateJwt, requireAnyPermission('patrol:checkpoint:read', 'patrol:read'), patrolController.listCheckpoints);
+app.post('/api/v1/patrol/checkpoints', authenticateJwt, requireAnyPermission('patrol:checkpoint:manage', 'patrol:manage'), patrolController.createCheckpoint);
+app.patch('/api/v1/patrol/checkpoints/:id', authenticateJwt, requireAnyPermission('patrol:checkpoint:manage', 'patrol:manage'), patrolController.updateCheckpoint);
+app.patch('/api/v1/patrol/checkpoints/:id/status', authenticateJwt, requireAnyPermission('patrol:checkpoint:manage', 'patrol:manage'), patrolController.setCheckpointActive);
+app.post('/api/v1/patrol/checkpoints/:id/rotate-token', authenticateJwt, requireAnyPermission('patrol:checkpoint:manage', 'patrol:manage'), patrolController.rotateCheckpointToken);
+app.post('/api/v1/patrol/checkpoints/:id/archive', authenticateJwt, requireAnyPermission('patrol:checkpoint:manage', 'patrol:manage'), patrolController.archiveCheckpoint);
+app.get('/api/v1/patrol/routes', authenticateJwt, requireAnyPermission('patrol:route:read', 'patrol:read'), patrolController.listRoutes);
+app.get('/api/v1/patrol/employee-groups', authenticateJwt, requireAnyPermission('patrol:route:read', 'patrol:read'), patrolController.listPatrolEmployeeGroups);
+app.post('/api/v1/patrol/employee-groups', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.createPatrolEmployeeGroup);
+app.patch('/api/v1/patrol/employee-groups/:id', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.updatePatrolEmployeeGroup);
+app.post('/api/v1/patrol/employee-groups/:id/archive', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.archivePatrolEmployeeGroup);
+app.post('/api/v1/patrol/routes', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.createRoute);
+app.post('/api/v1/patrol/routes/:id/versions', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.createRouteVersion);
+app.post('/api/v1/patrol/routes/:id/archive', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.archiveRoute);
+app.get('/api/v1/patrol/rounds', authenticateJwt, requireAnyPermission('patrol:round:read', 'patrol:read'), patrolController.listRounds);
+app.get('/api/v1/patrol/rounds/:id/attachments', authenticateJwt, requireAnyPermission('patrol:round:read', 'patrol:round:perform', 'patrol:manage', 'patrol:audit'), patrolController.listRoundAttachments);
+app.post('/api/v1/patrol/rounds/:id/attachments', authenticateJwt, requireAnyPermission('patrol:round:perform', 'patrol:manage'), patrolController.addRoundAttachment);
+app.get('/api/v1/patrol/scheduled-occurrences', authenticateJwt, requireAnyPermission('patrol:round:read', 'patrol:analytics:read', 'patrol:manage'), patrolController.listScheduledOccurrences);
+app.get('/api/v1/patrol/scans', authenticateJwt, requireAnyPermission('patrol:history:read', 'patrol:round:read', 'patrol:read'), patrolController.listScans);
+app.get('/api/v1/patrol/scan-attempts', authenticateJwt, requireAnyPermission('patrol:scan-attempt:read', 'patrol:history:read', 'patrol:audit'), patrolController.listScanAttempts);
+app.get('/api/v1/patrol/exceptions', authenticateJwt, requireAnyPermission('patrol:exception:read', 'patrol:read'), patrolController.listExceptions);
+app.post('/api/v1/patrol/exceptions', authenticateJwt, requireAnyPermission('patrol:exception:create'), patrolController.createException);
+app.post('/api/v1/patrol/rounds', authenticateJwt, requireAnyPermission('patrol:round:start', 'patrol:create'), patrolController.startRound);
+app.post('/api/v1/patrol/rounds/:id/complete', authenticateJwt, requireAnyPermission('patrol:round:complete', 'patrol:create'), patrolController.completeRound);
+app.get('/api/v1/patrol/events', authenticateJwt, requireAnyPermission('patrol:history:read', 'patrol:audit'), patrolController.listEvents);
+app.post('/api/v1/patrol/sync', authenticateJwt, syncController.pushPatrolMutations);
 app.get('/api/v1/alarms/recent-events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listRecentAlarmEvents);
 app.get('/api/v1/alarms/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmEventsV2);
 app.get('/api/v1/alarms/:id/actions', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmActions);

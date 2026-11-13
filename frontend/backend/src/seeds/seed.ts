@@ -93,6 +93,10 @@ export async function seedDatabase(): Promise<void> {
       { code: 'logbook:read', module: 'logbook' },
       { code: 'logbook:create', module: 'logbook' },
       { code: 'patrol:create', module: 'patrol' },
+      { code: 'patrol:read', module: 'patrol' },
+      { code: 'patrol:manage', module: 'patrol' },
+      { code: 'patrol:exception:create', module: 'patrol' },
+      { code: 'patrol:audit', module: 'patrol' },
       { code: 'handover:create', module: 'handover' },
       { code: 'shifts:read', module: 'shifts' },
       { code: 'shifts:manage', module: 'shifts' },
@@ -166,6 +170,18 @@ export async function seedDatabase(): Promise<void> {
         OR (r.name='Wachdienstmitarbeiter'
           AND p.code IN ('handovers:read','handovers:create','handovers:confirm','handovers:tasks'))
         OR (r.name='Auditor' AND p.code='handovers:read')
+      ON CONFLICT DO NOTHING
+    `);
+
+    await client.query(`
+      INSERT INTO role_permissions (role_id,permission_id)
+      SELECT r.id,p.id FROM roles r JOIN permissions p ON
+        (r.name IN ('Systemadministrator','Geschäftsführung','Einsatzleitung','Objektleitung')
+          AND p.code IN ('patrol:read','patrol:create','patrol:manage','patrol:exception:create','patrol:audit'))
+        OR (r.name='Wachdienstmitarbeiter'
+          AND p.code IN ('patrol:read','patrol:create','patrol:exception:create'))
+        OR (r.name IN ('Qualitätsmanagement','Auditor')
+          AND p.code IN ('patrol:read','patrol:audit'))
       ON CONFLICT DO NOTHING
     `);
 

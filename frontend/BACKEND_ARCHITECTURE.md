@@ -34,7 +34,13 @@ Die Übergabe-API verwendet `handovers:*`-RBAC und den Statusfluss `pending_hand
 
 ## REST-API
 
-Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md), [SOP_API.md](./SOP_API.md) und [HANDOVERS_API.md](./HANDOVERS_API.md).
+Alle Pfade haben das Präfix `/api/v1` und benötigen eine gültige Sitzung. Die Request-/Response-Verzeichnisse sowie Berechtigungen stehen in [DOCUMENTS_API.md](./DOCUMENTS_API.md), [SOP_API.md](./SOP_API.md), [HANDOVERS_API.md](./HANDOVERS_API.md) und [PATROL_MANAGEMENT.md](./PATROL_MANAGEMENT.md).
+
+## Kontrollgänge und Patrol-Sync
+
+`patrolController.ts` registriert Objekt-/Tenant-gebundene Kontrollpunkte, versionierte Routen, Rundgänge, Scans, Abweichungen und Auditereignisse. Die API prüft serverseitig granulare Patrol-Rechte (u. a. checkpoint-/route-Manage, Rundgangstart/-durchführung/-abschluss, Historie und Auswertung); die bisherigen groben Rechte bleiben kompatible Alternativen. `withTenantTransaction` setzt den Tenant-Kontext für RLS. Die Mitarbeiteridentität kommt aus `employees.account_user_id` plus aktiver `employee_site_assignments`-Zuordnung.
+
+Direkte und synchronisierte Rundgangsstarts/-abschlüsse rufen dieselben idempotenten Persistenzfunktionen auf. Der Sync speichert Mutation, Payload-Hash und Serverquittung in derselben Tenant-Transaktion; unerwartete Serverfehler werden nicht als fachliche Ablehnung verschluckt. Scan-GPS und Abschlussbemerkungen werden mit den Ereignissen gespeichert. Der Server erzeugt idempotente Abweichungen für verspätete Scans, fällige ausgelassene Routenschritte und Abschluss über der konfigurierten Soll-Dauer. Ungültige und doppelte Scans werden ohne Tokengeheimnis tenant-scoped protokolliert. Routenversionen speichern Zeitfenster, tägliche/wöchentliche Wiederholungen, individuelle Mitarbeiter und versionierte Gruppen-Snapshots. `patrolScheduleWorker.ts` materialisiert eindeutige Zeitvorkommen und verarbeitet verpasste/abgebrochene Runden mit Zustandsbedingungen und `SKIP LOCKED`; die zugehörigen Ereignisse/Abweichungen sind revisionssicher. Der bestehende DMS stellt die Online-Verknüpfung von Dokumenten bereit, nicht aber Offline-Fotoaufnahme oder Binär-Uploads. Konflikte lassen sich serverseitig entweder zugunsten des Serverstands schließen oder als tokenfreie, neue Abweichung dokumentieren; alle Entscheidungen sind tenant-scoped, RBAC-geprüft und idempotent. Es ist kein Patrol-E-Mail-/Push-/Leitstellenprovider konfiguriert; sichtbare Abweichungen/Vorkommensstatus sind kein Zustellnachweis. Siehe [PATROL_MANAGEMENT.md](./PATROL_MANAGEMENT.md).
 
 ## Alarm- und Notfallmanagement
 

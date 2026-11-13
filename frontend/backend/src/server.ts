@@ -2,6 +2,7 @@ import { app } from './app';
 import { env } from './config/env';
 import { verifyAppDatabaseRole } from './config/database';
 import { startAlarmEscalationWorker, stopAlarmEscalationWorker } from './services/alarmEscalationWorker';
+import { startPatrolScheduleWorker, stopPatrolScheduleWorker } from './services/patrolScheduleWorker';
 
 async function bootstrap() {
   try {
@@ -15,8 +16,10 @@ async function bootstrap() {
       console.log(`[API V1 HEALTH] http://localhost:${env.PORT}/api/v1/health`);
     });
     startAlarmEscalationWorker();
+    startPatrolScheduleWorker();
     const shutdown = () => {
       stopAlarmEscalationWorker();
+      stopPatrolScheduleWorker();
       server.close(() => process.exit(0));
     };
     process.once('SIGINT', shutdown);

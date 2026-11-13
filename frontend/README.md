@@ -16,6 +16,14 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 Siehe [Alarm-API](./ALARM_EMERGENCY_API.md), [Offline-Architektur](./OFFLINE_ARCHITECTURE.md) und den [Implementierungsbericht](../ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md).
 
+## Kontrollgangsmanagement
+
+`PatrolModule.tsx` stellt Dashboard mit Kunden-, Objekt-, Mitarbeiter-, Routen-, Zeitraum-, Status- und Abweichungsfiltern, Kontrollpunkt- und Routenversionenverwaltung, Rundgänge, Scans, Abweichungen und Auditereignisse über die versionierte Express-API bereit. Routenversionen unterstützen feste/flexible Reihenfolge, Soll-Dauer, Verspätungstoleranz, Zeitfenster, tägliche/wöchentliche Wiederholung und Objekt-Mitarbeiterzuordnungen. Kontrollpunkte unterstützen Gebäude, Bereich und optionale GPS-Koordinaten sowie Bearbeiten, Aktivieren/Deaktivieren und Archivieren. QR-Payloads enthalten zufällige Tokens; nur deren SHA-256-Hash wird gespeichert. Mobile Erfassung nutzt die native `BarcodeDetector`-API, wo verfügbar, Web NFC auf unterstützten Browsern sowie einen ausdrücklich als manuell markierten Fallback. GPS je Scan ist optional; Rundgangsabschlüsse können Bemerkungen enthalten.
+
+Offline-Start, Scans, Abschluss und Abweichungen werden dauerhaft in der IndexedDB-Outbox vorgemerkt und bei Wiederverbindung über `/api/v1/patrol/sync` synchronisiert. Kontrollpunkte, Routen und lokale Rundgangszustände lassen sich nach Browser-Neustart wiederherstellen. Eine erfolgreiche Tokenprüfung erfolgt erst serverseitig beim Sync; gelöschte oder rotierte Tokens führen zur Ablehnung statt zu einem bestätigten Scan. Details, Endpunkte und offene Kriterien stehen in [PATROL_MANAGEMENT.md](./PATROL_MANAGEMENT.md) und [PATROL_IMPLEMENTATION_REPORT.md](../PATROL_IMPLEMENTATION_REPORT.md).
+
+Die Benutzerzuordnung des Wachpersonals wird serverseitig über Mitarbeiterkonto und Objektzuordnung abgeleitet. Daher sind für bestätigte Scans verknüpfte Mitarbeiterkonten und aktive Objektzuweisungen nötig. Verspätete Scans, beim Scan fällige ausgelassene Kontrollpunkte und zu lange abgeschlossene Runden erzeugen idempotente Abweichungen; ungültige und doppelte Scanversuche werden ohne Tokengeheimnis revisionssicher protokolliert. Zeitfenster/Wiederholungen werden gespeichert, aber noch nicht durch einen Zeitplaner ausgeführt. Mitarbeitergruppen, Fotoanlagen, vollständige Fälligkeitserkennung und ein Patrol-Benachrichtigungsprovider sind nicht verfügbar/implementiert. Die vollständige Spezifikation ist gelesen; der Implementierungsbericht führt die verbleibenden Punkte einzeln auf.
+
 ---
 
 ## 2. Installations-, Build- und Testbefehle

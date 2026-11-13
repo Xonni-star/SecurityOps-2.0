@@ -638,7 +638,12 @@ export interface PatrolScanEvent {
   guardName: string;
   scannedAt: string;
   method: 'QR_CODE' | 'NFC_TAG' | 'MANUELL';
-  verifiedTag: string;
+  verifiedTag?: string;
+  checkpointToken?: string;
+  checkpointTokenVersion?: number;
+  roundId?: string;
+  latitude?: number | null;
+  longitude?: number | null;
   photoUrl?: string;
   notes?: string;
   offlineCaptured: boolean;
@@ -670,8 +675,8 @@ export interface ResponseEnvelope<T = any> {
 
 export interface ConflictResolutionPayload {
   clientUuid: string;
-  entityType: 'task' | 'shift' | 'key' | 'guardbook';
-  strategy: 'USE_LOCAL' | 'USE_SERVER';
+  entityType: 'task' | 'shift' | 'key' | 'guardbook' | 'patrol';
+  strategy: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION';
   expectedVersion: number;
   localPayload?: Record<string, any>;
 }
@@ -680,6 +685,6 @@ export interface ConflictResolutionResult {
   applied: boolean;
   clientUuid: string;
   entityType: string;
-  strategy: 'USE_LOCAL' | 'USE_SERVER';
+  strategy: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION';
   serverState: any;
 }

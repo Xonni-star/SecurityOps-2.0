@@ -1,8 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
+import { createHash } from 'crypto';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 import { createHandover, handoverCreateSchema, HandoverConflictError } from '../services/handoverService';
 import { computePayloadHash } from '../services/syncHash';
+import {
+  recordPatrolException,
+  recordPatrolRoundCompletion,
+  recordPatrolRoundStart,
+  recordPatrolScan,
+  recordPatrolScanAttempt
+} from './patrolController';
 
 export { canonicalStringify, computePayloadHash } from '../services/syncHash';
 
@@ -30,10 +38,25 @@ const syncPushBatchSchema = z.object({
 
 const conflictResolveSchema = z.object({
   clientUuid: z.string().min(8).max(64),
-  entityType: z.enum(['task', 'shift', 'key', 'guardbook']),
-  strategy: z.enum(['USE_LOCAL', 'USE_SERVER']),
+  entityType: z.enum(['task', 'shift', 'key', 'guardbook', 'patrol']),
+  strategy: z.enum(['USE_LOCAL', 'USE_SERVER', 'RECORD_AS_EXCEPTION']),
   expectedVersion: z.number().int().positive('expectedVersion muss eine positive Ganzzahl sein.'),
   localPayload: z.record(z.any()).optional()
+}).superRefine((value, ctx) => {
+  if (value.entityType === 'patrol' && value.strategy === 'USE_LOCAL') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['strategy'],
+      message: 'Patrol-Ereignisse sind append-only; lokale Daten können nur als neue Abweichung dokumentiert werden.'
+    });
+  }
+  if (value.entityType !== 'patrol' && value.strategy === 'RECORD_AS_EXCEPTION') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['strategy'],
+      message: 'Diese Auflösungsstrategie ist nur für Kontrollgangskonflikte zulässig.'
+    });
+  }
 });
 
 export interface SyncResultItem {
@@ -61,6 +84,17 @@ export function hasMutationPermission(
     (entityType === 'handover' && permissions.includes('handover:create'));
 }
 
+function hasPatrolMutationPermission(recordType: unknown, permissions: string[]): boolean {
+  const specificPermission = recordType === 'round_start'
+    ? 'patrol:round:start'
+    : recordType === 'round_complete'
+      ? 'patrol:round:complete'
+      : recordType === 'exception'
+        ? 'patrol:exception:create'
+        : 'patrol:round:perform';
+  return permissions.includes(specificPermission) || permissions.includes('patrol:create');
+}
+
 /**
  * Kanonische, rekursive Serialisierung:
  * Sortiert alle Schlüssel verschachtelter Objekte und normalisiert Arrays deterministisch,
@@ -81,7 +115,10 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
-        if (!hasMutationPermission(mut.entityType, req.user!.permissions)) {
+        const hasPermission = mut.entityType === 'patrol'
+          ? hasPatrolMutationPermission(mut.payload.recordType, req.user!.permissions)
+          : hasMutationPermission(mut.entityType, req.user!.permissions);
+        if (!hasPermission) {
           results.push({
             clientUuid: mut.clientUuid,
             serverId: 'none',
@@ -567,44 +604,119 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
         // 5. PATROL
         else if (mut.entityType === 'patrol') {
-          if (mut.action === 'CREATE') {
-            const insPatrol = await client.query(
-              `INSERT INTO patrol_scans (tenant_id, site_id, checkpoint_id, checkpoint_code, checkpoint_name, guard_id, scanned_at, method, verified_tag, notes, client_mutation_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-               ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
-               RETURNING id`,
-              [
-                tenantId,
-                mut.payload.siteId,
-                mut.payload.checkpointId || null,
-                mut.payload.checkpointCode || 'CP-01',
-                mut.payload.checkpointName || 'Kontrollpunkt',
-                mut.payload.guardId || userId,
-                mut.payload.scannedAt || mut.clientTimestamp,
-                mut.payload.method || 'QR_CODE',
-                mut.payload.verifiedTag || 'RFID-TAG',
-                mut.payload.notes || null,
-                mut.clientUuid
-              ]
-            );
-
-            const pId = insPatrol.rows.length > 0
-              ? insPatrol.rows[0].id
-              : (await client.query('SELECT id FROM patrol_scans WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
-
-            itemResult = {
-              clientUuid: mut.clientUuid,
-              serverId: pId || 'unknown',
-              status: 'SYNCED',
-              serverVersion: 1
-            };
+          if (mut.payload.recordType === 'round_start' && mut.action === 'CREATE') {
+            try {
+              const { recordType: _recordType, ...roundPayload } = mut.payload;
+              const round = await recordPatrolRoundStart(
+                client, tenantId, userId, mut.clientUuid, roundPayload, payloadHash
+              );
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: round.id,
+                status: 'SYNCED',
+                serverVersion: 1,
+                message: round.idempotent ? 'Kontrollgangsstart bereits idempotent bestätigt.' : undefined
+              };
+            } catch (error) {
+              const statusCode = Number((error as any)?.statusCode);
+              if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) throw error;
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: 'none',
+                status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
+                serverVersion: mut.baseVersion,
+                conflictData: statusCode === 409 ? {
+                  serverVersion: mut.baseVersion,
+                  clientVersion: mut.baseVersion,
+                  reason: (error as Error).message
+                } : undefined,
+                message: (error as Error).message
+              };
+            }
+          } else if (mut.payload.recordType === 'round_complete' && mut.action === 'UPDATE') {
+            try {
+              const { recordType: _recordType, ...completionPayload } = mut.payload;
+              const completion = await recordPatrolRoundCompletion(
+                client, tenantId, userId, mut.clientUuid, completionPayload, payloadHash
+              );
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: completion.id,
+                status: 'SYNCED',
+                serverVersion: 1,
+                message: completion.idempotent ? 'Kontrollgangsabschluss bereits idempotent bestätigt.' : undefined
+              };
+            } catch (error) {
+              const statusCode = Number((error as any)?.statusCode);
+              if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) throw error;
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: 'none',
+                status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
+                serverVersion: mut.baseVersion,
+                conflictData: statusCode === 409 ? {
+                  serverVersion: mut.baseVersion,
+                  clientVersion: mut.baseVersion,
+                  reason: (error as Error).message
+                } : undefined,
+                message: (error as Error).message
+              };
+            }
+          } else if (mut.action === 'CREATE') {
+            try {
+              if (mut.payload.recordType === 'exception') {
+                const { recordType: _recordType, ...exceptionPayload } = mut.payload;
+                const exception = await recordPatrolException(
+                  client, tenantId, userId, mut.clientUuid, exceptionPayload, mut.clientTimestamp, payloadHash
+                );
+                itemResult = {
+                  clientUuid: mut.clientUuid,
+                  serverId: exception.id,
+                  status: 'SYNCED',
+                  serverVersion: 1
+                };
+              } else {
+                const scan = await recordPatrolScan(
+                  client, tenantId, userId, mut.clientUuid, mut.payload, mut.clientTimestamp, payloadHash
+                );
+                itemResult = {
+                  clientUuid: mut.clientUuid,
+                  serverId: scan.id,
+                  status: 'SYNCED',
+                  serverVersion: 1,
+                  message: scan.verificationStatus === 'manual' ? 'Manuelle Erfassung; Kontrollpunkt-Token wurde nicht verifiziert.' : undefined
+                };
+              }
+            } catch (error) {
+              const statusCode = Number((error as any)?.statusCode);
+              if (!Number.isInteger(statusCode) || statusCode < 400 || statusCode >= 500) throw error;
+              const attemptReason = (error as { patrolScanAttemptCode?: Parameters<typeof recordPatrolScanAttempt>[7] })
+                .patrolScanAttemptCode;
+              if (attemptReason) {
+                await recordPatrolScanAttempt(
+                  client, tenantId, userId, mut.clientUuid, mut.payload, mut.clientTimestamp, payloadHash, attemptReason
+                );
+              }
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: 'none',
+                status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
+                serverVersion: mut.baseVersion,
+                conflictData: statusCode === 409 ? {
+                  serverVersion: mut.baseVersion,
+                  clientVersion: mut.baseVersion,
+                  reason: (error as Error).message
+                } : undefined,
+                message: (error as Error).message
+              };
+            }
           } else {
             itemResult = {
               clientUuid: mut.clientUuid,
               serverId: 'none',
               status: 'REJECTED',
               serverVersion: mut.baseVersion,
-              message: 'Kontrollgangs-Scans sind unveränderliche Audit-Ereignisse (UPDATE/DELETE unzulässig).'
+              message: 'Nicht unterstützte Kontrollgangsmutation; nur Starts, Abschlüsse, Scans und Abweichungen sind zulässig.'
             };
           }
         }
@@ -736,6 +848,19 @@ export async function pushHandoverMutations(req: Request, res: Response, next: N
   }
 }
 
+export async function pushPatrolMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const body = syncPushBatchSchema.parse(req.body);
+    if (body.mutations.some(mutation => mutation.entityType !== 'patrol')) {
+      throw Object.assign(new Error('Dieser Endpunkt akzeptiert ausschließlich Kontrollgangsmutationen.'), { statusCode: 400 });
+    }
+    req.body = body;
+    return pushSyncMutations(req, res, next);
+  } catch (error) {
+    next(error);
+  }
+}
+
 /**
  * POST /api/v1/sync/conflicts/resolve
  * Reale, vollständig idempotente Server-Auflösung von Synchronisationskonflikten:
@@ -751,6 +876,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
   try {
     const tenantId = req.user!.tenantId;
     const userEmail = req.user!.email;
+    const userId = req.user!.userId;
     const body = conflictResolveSchema.parse(req.body);
     const permissionByEntity = {
       guardbook: 'logbook:create',
@@ -758,7 +884,12 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       task: 'tasks:manage',
       key: 'keys:manage'
     } as const;
-    if (!req.user!.permissions.includes(permissionByEntity[body.entityType])) {
+    const canResolve = body.entityType === 'patrol'
+      ? body.strategy === 'RECORD_AS_EXCEPTION'
+        ? req.user!.permissions.includes('patrol:exception:create') || req.user!.permissions.includes('patrol:manage')
+        : hasPatrolMutationPermission(body.localPayload?.recordType, req.user!.permissions)
+      : req.user!.permissions.includes(permissionByEntity[body.entityType]);
+    if (!canResolve) {
       res.status(403).json({ success: false, message: 'Zugriff verweigert: fehlende Berechtigung für diese Konfliktauflösung.' });
       return;
     }
@@ -801,6 +932,82 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
 
       let updated = false;
       let actualServerData: any = null;
+
+      if (body.entityType === 'patrol') {
+        const conflictReceipt = await client.query(
+          `SELECT client_mutation_id FROM sync_idempotency_receipts
+            WHERE tenant_id=$1 AND client_mutation_id=$2
+              AND entity_type='patrol' AND status='CONFLICT'`,
+          [tenantId, body.clientUuid]
+        );
+        if (!conflictReceipt.rows.length) {
+          throw new ConflictError('Für diese Mutation liegt kein offener Kontrollgangskonflikt vor.');
+        }
+
+        const local = body.localPayload || {};
+        const recordType = typeof local.recordType === 'string' ? local.recordType : 'unknown';
+        if (body.strategy === 'RECORD_AS_EXCEPTION') {
+          let siteId = local.siteId;
+          if (!siteId && local.roundId) {
+            const round = await client.query(
+              'SELECT site_id FROM patrol_rounds WHERE tenant_id=$1 AND id=$2',
+              [tenantId, local.roundId]
+            );
+            siteId = round.rows[0]?.site_id;
+          }
+          const localNote = [local.notes, local.description]
+            .find(value => typeof value === 'string' && value.trim().length > 0);
+          const description = [
+            `Offline-Ereignis '${recordType}' (Mutation ${body.clientUuid}) konnte nicht automatisch synchronisiert werden.`,
+            typeof localNote === 'string' ? `Erfasste Notiz: ${localNote.trim().slice(0, 3500)}` : ''
+          ].filter(Boolean).join(' ');
+          const capturedAt = local.capturedAt || local.scannedAt || local.startedAt || local.completedAt;
+          if (typeof capturedAt !== 'string' || !siteId) {
+            throw new ConflictError('Das lokale Ereignis enthält keinen gültigen Objekt- oder Erfassungszeitpunkt und kann nicht als Abweichung dokumentiert werden.');
+          }
+          const exceptionPayload = {
+            siteId,
+            ...(typeof local.roundId === 'string' ? { roundId: local.roundId } : {}),
+            ...(typeof local.checkpointId === 'string' ? { checkpointId: local.checkpointId } : {}),
+            category: 'other',
+            severity: 'high',
+            description,
+            capturedAt
+          };
+          const resolutionMutationId = `pc_${createHash('sha256')
+            .update(`${tenantId}:${body.clientUuid}`, 'utf8').digest('hex').slice(0, 61)}`;
+          const exception = await recordPatrolException(
+            client,
+            tenantId,
+            userId,
+            resolutionMutationId,
+            exceptionPayload,
+            capturedAt,
+            computePayloadHash(exceptionPayload)
+          );
+          actualServerData = {
+            id: exception.id,
+            site_id: siteId,
+            round_id: exceptionPayload.roundId || null,
+            category: 'other',
+            description,
+            idempotent: exception.idempotent
+          };
+        } else {
+          const roundId = typeof local.roundId === 'string' ? local.roundId : local.roundId?.toString();
+          if (roundId) {
+            const round = await client.query(
+              `SELECT id,site_id,route_id,status,started_at,completed_at
+                 FROM patrol_rounds WHERE tenant_id=$1 AND id=$2`,
+              [tenantId, roundId]
+            );
+            actualServerData = round.rows[0] || { id: roundId, status: 'not_recorded' };
+          } else {
+            actualServerData = { id: body.clientUuid, status: 'not_recorded' };
+          }
+        }
+        updated = true;
+      }
 
       // 3. Fachliche Durchführung je Entitätstyp
       // A. TASK
@@ -983,15 +1190,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           actualServerData = currentGb;
           updated = true;
         }
-      } else {
+      } else if (body.entityType !== 'patrol') {
         throw new ConflictError(`Konfliktstrategie für Typ '${body.entityType}' nicht unterstützt.`);
       }
 
       // 4. Revisionssichere Protokollierung der Konfliktentscheidung (nur beim ERSTEN Mal!)
       await client.query(
         `INSERT INTO audit_logs (tenant_id, user_email, role, action_type, severity, target_entity, details, ip_address)
-         VALUES ($1, $2, 'Einsatzleitung', 'CONFLICT_RESOLVED', 'INFO', $3, $4, $5)`,
-        [tenantId, userEmail, `Conflict:${body.clientUuid}`, `Konflikt aufgelöst: Strategie=${body.strategy}, Entity=${body.entityType}`, req.ip || '127.0.0.1']
+         VALUES ($1, $2, $3, 'CONFLICT_RESOLVED', 'INFO', $4, $5, $6)`,
+        [tenantId, userEmail, req.user!.role, `Conflict:${body.clientUuid}`,
+          `Konflikt aufgelöst: Strategie=${body.strategy}, Entity=${body.entityType}`, req.ip || '127.0.0.1']
       );
 
       conflictResponseData = {

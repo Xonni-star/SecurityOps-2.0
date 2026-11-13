@@ -45,6 +45,8 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
 
   // Selected conflict for three-way side-by-side diff
   const [selectedConflict, setSelectedConflict] = useState<any | null>(null);
+  const [resolutionError, setResolutionError] = useState('');
+  const [isResolvingConflict, setIsResolvingConflict] = useState(false);
 
   const tenant = getCurrentTenant();
 
@@ -65,6 +67,9 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
   const pendingCount = syncQueue.filter((q) => q.status === 'pending').length;
   const syncedCount = syncQueue.filter((q) => q.status === 'synced').length;
   const conflictItems = syncQueue.filter((q) => q.status === 'conflict');
+  const selectedConflictPayload = selectedConflict?.entityType === 'patrol'
+    ? Object.fromEntries(Object.entries(selectedConflict.payload || {}).filter(([key]) => !/token/i.test(key)))
+    : selectedConflict?.payload;
 
   const handleRunSync = async () => {
     setIsSyncing(true);
@@ -73,10 +78,18 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
     setIsSyncing(false);
   };
 
-  const handleResolveDecision = (decision: 'USE_LOCAL' | 'USE_SERVER') => {
+  const handleResolveDecision = async (decision: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION') => {
     if (!selectedConflict) return;
-    resolveConflict(selectedConflict.id, decision);
-    setSelectedConflict(null);
+    setIsResolvingConflict(true);
+    setResolutionError('');
+    try {
+      await resolveConflict(selectedConflict.id, decision);
+      setSelectedConflict(null);
+    } catch (error) {
+      setResolutionError(error instanceof Error ? error.message : 'Konflikt konnte nicht aufgelöst werden.');
+    } finally {
+      setIsResolvingConflict(false);
+    }
   };
 
   return (
@@ -259,13 +272,18 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                       Lokale Offline-Version (Gerät)
                     </span>
                     <div className="p-2.5 rounded-lg bg-slate-950 font-mono text-[11px] text-slate-200">
-                      <pre>{JSON.stringify(selectedConflict.payload, null, 2)}</pre>
+                      <pre>{JSON.stringify(selectedConflictPayload, null, 2)}</pre>
                     </div>
                     <button
-                      onClick={() => handleResolveDecision('USE_LOCAL')}
-                      className="w-full py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold transition"
+                      disabled={isResolvingConflict}
+                      onClick={() => void handleResolveDecision(
+                        selectedConflict.entityType === 'patrol' ? 'RECORD_AS_EXCEPTION' : 'USE_LOCAL'
+                      )}
+                      className="w-full py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold transition disabled:opacity-50"
                     >
-                      Lokale Version durchsetzen
+                      {selectedConflict.entityType === 'patrol'
+                        ? 'Lokales Ereignis als Abweichung dokumentieren'
+                        : 'Lokale Version durchsetzen'}
                     </button>
                   </div>
 
@@ -275,16 +293,38 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                       Aktueller Server-Stand (PostgreSQL)
                     </span>
                     <div className="p-2.5 rounded-lg bg-slate-950 font-mono text-[11px] text-slate-400">
-                      <pre>{JSON.stringify({ status: "In Bearbeitung durch Leitstelle", serverRevision: 3 }, null, 2)}</pre>
+                      <pre>{JSON.stringify(
+                        selectedConflict.conflictDetails?.serverPayload ??
+                        selectedConflict.conflictDetails ??
+                        { status: 'Kein Server-Snapshot für diesen Konflikt verfügbar' },
+                        null,
+                        2
+                      )}</pre>
                     </div>
-                    <button
-                      onClick={() => handleResolveDecision('USE_SERVER')}
-                      className="w-full py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition"
-                    >
-                      Server-Stand übernehmen
-                    </button>
+                    {selectedConflict.entityType === 'patrol' ? (
+                      <button
+                        disabled={isResolvingConflict}
+                        onClick={() => void handleResolveDecision('USE_SERVER')}
+                        className="w-full py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition disabled:opacity-50"
+                      >
+                        Lokales Ereignis verwerfen und Serverstand übernehmen
+                      </button>
+                    ) : (
+                      <button
+                        disabled={isResolvingConflict}
+                        onClick={() => void handleResolveDecision('USE_SERVER')}
+                        className="w-full py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition disabled:opacity-50"
+                      >
+                        Server-Stand übernehmen
+                      </button>
+                    )}
                   </div>
                 </div>
+                {resolutionError && (
+                  <p role="alert" className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300">
+                    {resolutionError} Der Eintrag bleibt in der lokalen Outbox erhalten.
+                  </p>
+                )}
               </div>
             ) : conflictItems.length === 0 ? (
               <div className="p-10 text-center text-slate-500 text-xs">

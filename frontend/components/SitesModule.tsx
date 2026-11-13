@@ -78,9 +78,7 @@ export const SitesModule: React.FC = () => {
       instructionsCount: 2,
       accessRules: 'Ausweispflicht & Taschenkontrolle',
       activeAlarms: 0,
-      checkpoints: [
-        { id: `cp-${Date.now()}-1`, code: 'CP-01', name: 'Haupteingang', locationDetails: 'Foyer', rfidTag: 'RFID-1001', requiredIntervalMinutes: 60 }
-      ]
+      checkpoints: []
     };
     setIsSiteActionPending(true);
     try { if (editingSiteId) await updateSite(editingSiteId, input); else await addSite(input); }
@@ -262,6 +260,11 @@ export const SitesModule: React.FC = () => {
             {/* Tab 2: Checkpoints */}
             {activeSiteTab === 'checkpoints' && (
               <div className="space-y-2">
+                {selectedSite.checkpoints.length === 0 && (
+                  <p className="rounded-xl border border-slate-800 bg-slate-800/40 p-3 text-xs text-slate-400">
+                    Kontrollpunkte werden in der Kontrollgangverwaltung mit nicht erratbaren QR-/NFC-Tokens angelegt.
+                  </p>
+                )}
                 {selectedSite.checkpoints.map((cp) => (
                   <div key={cp.id} className="p-3 rounded-xl bg-slate-800/40 border border-slate-800 flex items-center justify-between text-xs">
                     <div>
@@ -269,10 +272,7 @@ export const SitesModule: React.FC = () => {
                       <div className="text-[11px] text-slate-400">{cp.locationDetails}</div>
                     </div>
                     <div className="text-right">
-                      <span className="text-[10px] font-mono text-blue-400 bg-blue-950/60 px-2 py-0.5 rounded border border-blue-900/40 block">
-                        {cp.rfidTag}
-                      </span>
-                      <span className="text-[10px] text-slate-500">Alle {cp.requiredIntervalMinutes} Min.</span>
+                      <span className="text-[10px] text-slate-500">Alle {cp.requiredIntervalMinutes} Min. · Verwaltung im Modul Kontrollgänge</span>
                     </div>
                   </div>
                 ))}
