@@ -62,7 +62,7 @@ Das Runtime-Dependency-Audit meldete Zod `<4.6.6` (High) und uuid `<11.1.1` (Mod
 | Produktions-Docker | Compose-Konfiguration validiert; Backend- und Frontend-Images erfolgreich gebaut |
 | GitHub CI auf `main` | Merge-Lauf `43439284509` erfolgreich; nachfolgender Release-Artefakt-Lauf `43439596034` erfolgreich |
 | Arbeitsbaum vor Phase-1-Änderungen | Sauber; HEAD entsprach dem live abgefragten `main`-Commit |
-| CI für diesen Feature-Branch | Noch nicht ausgeführt; muss nach PR-Erstellung durch GitHub bestätigt werden |
+| GitHub CI für den Phase-1-Commit | Run `43443834257`: Root, Frontend, Backend/PostgreSQL und Produktions-Docker **alle bestanden** |
 
 ## Grenzen und Abschlussstatus
 
@@ -70,4 +70,4 @@ Die Prüfung bestätigt Funktionspfade und Testresultate, nicht rechtliche Konfo
 
 **Phase-1-Status:** Implementierte Bereiche sind konsolidiert dokumentiert; der nachgewiesene Auth-Fehler ist korrigiert; die gemeldeten Runtime-Advisories sind behoben; Dienstplanung ist spezifiziert, nicht implementiert. Das fehlende allgemeine Request-Rate-Limit, niedrige Hinweise in Entwicklungsabhängigkeiten, unvollständige Offlineabdeckung und die fehlende Produktions-/Restore-Abnahme bleiben offene Arbeit.
 
-**Commit/PR:** Wird nach dem Commit und der Erstellung des Reviews-PRs ergänzt.
+**Commit/PR:** Implementierungscommit `9cfe55f8dac0a74c82f932e0dd08b36720a69ab5`; Review-PR [#15](https://github.com/Xonni-star/SecurityOps-2.0/pull/15) gegen `main`, offen und nicht gemergt. Die abschließende Berichtsergänzung ist in der aktuellen PR-Historie enthalten.
