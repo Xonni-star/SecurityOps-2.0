@@ -75,7 +75,7 @@ Die serverseitige Validierung prüft nur die implementierten Planungsregeln und 
 - `cd frontend && npm run build`: erfolgreich; Vite meldet den bestehenden `__dirname`-Config-Hinweis und einen Chunk über 500 kB.
 - `cd frontend && npm audit`: 0 Vulnerabilities.
 - `cd frontend/backend && npm audit`: 7 Low-Severity-Befunde im Jest/`ts-jest`-Testwerkzeug-Dependency-Tree, einschließlich `deepmerge` GHSA-gcqx-w48m-w2h4; `cd frontend/backend && npm audit --omit=dev`: 0 Vulnerabilities. Der vorgeschlagene `--force`-Fix wäre ein Jest-Downgrade mit Breaking Change und wurde nicht angewendet.
-- PR #16 CI run `43495705927` passed all four jobs at head `062154fc2e79639fd7dce1b837e6bb1076add363`.
-- PR #19 CI for the reconciled UI head is pending.
+- PR #16 CI run `43498580680` passed all four jobs at head `a167379546d239ae7241974a3fbb4f9adb7e1868`.
+- PR #19 CI run `43499283441` passed all four jobs at head `811de4980835c16df03adc625dc76d55951d657a`, based on that PR #16 head.
 
 Diese Prüfungen enthalten keinen Geräte-/Browser-Kompatibilitätstest, Produktions-Rollout oder fachlich/rechtliche Abnahme.

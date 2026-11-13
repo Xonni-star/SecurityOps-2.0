@@ -6,8 +6,8 @@
 
 | PR | State | Base | Verified head | CI |
 |---|---|---|---|---|
-| [#16](https://github.com/Xonni-star/SecurityOps-2.0/pull/16) — backend planning | Open, unmerged | `main` | `062154fc2e79639fd7dce1b837e6bb1076add363` | Run `43495705927`: Root, Frontend, Backend/PostgreSQL/Migration/Jest, and Production-Docker all passed. |
-| [#19](https://github.com/Xonni-star/SecurityOps-2.0/pull/19) — planning UI | Open, unmerged | `xonni-star-phase-2-backend-planning` | Pending reconciliation commit/CI | Earlier head `db1ded865e59b94f8e38dabd62b3b45f9c0d193e` has all four jobs passed in run `43493681913`; current stack requires fresh checks. |
+| [#16](https://github.com/Xonni-star/SecurityOps-2.0/pull/16) — backend planning | Open, unmerged | `main` | `a167379546d239ae7241974a3fbb4f9adb7e1868` | Run `43498580680`: Root, Frontend, Backend/PostgreSQL/Migration/Jest, and Production-Docker all passed. |
+| [#19](https://github.com/Xonni-star/SecurityOps-2.0/pull/19) — planning UI | Open, unmerged | `xonni-star-phase-2-backend-planning` at `a167379546d239ae7241974a3fbb4f9adb7e1868` | `811de4980835c16df03adc625dc76d55951d657a` | Run `43499283441`: all four jobs passed. |
 
 Neither pull request has been merged. PR #19 includes the current PR #16 head as its base; the only merge conflict was `frontend/backend/SERVICE_PLANNING_API.md`. The PR #16 schemas and route documentation were retained, with the frontend integration boundaries reconciled to those contracts.
 
@@ -49,8 +49,8 @@ The API rate limit is per-IP, with a default of 120 requests per minute. Its in-
 - Local production build: `cd frontend && npm run build` — passed. Vite emitted the existing `__dirname` config-loader warning and a bundle-size warning for a chunk above 500 kB.
 - Frontend dependency audit: `cd frontend && npm audit` — 0 vulnerabilities.
 - Backend dependency audit: `cd frontend/backend && npm audit` — 7 low findings in the Jest/`ts-jest` development-test toolchain, including `deepmerge` GHSA-gcqx-w48m-w2h4. `cd frontend/backend && npm audit --omit=dev` — 0 vulnerabilities. The suggested forced remediation is a breaking Jest downgrade; no dependency changes were made.
-- PR #16 current-head CI: run `43495705927`, all four jobs passed at `062154fc2e79639fd7dce1b837e6bb1076add363`.
-- PR #19 reconciliation-head CI: pending.
+- PR #16 CI: run `43498580680`, all four jobs passed at `a167379546d239ae7241974a3fbb4f9adb7e1868`.
+- PR #19 CI: run `43499283441`, all four jobs passed at `811de4980835c16df03adc625dc76d55951d657a`, stacked on PR #16 head `a167379546d239ae7241974a3fbb4f9adb7e1868`.
 
 ## Remaining gaps and limits
 
