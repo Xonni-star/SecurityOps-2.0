@@ -512,7 +512,8 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
         status: 'Aktiv',
         weeklyHours: 40,
         hourlyRate: 19.5,
-        dateOfJoining: '2026-01-01'
+        dateOfJoining: '2026-01-01',
+        assignedSiteIds: [createdSiteId]
       });
     expect(employeeResponse.status).toBe(201);
     createdEmployeeId = employeeResponse.body.data.id;
@@ -720,6 +721,15 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     }
 
     const token = await login(SEED_USER_EMAIL);
+    const employeeResponse = await request(app).get('/api/v1/employees').set(authHeaders(token));
+    const assignedEmployee = employeeResponse.body.data.find((item: any) => item.id === createdEmployeeId);
+    if (assignedEmployee.status !== 'Aktiv') {
+      const restored = await request(app)
+        .patch(`/api/v1/employees/${createdEmployeeId}`)
+        .set(authHeaders(token))
+        .send({ status: 'Aktiv', revisionVersion: assignedEmployee.revision_version });
+      expect(restored.status).toBe(200);
+    }
 
     const shiftResponse = await request(app)
       .post('/api/v1/shifts')
@@ -732,7 +742,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
         endTime: '18:00',
         type: 'Tagdienst',
         status: 'Besetzt',
-        requiredQualification: 'Unterrichtung § 34a GewO'
+        requiredQualification: 'Sachkundeprüfung § 34a'
       });
     expect(shiftResponse.status).toBe(201);
     createdShiftId = shiftResponse.body.data.id;
@@ -785,7 +795,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     const closeShiftResponse = await request(app)
       .patch(`/api/v1/shifts/${createdShiftId}`)
       .set(authHeaders(token))
-      .send({ status: 'Abgeschlossen' });
+      .send({ status: 'Abgeschlossen', revisionVersion: shiftResponse.body.data.revision_version });
     expect(closeShiftResponse.status).toBe(200);
 
     const secondToken = await login(SEED_USER_EMAIL);
