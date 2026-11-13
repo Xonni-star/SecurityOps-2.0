@@ -4,6 +4,7 @@ import {
   listEmergencyPlanVersions,
   listRecentAlarmEvents,
   reportAlarmIncidentV2,
+  syncAlarmMutations,
   transitionAlarmIncidentV2
 } from '../controllers/alarmWorkflowController';
 
@@ -47,6 +48,35 @@ beforeEach(() => {
 });
 
 describe('site-scoped alarm workflow', () => {
+  test.each([
+    ['incident_report', 'alarm:report', ['alarm:read']],
+    ['action_create', 'alarm:action:create', ['alarm:report']],
+    ['status_change', 'alarm:respond', ['alarm:report']]
+  ] as const)('rejects %s synchronization without %s before database access', async (type, permission, permissions) => {
+    const res = response();
+    const payload = type === 'incident_report'
+      ? {}
+      : type === 'action_create'
+        ? { incidentId, actionType: 'measure', description: 'Absperren' }
+        : { incidentId, status: 'bestätigt', note: 'Übernommen', revisionVersion: 1 };
+
+    await syncAlarmMutations(request({
+      user: {
+        userId, tenantId, email: 'guard@example.test', role: 'Objektleitung',
+        permissions: [...permissions], sessionHash: 'hash'
+      },
+      body: { mutations: [{ clientMutationId: `denied-${type}`, type, payload }] }
+    }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.body.data).toEqual([expect.objectContaining({
+      clientMutationId: `denied-${type}`,
+      state: 'conflict',
+      error: `Zugriff verweigert: Fehlende Berechtigung '${permission}'`
+    })]);
+    expect(withTenantTransaction).not.toHaveBeenCalled();
+  });
+
   test('rejects reporting an incident outside the authenticated employee site assignments', async () => {
     db.query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
 

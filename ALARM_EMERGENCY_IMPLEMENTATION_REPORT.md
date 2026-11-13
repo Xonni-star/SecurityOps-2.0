@@ -13,6 +13,7 @@ Die Umsetzung folgt der angehängten Master-Brief-Anforderung zum mandantenfähi
 - Tenant- und Site-scoped Alarmdashboard mit Filtern, überfälligen Eskalationen, Zuweisungen, Statuszählern und aktuellen Ereignissen.
 - Servergesteuerte Eskalationsregeln und persistente Hintergrundjobs mit `FOR UPDATE SKIP LOCKED`, Leases, Wiederholungen und sichtbarem Zustellstatus. Mehrere Worker-Instanzen teilen die PostgreSQL-Queue; abgelaufene Leases können erneut geclaimt werden, während DB-Transaktionen bei Prozessabbruch vor Commit zurückrollen. In-App-Zustellungen werden nur bei aktivem Benutzerkonto als zugestellt markiert. Nicht konfigurierte E-Mail-/Push-Kanäle bleiben `not_configured`.
 - Offline-Erfassung von Alarmmeldungen, Maßnahmen und Statusänderungen im vorhandenen IndexedDB-Store. Synchronisation nutzt stabile Mutation-IDs und serverseitige Idempotenz; `pending`, `confirmed` und `conflict` bleiben unterscheidbar.
+- Der Offline-Sync prüft serverseitig die zum Mutationstyp gehörende Berechtigung (`alarm:report`, `alarm:action:create`, `alarm:respond`) vor Receipt- oder Fachoperationen. Eskalations-Worker enthalten Fehler bei der Tenant-Auflistung und behandeln fehlgeschlagene Polls ohne unbehandelte Promise-Rejections.
 - Cursor-Pagination für Alarmvorfälle sowie Plan-/Incident-Ereignisse, Maßnahmen und Statushistorie; das Dashboard lädt weitere Alarmvorfälle und Verlaufsseiten bedarfsgesteuert.
 - Live-Aktualisierung nutzt die bestehende 30-Sekunden-Polling-Architektur. SSE/WebSockets wurden geprüft, aber nicht ergänzt: das Repository hat dafür keine Streaming-Infrastruktur und Polling ist bereits implementiert und testbar.
 - Migrationen mit `FORCE ROW LEVEL SECURITY`, tenantgebundenen Fremdschlüsseln, eingeschränkten Anwendungsrechten und unveränderlichen Ereignis-/Aktionsdaten.
@@ -21,7 +22,7 @@ Die Umsetzung folgt der angehängten Master-Brief-Anforderung zum mandantenfähi
 
 | Prüfung | Ergebnis |
 |---|---|
-| Backend-Jest einschließlich Migration, RLS und API-Integration | 17 Suites, 194 Tests bestanden |
+| Backend-Jest einschließlich Migration, RLS und API-Integration | 17 Suites, 198 Tests bestanden |
 | Frontend-Vitest | 9 Dateien, 49 Tests bestanden |
 | Backend TypeScript-Build | erfolgreich |
 | Frontend Produktions-Build | erfolgreich |

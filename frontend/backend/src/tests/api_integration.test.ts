@@ -65,6 +65,10 @@ beforeAll(async () => {
     BAVARIA_USER_EMAIL
   ]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [BAVARIA_USER_EMAIL]);
+  await migrationPool.query(
+    'DELETE FROM alarm_mutation_receipts WHERE actor_user_id IN (SELECT id FROM users WHERE email=$1)',
+    [SITE_RESTRICTED_USER_EMAIL]
+  );
   await migrationPool.query('DELETE FROM users WHERE email = $1', [SITE_RESTRICTED_USER_EMAIL]);
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = $1)', [DMS_RESTRICTED_USER_EMAIL]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [DMS_RESTRICTED_USER_EMAIL]);
@@ -337,6 +341,10 @@ afterAll(async () => {
   ]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [BAVARIA_USER_EMAIL]);
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email=$1)', [SITE_RESTRICTED_USER_EMAIL]);
+  await migrationPool.query(
+    'DELETE FROM alarm_mutation_receipts WHERE actor_user_id IN (SELECT id FROM users WHERE email=$1)',
+    [SITE_RESTRICTED_USER_EMAIL]
+  );
   await migrationPool.query('DELETE FROM users WHERE email = $1', [SITE_RESTRICTED_USER_EMAIL]);
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email=$1)', [DMS_RESTRICTED_USER_EMAIL]);
   await migrationPool.query('DELETE FROM users WHERE email = $1', [DMS_RESTRICTED_USER_EMAIL]);
@@ -1367,8 +1375,30 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
       secondWorker.release();
     }
 
+    const syncedAction = await request(app).post('/api/v1/alarms/sync').set(authHeaders(token)).send({
+      mutations: [{
+        clientMutationId: crypto.randomUUID(),
+        type: 'action_create',
+        payload: { incidentId, actionType: 'measure', description: 'Sync action', result: 'Confirmed' }
+      }]
+    });
+    expect(syncedAction.status).toBe(200);
+    expect(syncedAction.body.data[0].state).toBe('confirmed');
+
+    const syncedTransition = await request(app).post('/api/v1/alarms/sync').set(authHeaders(token)).send({
+      mutations: [{
+        clientMutationId: crypto.randomUUID(),
+        type: 'status_change',
+        payload: {
+          incidentId, status: 'bestätigt', note: 'Sync transition', revisionVersion: 1
+        }
+      }]
+    });
+    expect(syncedTransition.status).toBe(200);
+    expect(syncedTransition.body.data[0].state).toBe('confirmed');
+
     const closed = await request(app).post(`/api/v1/alarms/${incidentId}/transitions`)
-      .set(authHeaders(token)).send({ action: 'resolve', note: 'Objekt geprüft, kein Einbruch.', revisionVersion: 1 });
+      .set(authHeaders(token)).send({ action: 'resolve', note: 'Objekt geprüft, kein Einbruch.', revisionVersion: 2 });
     expect(closed.status).toBe(200);
     expect(closed.body.data.incident.status).toBe('abgeschlossen');
     const closedIncidents = await request(app)

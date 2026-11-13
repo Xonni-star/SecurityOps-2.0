@@ -1260,6 +1260,14 @@ export async function syncAlarmMutations(req: Request, res: Response, next: Next
     const results = [];
     for (const mutation of body.mutations) {
       try {
+        const requiredPermission = mutation.type === 'incident_report'
+          ? 'alarm:report'
+          : mutation.type === 'action_create'
+            ? 'alarm:action:create'
+            : 'alarm:respond';
+        if (!can(user, requiredPermission)) {
+          throw httpError(403, `Zugriff verweigert: Fehlende Berechtigung '${requiredPermission}'`);
+        }
         const response = await withTenantTransaction(user.tenantId, async db => {
           const payload: Record<string, unknown> = {
             ...mutation.payload,

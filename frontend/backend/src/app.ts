@@ -185,7 +185,7 @@ app.post('/api/v1/emergency-plans/:id/drills', authenticateJwt, requirePermissio
 app.get('/api/v1/emergency-plans/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listEmergencyPlanEventsV2);
 app.get('/api/v1/alarms', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmIncidentsV2);
 app.post('/api/v1/alarms', authenticateJwt, requirePermission('alarm:report'), alarmWorkflowController.reportAlarmIncidentV2);
-app.post('/api/v1/alarms/sync', authenticateJwt, requirePermission('alarm:report'), alarmWorkflowController.syncAlarmMutations);
+app.post('/api/v1/alarms/sync', authenticateJwt, alarmWorkflowController.syncAlarmMutations);
 app.get('/api/v1/alarms/recent-events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listRecentAlarmEvents);
 app.get('/api/v1/alarms/:id/events', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmEventsV2);
 app.get('/api/v1/alarms/:id/actions', authenticateJwt, requirePermission('alarm:read'), alarmWorkflowController.listAlarmActions);

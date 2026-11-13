@@ -47,7 +47,7 @@ Alle Antworten verwenden den üblichen `{ success, data }`-Envelope. `POST /alar
 | `GET /alarms` | `alarm:read` | Cursor-paginierte Alarmübersicht; Filter siehe unten |
 | `GET /alarms/recent-events` | `alarm:read` | Mandanten-/site-scoped letzte Ereignisse (1–100, Standard 25) |
 | `POST /alarms` | `alarm:report` | Alarm mit Site, Alarmart, Priorität und optional gültigem Plan melden |
-| `POST /alarms/sync` | `alarm:report` | Persistierte Offline-Mutationen idempotent synchronisieren |
+| `POST /alarms/sync` | Anmeldung; je Mutation `alarm:report`, `alarm:action:create` oder `alarm:respond` | Persistierte Offline-Mutationen idempotent synchronisieren; nicht berechtigte Mutationen werden als `conflict` zurückgegeben |
 | `GET /alarms/:id/events` | `alarm:read` | Cursor-paginierte unveränderliche Ereignisse |
 | `GET /alarms/:id/actions` | `alarm:read` | Cursor-paginierte Maßnahmen/Notizen |
 | `POST /alarms/:id/actions` | `alarm:action:create` | Maßnahme oder Notiz mit Beschreibung, Ergebnis und optional vorhandenem DMS-Dokument erfassen |

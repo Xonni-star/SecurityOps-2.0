@@ -152,7 +152,13 @@ export async function processDueAlarmEscalations(): Promise<number> {
   if (running) return 0;
   running = true;
   try {
-    const tenants = await pool.query('SELECT id FROM tenants WHERE is_active=true');
+    let tenants;
+    try {
+      tenants = await pool.query('SELECT id FROM tenants WHERE is_active=true');
+    } catch {
+      console.error('[ALARM ESCALATION] Tenant enumeration failed.');
+      return 0;
+    }
     let count = 0;
     for (const tenant of tenants.rows) {
       try {
@@ -167,10 +173,16 @@ export async function processDueAlarmEscalations(): Promise<number> {
   }
 }
 
+function scheduleAlarmEscalationPoll(): void {
+  void processDueAlarmEscalations().catch(() => {
+    console.error('[ALARM ESCALATION] Worker poll failed.');
+  });
+}
+
 export function startAlarmEscalationWorker(): void {
   if (timer) return;
-  void processDueAlarmEscalations();
-  timer = setInterval(() => { void processDueAlarmEscalations(); }, POLL_INTERVAL_MS);
+  scheduleAlarmEscalationPoll();
+  timer = setInterval(scheduleAlarmEscalationPoll, POLL_INTERVAL_MS);
   timer.unref();
 }
 

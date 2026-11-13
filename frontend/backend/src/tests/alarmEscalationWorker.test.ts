@@ -41,6 +41,18 @@ beforeEach(() => {
 });
 
 describe('alarm escalation worker delivery state', () => {
+  test('contains tenant enumeration failures and permits a later retry', async () => {
+    const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    (pool.query as jest.Mock).mockRejectedValueOnce(new Error('temporary database outage'));
+    try {
+      await expect(processDueAlarmEscalations()).resolves.toBe(0);
+      expect(errorSpy).toHaveBeenCalledWith('[ALARM ESCALATION] Tenant enumeration failed.');
+      await expect(processDueAlarmEscalations()).resolves.toBe(1);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   test('claims jobs with row locks, skips concurrent workers, and reclaims expired leases', async () => {
     await processDueAlarmEscalations();
     const claimSql = db.query.mock.calls.find(([sql]) => String(sql).includes('SELECT j.id'))?.[0] as string;
