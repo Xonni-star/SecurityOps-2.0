@@ -307,11 +307,6 @@ describe('Handover authorization and persistence regressions (PostgreSQL/API)', 
 
   test('a different authorized account cannot replay a confirmation after participant remapping', async () => {
     const handoverId = await createHandover();
-    await migrationPool.query(
-      `UPDATE employees SET account_user_id=$1
-       WHERE tenant_id=$2 AND id=$3`,
-      [userIds.otherOutgoing, tenantId, employeeIds[0]]
-    );
     const clientMutationId = `foreign-${randomUUID()}`;
     const capturedAt = new Date().toISOString();
     const first = await request(app)
@@ -320,14 +315,27 @@ describe('Handover authorization and persistence regressions (PostgreSQL/API)', 
       .send({ clientMutationId, expectedRevisionVersion: 1, capturedAt });
     expect(first.status).toBe(200);
 
-    const foreignReplay = await request(app)
-      .post(`/api/v1/handovers/${handoverId}/confirm`)
-      .set(authHeaders(tokens.otherOutgoing))
-      .send({ clientMutationId, expectedRevisionVersion: 1, capturedAt });
-    expect(foreignReplay.status).toBe(409);
-    expect(await historyCounts(handoverId)).toEqual({
-      confirmations: 1, events: 2, confirmed: 1, acknowledged: 0
-    });
+    await migrationPool.query(
+      `UPDATE employees SET account_user_id=$1
+       WHERE tenant_id=$2 AND id=$3`,
+      [userIds.otherOutgoing, tenantId, employeeIds[0]]
+    );
+    try {
+      const foreignReplay = await request(app)
+        .post(`/api/v1/handovers/${handoverId}/confirm`)
+        .set(authHeaders(tokens.otherOutgoing))
+        .send({ clientMutationId, expectedRevisionVersion: 1, capturedAt });
+      expect(foreignReplay.status).toBe(409);
+      expect(await historyCounts(handoverId)).toEqual({
+        confirmations: 1, events: 2, confirmed: 1, acknowledged: 0
+      });
+    } finally {
+      await migrationPool.query(
+        `UPDATE employees SET account_user_id=$1
+         WHERE tenant_id=$2 AND id=$3`,
+        [userIds.outgoing, tenantId, employeeIds[0]]
+      );
+    }
   });
 
   test('a stale handover revision is rejected without appending history', async () => {
