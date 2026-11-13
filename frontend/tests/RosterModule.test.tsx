@@ -7,13 +7,17 @@ const mocks = vi.hoisted(() => ({
   listPeriods: vi.fn(),
   coverage: vi.fn(),
   listAssignments: vi.fn(),
+  assignEmployee: vi.fn(),
   listFindings: vi.fn(),
   listSwaps: vi.fn(),
   coverRequests: vi.fn(),
   createCoverRequest: vi.fn(),
   decideCoverRequest: vi.fn(),
   recordActualTime: vi.fn(),
+  getActualTime: vi.fn(),
   listTemplates: vi.fn(),
+  updateTemplate: vi.fn(),
+  staffingSuggestions: vi.fn(),
   listRuleProfiles: vi.fn(),
   createRuleProfile: vi.fn(),
   createRuleProfileVersion: vi.fn(),
@@ -90,13 +94,17 @@ vi.mock('../services/planningService', async importOriginal => {
       listPeriods: mocks.listPeriods,
       coverage: mocks.coverage,
       listAssignments: mocks.listAssignments,
+      assignEmployee: mocks.assignEmployee,
       listFindings: mocks.listFindings,
       listSwaps: mocks.listSwaps,
       coverRequests: mocks.coverRequests,
       createCoverRequest: mocks.createCoverRequest,
       decideCoverRequest: mocks.decideCoverRequest,
       recordActualTime: mocks.recordActualTime,
+      getActualTime: mocks.getActualTime,
       listTemplates: mocks.listTemplates,
+      updateTemplate: mocks.updateTemplate,
+      staffingSuggestions: mocks.staffingSuggestions,
       listRuleProfiles: mocks.listRuleProfiles,
       createRuleProfile: mocks.createRuleProfile,
       createRuleProfileVersion: mocks.createRuleProfileVersion,
@@ -198,13 +206,21 @@ describe('RosterModule', () => {
     mocks.listPeriods.mockResolvedValue([period]);
     mocks.coverage.mockResolvedValue([]);
     mocks.listAssignments.mockResolvedValue([]);
+    mocks.assignEmployee.mockResolvedValue({ revisionVersion: 5 });
     mocks.listFindings.mockResolvedValue([]);
     mocks.listSwaps.mockResolvedValue([]);
     mocks.coverRequests.mockResolvedValue([]);
     mocks.createCoverRequest.mockResolvedValue({});
     mocks.decideCoverRequest.mockResolvedValue({});
     mocks.recordActualTime.mockResolvedValue({ revision_version: 1 });
+    mocks.getActualTime.mockResolvedValue({ current: null, history: [] });
     mocks.listTemplates.mockResolvedValue([]);
+    mocks.updateTemplate.mockResolvedValue({});
+    mocks.staffingSuggestions.mockResolvedValue({
+      shiftId: 'shift-a',
+      requirements: [],
+      finalAssignmentRequiresConfirmation: true
+    });
     mocks.listRuleProfiles.mockResolvedValue([]);
     mocks.createRuleProfile.mockResolvedValue({});
     mocks.createRuleProfileVersion.mockResolvedValue({});
@@ -351,12 +367,10 @@ describe('RosterModule', () => {
       site_name: 'Objekt A',
       name: 'Frühdienst',
       time_zone: 'Europe/Berlin',
-      start_time: '08:00:00',
-      end_time: '16:00:00',
+      local_start_time: '08:00:00',
+      local_end_time: '16:00:00',
       required_qualification: 'Sachkunde',
-      frequency: 'WEEKLY',
-      interval: 1,
-      weekdays: [1, 2, 3, 4, 5],
+      recurrence: { frequency: 'WEEKLY', interval: 1, weekdays: [1, 2, 3, 4, 5] },
       active: true,
       revision_version: 1
     }]);
@@ -379,6 +393,107 @@ describe('RosterModule', () => {
     expect(container.textContent).toContain('1 Schichtentwurf/Entwürfe erstellt; 1 Vorkommen serverseitig abgelehnt');
   });
 
+  test('edits and deactivates templates with their loaded revision', async () => {
+    const template = {
+      id: 'template-a',
+      site_id: 'site-a',
+      site_name: 'Objekt A',
+      name: 'Frühdienst',
+      time_zone: 'Europe/Berlin',
+      local_start_time: '08:00:00',
+      local_end_time: '16:00:00',
+      required_qualification: 'Sachkunde',
+      recurrence: { frequency: 'WEEKLY', interval: 1, weekdays: [1, 2, 3, 4, 5] },
+      active: true,
+      revision_version: 6
+    };
+    mocks.listTemplates
+      .mockResolvedValueOnce([template])
+      .mockResolvedValueOnce([{ ...template, name: 'Spätdienst', revision_version: 7 }])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ ...template, name: 'Spätdienst', active: false, revision_version: 8 }])
+      .mockResolvedValueOnce([{ ...template, name: 'Spätdienst', revision_version: 9 }]);
+    await act(async () => root.render(<RosterModule />));
+    const open = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlagen');
+    if (!open) throw new Error('Vorlagen-Schaltfläche fehlt');
+    await act(async () => open.click());
+
+    const edit = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Bearbeiten');
+    if (!edit) throw new Error('Vorlage bearbeiten fehlt');
+    await act(async () => edit.click());
+    const name = container.querySelector<HTMLInputElement>('input[value="Frühdienst"]');
+    if (!name) throw new Error('Vorlagenname fehlt');
+    await act(async () => setInput(name, 'Spätdienst'));
+    const save = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Änderungen speichern');
+    if (!save) throw new Error('Änderungen speichern fehlt');
+    await act(async () => save.click());
+
+    expect(mocks.updateTemplate).toHaveBeenCalledWith('template-a', expect.objectContaining({
+      expectedVersion: 6,
+      name: 'Spätdienst'
+    }));
+    const deactivate = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Deaktivieren');
+    if (!deactivate) throw new Error('Vorlage deaktivieren fehlt');
+    await act(async () => deactivate.click());
+    expect(mocks.updateTemplate).toHaveBeenLastCalledWith('template-a', {
+      expectedVersion: 7,
+      active: false
+    });
+    const showInactive = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Inaktive einblenden');
+    if (!showInactive) throw new Error('Inaktive Vorlagen einblenden fehlt');
+    await act(async () => showInactive.click());
+    const activate = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Aktivieren');
+    if (!activate) throw new Error('Vorlage aktivieren fehlt');
+    await act(async () => activate.click());
+    expect(mocks.updateTemplate).toHaveBeenLastCalledWith('template-a', {
+      expectedVersion: 8,
+      active: true
+    });
+  });
+
+  test('shows staffing suggestions as nonbinding and requires a separate assignment action', async () => {
+    mocks.storeState.employees = [
+      { id: 'employee-a', firstName: 'Ada', lastName: 'Guard', qualifications: [], absences: [] },
+      { id: 'employee-candidate', firstName: 'Alex', lastName: 'Guard', qualifications: [], absences: [] }
+    ];
+    mocks.staffingSuggestions.mockResolvedValue({
+      shiftId: 'shift-a',
+      requirements: [{
+        qualificationType: 'Sachkunde',
+        requiredCount: 1,
+        assignedCount: 0,
+        shortfall: 1,
+        candidates: [{
+          employeeId: 'employee-candidate',
+          firstName: 'Alex',
+          lastName: 'Guard',
+          eligible: true,
+          scheduledMinutesThisWeek: 240,
+          reasons: ['active', 'qualified'],
+          findings: []
+        }]
+      }],
+      finalAssignmentRequiresConfirmation: true
+    });
+    await act(async () => root.render(<RosterModule />));
+    const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
+    if (!eventButton) throw new Error('Kalendereintrag fehlt');
+    await act(async () => eventButton.click());
+    expect(container.textContent).toContain('Nicht bindende Hinweise');
+    expect(container.textContent).toContain('Alex Guard');
+
+    const selectCandidate = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Für Zuweisung auswählen'));
+    if (!selectCandidate) throw new Error('Vorschlag auswählen fehlt');
+    await act(async () => selectCandidate.click());
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Mitarbeiter zuweisen"]')?.value).toBe('employee-candidate');
+    expect(mocks.assignEmployee).not.toHaveBeenCalled();
+
+    const assign = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Zuweisen'));
+    if (!assign) throw new Error('Zuweisen fehlt');
+    await act(async () => assign.click());
+    expect(mocks.assignEmployee).toHaveBeenCalledWith('shift-a', 'employee-candidate', 4);
+  });
+
   test('clears tenant-bound planning data on identity changes and ignores stale template responses', async () => {
     const tenantATemplate = {
       id: 'template-tenant-a',
@@ -386,12 +501,10 @@ describe('RosterModule', () => {
       site_name: 'Tenant A site',
       name: 'TENANT_A_TEMPLATE_SECRET',
       time_zone: 'Europe/Berlin',
-      start_time: '08:00:00',
-      end_time: '16:00:00',
+      local_start_time: '08:00:00',
+      local_end_time: '16:00:00',
       required_qualification: 'Sachkunde',
-      frequency: 'WEEKLY' as const,
-      interval: 1,
-      weekdays: [1, 2, 3, 4, 5],
+      recurrence: { frequency: 'WEEKLY' as const, interval: 1, weekdays: [1, 2, 3, 4, 5] },
       active: true,
       revision_version: 1
     };
@@ -422,7 +535,62 @@ describe('RosterModule', () => {
       last_name: 'Guard',
       status: 'assigned',
       revision_version: 1
+    }, {
+      id: 'assignment-b',
+      shift_id: 'shift-a',
+      employee_id: 'employee-b',
+      first_name: 'Bea',
+      last_name: 'Guard',
+      status: 'assigned',
+      revision_version: 1
     }]);
+    mocks.staffingSuggestions.mockResolvedValue({
+      shiftId: 'shift-a',
+      requirements: [{
+        qualificationType: 'Sachkunde',
+        requiredCount: 1,
+        assignedCount: 0,
+        shortfall: 1,
+        candidates: [{
+          employeeId: 'employee-b',
+          firstName: 'TENANT_A_CANDIDATE_SECRET',
+          lastName: 'Guard',
+          eligible: true,
+          scheduledMinutesThisWeek: 0,
+          reasons: [],
+          findings: []
+        }]
+      }],
+      finalAssignmentRequiresConfirmation: true
+    });
+    const tenantAActual = {
+      id: 'actual-tenant-a',
+      shift_id: 'shift-a',
+      employee_id: 'employee-a',
+      actual_start_at: '2027-01-10T08:03:00+01:00',
+      actual_end_at: '2027-01-10T16:05:00+01:00',
+      break_minutes: 30,
+      revision_version: 2,
+      recorded_by: 'user-a',
+      recorded_at: '2027-01-10T15:10:00.000Z',
+      notes: 'TENANT_A_ACTUAL_SECRET'
+    };
+    let resolveStaleActual!: (value: { current: typeof tenantAActual; history: any[] }) => void;
+    const staleActual = new Promise<{ current: typeof tenantAActual; history: any[] }>(resolve => {
+      resolveStaleActual = resolve;
+    });
+    mocks.getActualTime
+      .mockResolvedValueOnce({
+        current: tenantAActual,
+        history: [{
+          id: 'audit-tenant-a',
+          actor_user_id: 'user-a',
+          event_type: 'shift.actual_time.recorded',
+          details: { notes: 'TENANT_A_HISTORY_SECRET' },
+          created_at: tenantAActual.recorded_at
+        }]
+      })
+      .mockReturnValueOnce(staleActual);
 
     await act(async () => root.render(<RosterModule />));
     const openTemplates = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlagen');
@@ -444,6 +612,13 @@ describe('RosterModule', () => {
     const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
     if (!eventButton) throw new Error('Kalendereintrag fehlt');
     await act(async () => eventButton.click());
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)));
+    const actualNotes = Array.from(container.querySelectorAll('label')).find(label =>
+      label.textContent?.includes('Notiz (optional)')
+    )?.querySelector<HTMLInputElement>('input');
+    expect(container.textContent).toContain('TENANT_A_CANDIDATE_SECRET');
+    expect(container.textContent).toContain('TENANT_A_HISTORY_SECRET');
+    expect(actualNotes?.value).toBe('TENANT_A_ACTUAL_SECRET');
     const actualStart = container.querySelector<HTMLInputElement>('input[placeholder="2027-01-10T08:03:00+01:00"]');
     const actualEnd = container.querySelector<HTMLInputElement>('input[placeholder="2027-01-10T16:05:00+01:00"]');
     const notes = container.querySelectorAll<HTMLInputElement>('input[maxlength="1000"]');
@@ -453,6 +628,11 @@ describe('RosterModule', () => {
       setInput(actualEnd, '2027-01-10T16:05:00+01:00');
       setInput(notes[notes.length - 1], 'TENANT_A_ACTUAL_NOTE_SECRET');
     });
+    const actualEmployee = Array.from(container.querySelectorAll('label')).find(label =>
+      label.textContent?.includes('Zugewiesene Person')
+    )?.querySelector<HTMLSelectElement>('select');
+    if (!actualEmployee) throw new Error('Ist-Zeitperson fehlt');
+    await act(async () => setInput(actualEmployee, 'employee-b'));
 
     mocks.listTemplates.mockImplementationOnce(() => staleTemplates);
     const reopenTemplates = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.trim() === 'Vorlagen');
@@ -480,12 +660,18 @@ describe('RosterModule', () => {
 
     expect(container.textContent).not.toContain('TENANT_A_TEMPLATE_SECRET');
     expect(container.textContent).not.toContain('TENANT_A_COVER_SECRET');
+    expect(container.textContent).not.toContain('TENANT_A_CANDIDATE_SECRET');
+    expect(container.textContent).not.toContain('TENANT_A_HISTORY_SECRET');
     expect(Array.from(container.querySelectorAll('input')).some(input => input.value === 'TENANT_A_ACTUAL_NOTE_SECRET')).toBe(false);
+    expect(Array.from(container.querySelectorAll('input')).some(input => input.value === 'TENANT_A_ACTUAL_SECRET')).toBe(false);
     expect(container.querySelector('[role="dialog"]')).toBeNull();
 
     await act(async () => resolveStaleTemplates([tenantATemplate]));
+    await act(async () => resolveStaleActual({ current: tenantAActual, history: [] }));
     expect(container.textContent).not.toContain('TENANT_A_TEMPLATE_SECRET');
     expect(container.textContent).not.toContain('TENANT_A_COVER_SECRET');
+    expect(container.textContent).not.toContain('TENANT_A_CANDIDATE_SECRET');
+    expect(container.textContent).not.toContain('TENANT_A_ACTUAL_SECRET');
   });
 
   test('creates a template without auto-applying it or supplying tenant-specific sample values', async () => {
@@ -573,7 +759,7 @@ describe('RosterModule', () => {
     }));
   });
 
-  test('records actual time online and carries forward the server revision for corrections', async () => {
+  test('loads persisted actual-time revision and history before allowing a correction', async () => {
     mocks.listAssignments.mockResolvedValue([{
       id: 'assignment-a',
       shift_id: 'shift-a',
@@ -583,11 +769,39 @@ describe('RosterModule', () => {
       status: 'assigned',
       revision_version: 1
     }]);
+    const actualRecord = {
+      id: 'actual-a',
+      shift_id: 'shift-a',
+      employee_id: 'employee-a',
+      actual_start_at: '2027-01-10T08:03:00+01:00',
+      actual_end_at: '2027-01-10T16:05:00+01:00',
+      break_minutes: 30,
+      revision_version: 7,
+      recorded_by: 'user-b',
+      recorded_at: '2027-01-10T15:10:00.000Z',
+      notes: 'Initial capture'
+    };
+    mocks.getActualTime
+      .mockResolvedValueOnce({
+        current: actualRecord,
+        history: [{ id: 'audit-a', actor_user_id: 'user-b', event_type: 'shift.actual_time.recorded', details: {}, created_at: actualRecord.recorded_at }]
+      })
+      .mockResolvedValueOnce({
+        current: { ...actualRecord, revision_version: 8, notes: 'Corrected' },
+        history: [{ id: 'audit-a', actor_user_id: 'user-b', event_type: 'shift.actual_time.recorded', details: {}, created_at: actualRecord.recorded_at }]
+      });
+    mocks.recordActualTime
+      .mockRejectedValueOnce(new ApiError(500, 'Verbindung unterbrochen.', undefined, true))
+      .mockResolvedValueOnce({ ...actualRecord, revision_version: 8, notes: 'Corrected' });
     await act(async () => root.render(<RosterModule />));
     const eventButton = container.querySelector<HTMLButtonElement>('button[aria-label*="Objekt A"]');
     if (!eventButton) throw new Error('Kalendereintrag fehlt');
     await act(async () => eventButton.click());
+    await act(async () => new Promise(resolve => setTimeout(resolve, 0)));
 
+    expect(mocks.getActualTime).toHaveBeenCalledWith('shift-a', 'employee-a');
+    expect(container.textContent).toContain('Revision 7');
+    expect(container.textContent).toContain('Änderungsverlauf (1)');
     const start = container.querySelector<HTMLInputElement>('input[placeholder="2027-01-10T08:03:00+01:00"]');
     const end = container.querySelector<HTMLInputElement>('input[placeholder="2027-01-10T16:05:00+01:00"]');
     if (!start || !end) throw new Error('Ist-Zeitfelder fehlen');
@@ -597,19 +811,19 @@ describe('RosterModule', () => {
     });
     const save = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Ist-Zeit serverseitig speichern'));
     if (!save) throw new Error('Ist-Zeit speichern fehlt');
-    mocks.recordActualTime.mockRejectedValueOnce(new ApiError(500, 'Verbindung unterbrochen.', undefined, true));
     await act(async () => save.click());
     await act(async () => save.click());
 
     expect(mocks.recordActualTime).toHaveBeenNthCalledWith(1, 'shift-a', expect.objectContaining({
       employeeId: 'employee-a',
       actualStartAt: '2027-01-10T08:03:00+01:00',
-      expectedVersion: 0,
+      expectedVersion: 7,
       clientMutationId: 'mutation-id'
     }));
     expect(mocks.recordActualTime).toHaveBeenNthCalledWith(2, 'shift-a', expect.objectContaining({ clientMutationId: 'mutation-id' }));
-    expect(container.textContent).toContain('zuletzt gespeichert: Revision 1');
-    expect(container.querySelector<HTMLInputElement>('input[type="number"][min="0"][step="1"]')?.value).toBe('1');
+    expect(mocks.getActualTime).toHaveBeenCalledTimes(2);
+    expect(container.textContent).toContain('Revision 8');
+    expect(container.querySelector<HTMLInputElement>('input[type="number"][min="0"][step="1"]')).toBeNull();
   });
 
   test('keeps template, cover, and actual-time workflows online-only', async () => {

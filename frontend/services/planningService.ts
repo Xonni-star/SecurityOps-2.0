@@ -47,14 +47,62 @@ export interface ShiftTemplate {
   site_name?: string;
   name: string;
   time_zone: string;
-  start_time: string;
-  end_time: string;
+  local_start_time: string;
+  local_end_time: string;
   required_qualification: string;
-  frequency: 'DAILY' | 'WEEKLY';
-  interval: number;
-  weekdays: number[] | null;
+  recurrence: {
+    frequency: 'DAILY' | 'WEEKLY';
+    interval: number;
+    weekdays: number[];
+  };
   active: boolean;
   revision_version: number;
+}
+
+export interface StaffingSuggestion {
+  shiftId: string;
+  requirements: Array<{
+    qualificationType: string;
+    requiredCount: number;
+    assignedCount: number;
+    shortfall: number;
+    candidates: Array<{
+      employeeId: string;
+      firstName: string;
+      lastName: string;
+      eligible: boolean;
+      scheduledMinutesThisWeek: number;
+      reasons: string[];
+      findings: PlanningFinding[];
+    }>;
+  }>;
+  finalAssignmentRequiresConfirmation: true;
+}
+
+export interface ActualTimeRecord {
+  id: string;
+  shift_id: string;
+  employee_id: string;
+  actual_start_at: string;
+  actual_end_at: string;
+  break_minutes: number;
+  revision_version: number;
+  recorded_by: string;
+  recorded_at: string;
+  notes?: string | null;
+}
+
+export interface ActualTimeHistoryEntry {
+  id: string;
+  actor_user_id: string;
+  event_type: string;
+  details: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ActualTimeRead {
+  current: ActualTimeRecord | null;
+  history: ActualTimeHistoryEntry[];
 }
 
 export interface CoverRequest {
@@ -459,10 +507,28 @@ export const planningApi = {
     interval?: number;
     weekdays?: number[];
   }) => apiClient.post<ShiftTemplate>('/planning/templates', input),
+  updateTemplate: (templateId: string, input: {
+    expectedVersion: number;
+    siteId?: string;
+    name?: string;
+    timeZone?: string;
+    startTime?: string;
+    endTime?: string;
+    requiredQualification?: string;
+    frequency?: 'DAILY' | 'WEEKLY';
+    interval?: number;
+    weekdays?: number[];
+    active?: boolean;
+  }) => apiClient.patch<ShiftTemplate>(
+    `/planning/templates/${encodeURIComponent(templateId)}`, input
+  ),
   applyTemplate: (templateId: string, input: { dateFrom: string; dateTo: string; schedulePeriodId?: string }) =>
     apiClient.post<{ occurrences: Array<{ date: string; status: string; shiftId?: string; findings?: PlanningFinding[] }>; finalValidationRequired: boolean }>(
       `/planning/templates/${encodeURIComponent(templateId)}/apply`, input
     ),
+  staffingSuggestions: (shiftId: string) => apiClient.get<StaffingSuggestion>(
+    `/planning/shifts/${encodeURIComponent(shiftId)}/staffing-suggestions`
+  ),
   createSwap: (shiftId: string, input: Record<string, unknown>) =>
     apiClient.post<any>(`/planning/shifts/${encodeURIComponent(shiftId)}/swaps`, input),
   listSwaps: (status?: string) => getAllPages<ShiftSwap>(
@@ -515,6 +581,9 @@ export const planningApi = {
     recorded_at: string;
     notes?: string | null;
   }>(`/planning/shifts/${encodeURIComponent(shiftId)}/actual-time`, input),
+  getActualTime: (shiftId: string, employeeId: string) => apiClient.get<ActualTimeRead>(
+    `/planning/shifts/${encodeURIComponent(shiftId)}/actual-time?employeeId=${encodeURIComponent(employeeId)}`
+  ),
   workHours: (from: string, to: string) => apiClient.get<WorkHoursRow[]>(
     `/planning/reports/work-hours?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`
   ),
