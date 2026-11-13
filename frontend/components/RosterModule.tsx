@@ -154,8 +154,25 @@ function reportValue(value: number | null | undefined, status?: string): string 
   return `${value}${status ? ` (${status})` : ''}`;
 }
 
+function reportVariance(actual: number | null, planned: number, status: string): string {
+  if (actual == null) return reportValue(null, status);
+  const variance = Math.round((actual - planned) * 100) / 100;
+  return `${variance > 0 ? '+' : ''}${variance} (${status})`;
+}
+
 function reportSources(sources: unknown[] | undefined): string {
   return sources?.length ? sources.map(source => typeof source === 'string' ? source : JSON.stringify(source)).join('; ') : 'Keine Quelle gemeldet';
+}
+
+function planningCacheRangeWarning(
+  cached: { rangeFrom?: string; rangeTo?: string },
+  requested: { from: string; to: string }
+): string {
+  if (!cached.rangeFrom || !cached.rangeTo) {
+    return 'Der Offline-Cache enthält keinen gespeicherten Datumsbereich. Eine leere Ansicht bestätigt nicht, dass im angeforderten Zeitraum keine Schichten bestehen.';
+  }
+  if (requested.from >= cached.rangeFrom && requested.to <= cached.rangeTo) return '';
+  return `Der Offline-Cache enthält nur den zuletzt geladenen Bereich ${cached.rangeFrom} bis ${cached.rangeTo}; ${requested.from} bis ${requested.to} ist nicht vollständig enthalten. Leere Bereiche außerhalb des Caches bestätigen nicht, dass dort keine Schichten bestehen.`;
 }
 
 export const RosterModule: React.FC = () => {
@@ -402,7 +419,7 @@ export const RosterModule: React.FC = () => {
         }
         const mapped = rawShifts.map(row => mapPlanningShift(row, currentTenantId, employees));
         try {
-          await offlineVault.savePlanningCache(currentTenantId, currentUserId, mapped, loadedPeriods);
+          await offlineVault.savePlanningCache(currentTenantId, currentUserId, mapped, loadedPeriods, range);
           if (!isCurrentIdentity(requestIdentity)) return;
           setCachedAt(new Date().toISOString());
         } catch (error) {
@@ -420,6 +437,7 @@ export const RosterModule: React.FC = () => {
         loadedPeriods = cached.periods;
         setPeriods(loadedPeriods);
         setCachedAt(cached.cachedAt);
+        setCacheWarning(planningCacheRangeWarning(cached, range));
         setUsingCache(true);
         cacheIsActive = true;
       }
@@ -460,6 +478,7 @@ export const RosterModule: React.FC = () => {
             setShifts(mergeOutboxShifts(mapped, queued, currentTenantId, employees, sites));
             setPeriods(cached.periods);
             setCachedAt(cached.cachedAt);
+            setCacheWarning(planningCacheRangeWarning(cached, range));
             setUsingCache(true);
             setLoadError(`Serverdaten konnten nicht aktualisiert werden. Offline-Cache vom ${new Date(cached.cachedAt).toLocaleString()} wird angezeigt.`);
           } else {
@@ -1608,7 +1627,7 @@ export const RosterModule: React.FC = () => {
               {!isOnline ? <p className="text-xs text-amber-300">Besetzungsvorschläge sind online-only.</p>
                 : !staffingSuggestions ? <p className="text-xs text-slate-500">{detailsLoading ? 'Vorschläge werden geladen…' : 'Keine Vorschläge verfügbar.'}</p>
                   : <div className="space-y-3">
-                    <p className="text-[11px] text-amber-300">Nicht bindende Hinweise. Die Auswahl füllt nur das Zuweisungsfeld; eine Zuweisung erfolgt erst nach separater Bestätigung und erneuter Serverprüfung.</p>
+                    <p className="text-[11px] text-amber-300">Nicht bindende Hinweise. Die API listet aktive, dem Objekt zugeordnete Mitarbeitende mit gültiger, verifizierter Qualifikation; Personen, die vor der Kandidatenprüfung durch diese Filter ausgeschlossen werden, erscheinen nicht mit Einzelgrund. Die Auswahl füllt nur das Zuweisungsfeld; eine Zuweisung erfolgt erst nach separater Bestätigung und erneuter Serverprüfung.</p>
                     {staffingSuggestions.requirements.map(requirement => <div key={requirement.qualificationType} className="rounded-lg border border-slate-800 bg-slate-950 p-3">
                       <div className="text-xs font-semibold text-slate-200">{requirement.qualificationType} · Bedarf {requirement.requiredCount}, qualifiziert zugewiesen {requirement.assignedCount}, offen {requirement.shortfall}</div>
                       {requirement.candidates.length === 0 ? <p className="mt-2 text-xs text-slate-500">Keine Kandidaten gemeldet.</p>
@@ -1715,13 +1734,14 @@ export const RosterModule: React.FC = () => {
             <h3 className="mb-2 text-xs font-bold text-slate-300">Geplante und tatsächliche Arbeitszeit</h3>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Soll-Stunden</th><th className="p-2">Ist-Stunden / Status</th><th className="p-2">Überstunden / Status</th><th className="p-2">Überstundenquelle</th></tr></thead>
+                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Soll-Stunden</th><th className="p-2">Ist-Stunden / Status</th><th className="p-2">Ist-Soll-Abweichung / Status</th><th className="p-2">Überstunden / Status</th><th className="p-2">Überstundenquelle</th></tr></thead>
                 <tbody>{workHours.length === 0
-                  ? <tr><td colSpan={6} className="p-3 text-center text-slate-500">Keine Berichtsdaten für diesen Zeitraum.</td></tr>
-                  : workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800 align-top"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{reportValue(row.planned_hours)}</td><td className="p-2">{reportValue(row.actual_hours, row.actual_status)}</td><td className="p-2">{reportValue(row.overtime_hours, row.overtime_status)}</td><td className="max-w-72 break-words p-2 text-slate-400">{reportSources(row.overtime_sources)}</td></tr>)}
+                  ? <tr><td colSpan={7} className="p-3 text-center text-slate-500">Keine Berichtsdaten für diesen Zeitraum.</td></tr>
+                  : workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800 align-top"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{reportValue(row.planned_hours)}</td><td className="p-2">{reportValue(row.actual_hours, row.actual_status)}</td><td className="p-2">{reportVariance(row.actual_hours, row.planned_hours, row.actual_status)}</td><td className="p-2">{reportValue(row.overtime_hours, row.overtime_status)}</td><td className="max-w-72 break-words p-2 text-slate-400">{reportSources(row.overtime_sources)}</td></tr>)}
                 </tbody>
               </table>
             </div>
+            <p className="mt-1 text-[10px] text-slate-500">Ist-Soll-Abweichung = erfasste Ist-Stunden minus Soll-Stunden; bei Status „partial“ nur ein Zwischenstand. Überstunden sind eine separate, konfigurationsabhängige Kennzahl.</p>
           </section>
           <section>
             <h3 className="mb-2 text-xs font-bold text-slate-300">Wochenend-, Feiertags- und Nachtarbeit</h3>

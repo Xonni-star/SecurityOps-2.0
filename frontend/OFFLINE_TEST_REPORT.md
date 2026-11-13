@@ -21,3 +21,14 @@
 | 16 | IndexedDB Migrationen | **BESTANDEN** | Schema-Upgrade auf DB_VERSION 2 erfolgreich |
 | 17 | Wiederherstellung nach Absturz | **BESTANDEN** | Outbox bleibt persistent erhalten |
 | 18 | Background Sync & Fallback | **BESTANDEN** | Service Worker sync Event + manueller Fallback |
+
+## Phase 2 frontend verification snapshot (2026-11-13)
+
+The table above is historical project documentation, not evidence of real-device or cross-browser execution for this Phase 2 change. Current local automated verification:
+
+- `cd frontend && npm test` — 15 test files, 90 tests passed.
+- `cd frontend && npm run build` — passed; existing Vite `__dirname` config-loader and >500 kB chunk warnings remain.
+- `cd frontend && npm audit` — 0 vulnerabilities.
+- `cd frontend/backend && npm audit` — 7 low-severity findings in the Jest/`ts-jest` development-test toolchain, including `deepmerge` GHSA-gcqx-w48m-w2h4. `cd frontend/backend && npm audit --omit=dev` — 0 vulnerabilities. The suggested forced remediation downgrades Jest with a breaking change and was not applied.
+
+Focused frontend tests cover startup replay while already online, exact tenant/user outbox ownership (including unknown owners), date-range limits of the single planning cache, planned-versus-actual variance, and blocking shift conflict decisions until a server snapshot is available. These tests do not establish device/browser compatibility, background execution after the browser is closed, production operation, or legal compliance. Exact PR CI head/run mapping is maintained in the [Phase 2 final status report](../PHASE_2_FINAL_COMPLETION_REPORT.md).

@@ -247,6 +247,10 @@ describe('RosterModule', () => {
   test('loads the calendar, navigates periods, and switches to customer grouping', async () => {
     await act(async () => root.render(<RosterModule />));
     expect(container.textContent).toContain('Objekt A');
+    expect(mocks.savePlanningCache).toHaveBeenCalledWith(
+      'tenant-a', 'user-a', expect.any(Array), expect.any(Array),
+      expect.objectContaining({ from: expect.any(String), to: expect.any(String) })
+    );
 
     const grouping = container.querySelector<HTMLSelectElement>('select[aria-label="Gruppierte Ansicht"]');
     if (!grouping) throw new Error('Gruppierte Ansicht fehlt');
@@ -358,6 +362,31 @@ describe('RosterModule', () => {
     expect(container.textContent).toContain('Nicht verfügbar (unconfigured)');
     expect(container.textContent).toContain('Tenant policy');
     expect(container.textContent).not.toContain('Überstunden: 0');
+  });
+
+  test('shows planned-to-actual variance separately from configured overtime', async () => {
+    mocks.workHours.mockResolvedValue([{
+      employee_id: 'employee-a',
+      first_name: 'Ada',
+      last_name: 'Guard',
+      assigned_shifts: 1,
+      planned_hours: 8,
+      actual_hours: 10,
+      actual_status: 'complete',
+      overtime_hours: null,
+      overtime_status: 'unconfigured',
+      overtime_sources: [],
+      calendar: {}
+    }]);
+    await act(async () => root.render(<RosterModule />));
+    const reports = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Berichte'));
+    if (!reports) throw new Error('Berichte fehlen');
+    await act(async () => reports.click());
+
+    expect(container.textContent).toContain('Ist-Soll-Abweichung / Status');
+    expect(container.textContent).toContain('+2 (complete)');
+    expect(container.textContent).toContain('Nicht verfügbar (unconfigured)');
+    expect(container.textContent).toContain('Überstunden sind eine separate, konfigurationsabhängige Kennzahl.');
   });
 
   test('lists and applies a server template without recreating it', async () => {
@@ -480,6 +509,7 @@ describe('RosterModule', () => {
     if (!eventButton) throw new Error('Kalendereintrag fehlt');
     await act(async () => eventButton.click());
     expect(container.textContent).toContain('Nicht bindende Hinweise');
+    expect(container.textContent).toContain('erscheinen nicht mit Einzelgrund');
     expect(container.textContent).toContain('Alex Guard');
 
     const selectCandidate = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Für Zuweisung auswählen'));
@@ -946,6 +976,21 @@ describe('RosterModule', () => {
     const createButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Neues Regelprofil'));
     expect(createButton?.disabled).toBe(true);
     expect(mocks.listRuleProfiles).not.toHaveBeenCalled();
+  });
+
+  test('warns when the offline planning cache does not include the requested date range', async () => {
+    mocks.storeState.isOnline = false;
+    mocks.getPlanningCache.mockResolvedValue({
+      shifts: [{ ...shift, date: '2000-01-15' }],
+      periods: [],
+      rangeFrom: '2000-01-01',
+      rangeTo: '2000-01-31',
+      cachedAt: new Date().toISOString()
+    });
+    await act(async () => root.render(<RosterModule />));
+
+    expect(container.textContent).toContain('enthält nur den zuletzt geladenen Bereich 2000-01-01 bis 2000-01-31');
+    expect(container.textContent).toContain('Leere Bereiche außerhalb des Caches bestätigen nicht, dass dort keine Schichten bestehen.');
   });
 
   test('queues only a supported offline draft create and labels it pending, not approved', async () => {

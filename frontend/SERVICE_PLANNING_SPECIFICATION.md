@@ -1,7 +1,7 @@
 # Technische Spezifikation: Dienstplanung
 
-**Status:** Phase 2 implementiert Planungsoberfläche und API-gestützte Entwurfs-, Zuweisungs- und Veröffentlichungsabläufe. Das System ist nicht produktionsabgenommen und trifft keine Rechtskonformitätsaussage.
-**Ausgangslage:** Das Phase-2-Backend erweitert `shifts` um aufgelöste Zeitpunkte, Planungsstatus, Mindestbesetzung, Revisionen und Prüf-/Auditdaten. Die API-Verträge, Berechtigungen und bekannten Grenzen stehen in [SERVICE_PLANNING_API.md](./backend/SERVICE_PLANNING_API.md); Frontend-Umfang und Verifikation in [PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md](../PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md).
+**Status:** Phase 2 implementiert Planungsoberfläche und API-gestützte Entwurfs-, Zuweisungs- und Veröffentlichungsabläufe. PR #16 (Backend) und PR #19 (Frontend) sind offen, nicht gemergt und nicht deployed. Das System ist nicht produktionsabgenommen und trifft keine Rechtskonformitätsaussage.
+**Ausgangslage:** Das Phase-2-Backend erweitert `shifts` um aufgelöste Zeitpunkte, Planungsstatus, Mindestbesetzung, Revisionen und Prüf-/Auditdaten. Die API-Verträge, Berechtigungen und bekannten Grenzen stehen in [SERVICE_PLANNING_API.md](./backend/SERVICE_PLANNING_API.md); verifizierte PR-/CI-Stände, Frontend-Umfang, Audits und offene Grenzen in [PHASE_2_FINAL_COMPLETION_REPORT.md](../PHASE_2_FINAL_COMPLETION_REPORT.md).
 
 ## Aktueller Implementierungsstand
 
@@ -9,7 +9,7 @@ Die bestehende `roster`-Route zeigt Monats-, Wochen- und Tagesansichten mit Grup
 
 Der mandanten- und benutzerspezifische IndexedDB-Cache ermöglicht das Lesen der zuletzt geladenen Planung. Die Outbox erlaubt einzelne unbesetzte Entwurfsanlagen ohne Periodenbindung und Mindestbesetzung 1 sowie Draft-Updates mit Schicht-ID und Basisrevision. Offline-Updates lassen die Mindestbesetzung und Periodenzuordnung unverändert; Offline-Änderungen bleiben ausstehend und ungeprüft. Sie werden bei Verbindung serverseitig validiert; Konflikte/Ablehnungen werden nicht als Erfolg dargestellt.
 
-Die UI unterstützt die Verwaltung versionierter, quellenbelegter Regelprofilentwürfe und die separate, online erfolgende Freigabe über die dokumentierten API-Endpunkte. Profilwerte werden nicht mit gesetzlichen oder tariflichen Standardwerten vorbelegt; eine Freigabe attestiert keine Rechtskonformität. Die Backend-API bietet Vorlagenliste, revisionierte Bearbeitung/Aktivierung und Anwendung; Hard-Delete und separater Copy-Endpunkt fehlen. Berichte bieten geplante und aufgezeichnete Ist-Zeiten, konfigurierte Überstunden-/Nacht-/Feiertags-/Wochenendaufschlüsselungen sowie Coverage, Qualifikations- und Abwesenheitsberichte. Erklärbare Personalvorschläge sind deterministisch und unverbindlich; eine gewählte Zuweisung wird separat serverseitig validiert. Fehlende Ist-/Regelwerte werden nicht als Nullwerte ausgegeben. Externe Rechts-/Tarifdaten, Benachrichtigungen, separate Ist-Zeit-Zweitfreigabe und eine Rechtskonformitätsbestätigung sind nicht implementiert. Die responsive UI wurde nicht auf realen Mobilgeräten oder unter allen Browsern geprüft; Rollout und fachliche/rechtliche Abnahme sind offen.
+Die UI unterstützt die Verwaltung versionierter, quellenbelegter Regelprofilentwürfe und die separate, online erfolgende Freigabe über die dokumentierten API-Endpunkte. Profilwerte werden nicht mit gesetzlichen oder tariflichen Standardwerten vorbelegt; eine Freigabe attestiert keine Rechtskonformität. Die Backend-API bietet Vorlagenliste, revisionierte Bearbeitung/Aktivierung und Anwendung; Hard-Delete und separater Copy-Endpunkt fehlen. Die aktuelle Vorlagen-API enthält keine Pausen-/Unterbrechungsregel, keinen konfigurierbaren Personalbedarf und keine Gültigkeitsdaten; Vorlagenanwendung erzeugt genau eine Personalbedarfsanforderung und übernimmt die Datenbankpause von 0 Minuten. Dafür werden keine UI-Felder erfunden. Berichte bieten geplante und aufgezeichnete Ist-Zeiten, konfigurierte Überstunden-/Nacht-/Feiertags-/Wochenendaufschlüsselungen sowie Coverage, Qualifikations- und Abwesenheitsberichte. Die Ist-Soll-Abweichung wird separat als erfasste Ist-Stunden minus Soll-Stunden mit dem Ist-Status dargestellt; konfigurierte Überstunden bleiben eine getrennte Kennzahl. Erklärbare Personalvorschläge sind deterministisch und unverbindlich; die API listet nur Kandidaten, die ihre anfänglichen Objekt-/Qualifikationsfilter bestehen, und nennt keine Einzelgründe für zuvor ausgefilterte Mitarbeitende. Eine gewählte Zuweisung wird separat serverseitig validiert. Fehlende Ist-/Regelwerte werden nicht als Nullwerte ausgegeben. Externe Rechts-/Tarifdaten, Benachrichtigungen, separate Ist-Zeit-Zweitfreigabe und eine Rechtskonformitätsbestätigung sind nicht implementiert. Die responsive UI wurde nicht auf realen Mobilgeräten oder unter allen Browsern geprüft; Rollout und fachliche/rechtliche Abnahme sind offen.
 
 ## Ziele und Grenzen
 
@@ -51,7 +51,9 @@ Mögliche Ressourcen sind mandantengeschützte Endpunkte für Bedarf, Regelprofi
 
 Planungswerte werden in der Objekt-Zeitzone eingegeben. Die Zeitzone wird als IANA-ID (z. B. `Europe/Berlin`) und nicht als fester UTC-Offset gespeichert. Lokale Uhrzeiten in einer DST-Lücke müssen abgelehnt werden; mehrdeutige Uhrzeiten beim Zurückstellen der Uhr erfordern die explizite Wahl des Offsets. Dauer, Ruhezeit und Überschneidungen werden anhand aufgelöster UTC-Zeitpunkte berechnet, während die lokale Darstellung erhalten bleibt.
 
-Offline darf ein Entwurf erfasst und als ausstehend markiert werden. Eine verbindliche Zuweisung bzw. Ausnahmefreigabe wird erst nach serverseitiger Prüfung bestätigt. Sync verwendet eine stabile Mutation-ID, Payload-Hash, Basisversion und eine dauerhafte Serverquittung. Konflikte bleiben sichtbar und dürfen bestätigte Datensätze nicht überschreiben. Regelrevision, Prüfergebnis, manuelle Änderung und Ausnahmefreigabe werden nachvollziehbar auditiert.
+Offline darf ein Entwurf erfasst und als ausstehend markiert werden. Nach Authentifizierung startet die Outbox-Wiedergabe auch bei einer bereits bestehenden Online-Verbindung. Jede Mutation wird nur wiedergegeben, wenn sowohl Mandant als auch gespeicherte Benutzer-ID exakt zur aktuellen Identität passen; ältere Einträge ohne bekannten Benutzerbesitzer werden nicht übertragen. Eine verbindliche Zuweisung bzw. Ausnahmefreigabe wird erst nach serverseitiger Prüfung bestätigt. Sync verwendet eine stabile Mutation-ID, Payload-Hash, Basisversion und eine dauerhafte Serverquittung. Schichtkonflikte bleiben sichtbar; solange der Backend-Sync keinen vollständigen tenant-validierten Server-Snapshot liefert, sind Konfliktentscheidungen in der UI deaktiviert, um keine lokale Version ohne sichtbaren Serverstand durchzusetzen. Regelrevision, Prüfergebnis, manuelle Änderung und Ausnahmefreigabe werden nachvollziehbar auditiert.
+
+Der Offline-Planungscache hält je Mandant und Benutzer nur den zuletzt geladenen Kalenderbereich. Der gespeicherte Zeitraum wird angezeigt; wenn der angeforderte Bereich nicht vollständig darin liegt, warnt die UI, dass leere Bereiche außerhalb des Caches nicht als fehlende Schichten interpretiert werden dürfen. Es gibt keine mehrbereichige Offline-Replikation.
 
 ## Abnahmekriterien für eine spätere Implementierung
 
@@ -66,3 +68,14 @@ Offline darf ein Entwurf erfasst und als ausstehend markiert werden. Eine verbin
 ## Grenzen und Voraussetzungen
 
 Die serverseitige Validierung prüft nur die implementierten Planungsregeln und vorhandenen Mitarbeiter-, Qualifikations-, Abwesenheits- und Objektzuordnungsdaten. Konfigurierbare Profile liefern keine externen Rechts- oder Tarifgrenzen; Mandanten müssen Regeln und Quellen fachlich festlegen und freigeben. Ein erfolgreich synchronisierter Entwurf ist nicht automatisch veröffentlicht oder rechtlich freigegeben. Vor dem Produktiveinsatz sind Browser-/Geräteverhalten, Betriebs-/Backupkonfiguration und die fachliche sowie rechtliche Abnahme separat zu verifizieren.
+
+## Verifikationsstatus (2026-11-13)
+
+- `cd frontend && npm test`: 14 Testdateien, 83 Tests bestanden.
+- `cd frontend && npm run build`: erfolgreich; Vite meldet den bestehenden `__dirname`-Config-Hinweis und einen Chunk über 500 kB.
+- `cd frontend && npm audit`: 0 Vulnerabilities.
+- `cd frontend/backend && npm audit`: 7 Low-Severity-Befunde im Jest/`ts-jest`-Testwerkzeug-Dependency-Tree, einschließlich `deepmerge` GHSA-gcqx-w48m-w2h4; `npm audit --omit=dev`: 0 Vulnerabilities. Der vorgeschlagene `--force`-Fix wäre ein Jest-Downgrade mit Breaking Change und wurde nicht angewendet.
+- PR #16 CI run `43487585461` passed all four jobs at head `c826460f0cc70e16031db93f8c5b0ccb8e3606da`.
+- PR #19 CI run `43489042661` passed all four jobs at head `aa45781f55db81bffd69e3557ea478dca36aa38d`.
+
+Diese Prüfungen enthalten keinen Geräte-/Browser-Kompatibilitätstest, Produktions-Rollout oder fachlich/rechtliche Abnahme.

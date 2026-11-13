@@ -8,10 +8,14 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
 
   beforeEach(() => {
     useSecurityStore.setState({
+      currentTenantId: 'tenant-frankfurt',
+      currentUserId: 'user-conflict-test',
+      authUser: null,
       syncQueue: [
         {
           id: queueId,
           tenantId: 'tenant-frankfurt',
+          userId: 'user-conflict-test',
           entityType: 'task',
           action: 'UPDATE',
           payload: { id: 'task-123', status: 'In Bearbeitung', title: 'Testaufgabe' },
@@ -134,5 +138,21 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
 
     const state = useSecurityStore.getState();
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
+  });
+
+  test('refuses to resolve a conflict owned by another same-tenant user', async () => {
+    const post = vi.spyOn(apiClient, 'post');
+    useSecurityStore.setState({
+      authUser: {
+        id: 'different-user', email: '', fullName: '', role: '',
+        tenantId: 'tenant-frankfurt', tenantName: '', permissions: []
+      }
+    });
+
+    await expect(
+      useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL')
+    ).rejects.toThrow('Konflikt gehört nicht zur aktuellen Mandanten- und Benutzeridentität');
+    expect(post).not.toHaveBeenCalled();
+    expect(useSecurityStore.getState().syncQueue.find((q) => q.id === queueId)).toBeDefined();
   });
 });
