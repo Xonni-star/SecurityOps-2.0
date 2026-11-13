@@ -29,7 +29,7 @@ Der Branch basiert auf dem live verifizierten `main` mit Merge-Commit `5608b9010
 | Docker Compose-Konfiguration und Frontend-/Backend-Images | Konfiguration valide; beide Images gebaut |
 | Gesamte Backend-Jest-Suite | 20 Suites, 219 Tests bestanden |
 | Echte Browserkamera/NFC und End-to-End-Offlineverhalten auf realen Mobilgeräten | nicht geprüft |
-| GitHub-CI | PR noch nicht erstellt; daher kein PR-CI-Status |
+| GitHub-CI | Bei der ersten Abfrage nach PR-Erstellung waren Backend/PostgreSQL, Frontend, Produktions-Docker und Root-Workflow alle `pending`; kein Ergebnis wurde als bestanden behauptet. Den aktuellen Status zeigt die PR-Prüfübersicht. |
 
 Migrationstests liefen gegen einen kurzlebigen PostgreSQL-16-Container mit getrennten Admin- und `secops_app_user`-Verbindungen. Die initiale Testausführung benutzte fälschlich den Superuser für API-RLS-Tests und zeigte erwartungsgemäß keine Isolation; mit der realen Anwendungsrolle waren die Tests erfolgreich. Die Patrol-Integration richtet ihre eigenen temporären Konto-, Mitarbeiter-, Objekt- und Kundendaten ein und räumt sie anschließend wieder auf.
 
