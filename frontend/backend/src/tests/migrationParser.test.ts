@@ -3,6 +3,7 @@ import path from 'path';
 import {
   extractSchemaObjects,
   deriveExpectedSchemaObjects,
+  loadMigrations,
   stripTypeModifiers,
   MigrationFile
 } from '../migrations/runner';
@@ -25,6 +26,13 @@ function migrationFromFile(filename: string): MigrationFile {
 }
 
 describe('SQL-Migrationsparser – lexikalische Härtung', () => {
+  test('Service-Planning-Migration folgt mit eindeutiger Version auf die Dokumentmigration', () => {
+    const migrations = loadMigrations(MIGRATIONS_DIR);
+    expect(migrations.find(migration => migration.filename === '029_document_relationship_delete_permission.sql')?.numericVersion).toBe(29);
+    expect(migrations.filter(migration => migration.filename === '030_service_planning.sql')).toHaveLength(1);
+    expect(migrations.find(migration => migration.filename === '030_service_planning.sql')?.numericVersion).toBe(30);
+  });
+
   test('1. Kommentarzeichen innerhalb von SQL-Zeichenketten', () => {
     const result = extractSchemaObjects(
       `CREATE TABLE kommentar_tabelle (note TEXT DEFAULT '-- kein Kommentar /* auch nicht */');`,

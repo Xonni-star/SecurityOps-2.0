@@ -90,7 +90,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Kontrollgänge | in `main` integriert, nicht deployed | RLS, QR/NFC/manuelle Scans, versionierte Routen, Gruppen, Termin-Vorkommen, Abweichungen und Offline-Sync; externe Benachrichtigung und Offline-Binäranhänge fehlen |
 | Benutzer/Rechte | Authentifizierung und RBAC vorhanden | Opaque Cookie-Sitzungen, CSRF, Login-Lockout und Berechtigungsprüfung; keine Benutzer-/Rollen-Administrations-API |
 | Offline-Sync | teilweise integriert | IndexedDB-Outbox und modulbezogene Sync-Pfade; nicht jede Funktion und jedes Binärartefakt ist offline verfügbar |
-| Dienstplanung | nur Basisdaten und Zuordnung | Belastbare technische Zielspezifikation: [Dienstplanung](./frontend/SERVICE_PLANNING_SPECIFICATION.md); keine ArbZG-/Tarifregelprüfung implementiert |
+| Dienstplanung | Phase-2-UI und API integriert, nicht deployed | Kalender und servergeprüfte Planungsabläufe; Umfang, Sync-Grenzen und offene Backend-Berichte: [Phase-2-Abschlussbericht](./PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md). Keine Rechtskonformitätsaussage |
 
 ---
 
@@ -128,7 +128,8 @@ npm --prefix frontend/backend run build
 * [frontend/SECURITY_AUDIT.md](./frontend/SECURITY_AUDIT.md) — Sicherheitsaudit
 * [frontend/KNOWN_ISSUES.md](./frontend/KNOWN_ISSUES.md) — bekannte Einschränkungen
 * [PHASE_1_INTEGRATION_COMPLETION_REPORT.md](./PHASE_1_INTEGRATION_COMPLETION_REPORT.md) — aktueller quellcodebasierter Umsetzungsstand, Befunde und Prüfgrenzen
-* [frontend/SERVICE_PLANNING_SPECIFICATION.md](./frontend/SERVICE_PLANNING_SPECIFICATION.md) — technische Dienstplanungs-Spezifikation ohne Implementierung
+* [frontend/SERVICE_PLANNING_SPECIFICATION.md](./frontend/SERVICE_PLANNING_SPECIFICATION.md) — Dienstplanungs-Spezifikation und Phase-2-Implementierungsstand
+* [PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md](./PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md) — Frontend-Umfang, API-Grenzen, Tests und nicht verifizierte Betriebsannahmen
 * [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md) — historischer Umsetzungsstand
 * [DMS_IMPLEMENTATION_REPORT.md](./DMS_IMPLEMENTATION_REPORT.md) — DMS-Umfang, Sicherheitsmodell, Tests und offene Einschränkungen
 * [frontend/ALARM_EMERGENCY_API.md](./frontend/ALARM_EMERGENCY_API.md) — Alarm-/Notfall-API, Berechtigungen und Workflow

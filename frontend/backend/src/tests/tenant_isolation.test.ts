@@ -13,6 +13,7 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
   let sopBId: string;
   let assignmentAId: string;
   let versionA2Id: string;
+  let planningPeriodAId: string;
 
   beforeAll(async () => {
     const tA = await pool.query(`
@@ -68,6 +69,12 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
     );
     sopUserAId = userA.rows[0].id;
     sopUserBId = userB.rows[0].id;
+    const planningPeriod = await migrationPool.query(
+      `INSERT INTO schedule_periods (tenant_id,name,date_from,date_to,time_zone,created_by)
+       VALUES ($1,$2,'2026-01-01','2026-01-31','Europe/Berlin',$3) RETURNING id`,
+      [tenantA, `RLS-Planning-${Date.now()}`, sopUserAId]
+    );
+    planningPeriodAId = planningPeriod.rows[0].id;
     const sopA = await migrationPool.query(
       `INSERT INTO sop_instructions (tenant_id,sop_number,title,created_by,draft_content,status)
        VALUES ($1,$2,'SOP A',$3,'{"text":"A"}'::jsonb,'published') RETURNING id`,
@@ -182,6 +189,29 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
 
     const withoutTenant = await withSystemTransaction(async (tx) => (await tx.query('SELECT * FROM employee_absences')).rows);
     expect(withoutTenant).toHaveLength(0);
+  });
+
+  test('Planning periods enforce tenant RLS, FORCE RLS, and tenant scoping', async () => {
+    const tenantRows = await withTenantTransaction(tenantA, async tx =>
+      (await tx.query('SELECT id,tenant_id FROM schedule_periods')).rows
+    );
+    expect(tenantRows).toEqual([expect.objectContaining({ id: planningPeriodAId, tenant_id: tenantA })]);
+
+    const otherTenantRows = await withTenantTransaction(tenantB, async tx =>
+      (await tx.query('SELECT id FROM schedule_periods')).rows
+    );
+    const systemRows = await withSystemTransaction(async tx =>
+      (await tx.query('SELECT id FROM schedule_periods')).rows
+    );
+    expect(otherTenantRows).toHaveLength(0);
+    expect(systemRows).toHaveLength(0);
+
+    const flags = await migrationPool.query(
+      `SELECT c.relrowsecurity,c.relforcerowsecurity
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname='schedule_periods'`
+    );
+    expect(flags.rows[0]).toEqual({ relrowsecurity: true, relforcerowsecurity: true });
   });
 
   test('SOP instructions, assignment targets and assignments are tenant-isolated under PostgreSQL RLS', async () => {

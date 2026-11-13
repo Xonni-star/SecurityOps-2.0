@@ -59,6 +59,7 @@ import {
 } from './mockData';
 import { apiClient, ApiError } from './services/apiClient';
 import { offlineVault, OutboxMutation, StoredAlarmMutation } from './services/indexedDbService';
+import { reconcileShiftMutation } from './services/planningService';
 
 export type ThemeMode = 'dark' | 'light';
 
@@ -1523,7 +1524,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     let conflictCount = 0;
 
     try {
-      const pendingItems = await offlineVault.getPendingOutbox(currentTenantId);
+      const pendingItems = (await offlineVault.getPendingOutbox(currentTenantId))
+        .filter(mutation => mutation.entityType !== 'shift' || mutation.userId === get().currentUserId);
 
       if (pendingItems.length === 0) {
         const allItems = await offlineVault.getOutbox(currentTenantId);
@@ -1569,8 +1571,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           const receipts = Array.isArray(serverResponse) ? serverResponse : serverResponse?.data;
           if (!Array.isArray(receipts)) continue;
           for (const receipt of receipts) {
+            const mutation = orderedItems.find(item => item.id === receipt.clientUuid);
             if (receipt.status === 'SYNCED') {
-              const mutation = orderedItems.find(item => item.id === receipt.clientUuid);
               if (mutation?.entityType === 'patrol') {
                 if (mutation.payload?.recordType === 'round_start' && mutation.payload.roundId) {
                   await offlineVault.markPatrolRoundSynced(currentTenantId, mutation.userId, mutation.payload.roundId);
@@ -1578,11 +1580,32 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
                   await offlineVault.deletePatrolRound(currentTenantId, mutation.userId, mutation.payload.roundId);
                 }
               }
+              if (mutation?.entityType === 'shift') {
+                set(state => ({
+                  shifts: reconcileShiftMutation(state.shifts, mutation, receipt)
+                }));
+              }
               successCount++;
               await offlineVault.markSynced(receipt.clientUuid);
             }
-            else if (receipt.status === 'CONFLICT') { conflictCount++; await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', { conflictDetails: receipt.conflictData }); }
-            else { failedCount++; await offlineVault.updateMutationStatus(receipt.clientUuid, 'FAILED', { errorMessage: receipt.message || 'Server hat Mutation abgewiesen' }); }
+            else if (receipt.status === 'CONFLICT') {
+              conflictCount++;
+              await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', { conflictDetails: receipt.conflictData });
+              if (mutation?.entityType === 'shift') {
+                set(state => ({
+                  shifts: reconcileShiftMutation(state.shifts, mutation, receipt)
+                }));
+              }
+            }
+            else {
+              failedCount++;
+              await offlineVault.updateMutationStatus(receipt.clientUuid, 'FAILED', { errorMessage: receipt.message || 'Server hat Mutation abgewiesen' });
+              if (mutation?.entityType === 'shift') {
+                set(state => ({
+                  shifts: reconcileShiftMutation(state.shifts, mutation, receipt)
+                }));
+              }
+            }
           }
         }
       } catch (networkErr) {

@@ -131,7 +131,17 @@ export async function seedDatabase(): Promise<void> {
       { code: 'alarm:notifications:read', module: 'alarm' },
       { code: 'emergency_plan:publish', module: 'alarm' },
       { code: 'emergency_contact:read', module: 'alarm' },
-      { code: 'emergency_contact:manage', module: 'alarm' }
+      { code: 'emergency_contact:manage', module: 'alarm' },
+      { code: 'planning:read', module: 'planning' },
+      { code: 'planning:manage', module: 'planning' },
+      { code: 'planning:publish', module: 'planning' },
+      { code: 'planning:rules:manage', module: 'planning' },
+      { code: 'planning:rules:approve', module: 'planning' },
+      { code: 'planning:exceptions:manage', module: 'planning' },
+      { code: 'planning:exceptions:approve', module: 'planning' },
+      { code: 'planning:swaps:manage', module: 'planning' },
+      { code: 'planning:swaps:approve', module: 'planning' },
+      { code: 'planning:reports:read', module: 'planning' }
     ];
 
     for (const p of permissions) {
@@ -170,6 +180,22 @@ export async function seedDatabase(): Promise<void> {
         OR (r.name='Wachdienstmitarbeiter'
           AND p.code IN ('handovers:read','handovers:create','handovers:confirm','handovers:tasks'))
         OR (r.name='Auditor' AND p.code='handovers:read')
+      ON CONFLICT DO NOTHING
+    `);
+
+    await client.query(`
+      INSERT INTO role_permissions (role_id,permission_id)
+      SELECT r.id,p.id FROM roles r JOIN permissions p ON
+        (r.name IN ('Systemadministrator','Geschäftsführung','Einsatzleitung','Objektleitung')
+          AND p.code IN ('planning:read','planning:manage','planning:publish',
+            'planning:swaps:manage','planning:swaps:approve','planning:reports:read'))
+        OR (r.name IN ('Systemadministrator','Geschäftsführung','Qualitätsmanagement')
+          AND p.code IN ('planning:rules:manage','planning:rules:approve',
+            'planning:exceptions:manage','planning:exceptions:approve'))
+        OR (r.name IN ('Systemadministrator','Geschäftsführung','Qualitätsmanagement')
+          AND p.code IN ('planning:read','planning:reports:read'))
+        OR (r.name='Wachdienstmitarbeiter' AND p.code IN ('planning:read','planning:swaps:manage'))
+        OR (r.name='Auditor' AND p.code IN ('planning:read','planning:reports:read'))
       ON CONFLICT DO NOTHING
     `);
 

@@ -17,6 +17,7 @@ import * as sopController from './controllers/sopController';
 import * as handoverController from './controllers/handoverController';
 import * as alarmWorkflowController from './controllers/alarmWorkflowController';
 import * as patrolController from './controllers/patrolController';
+import * as planningController from './controllers/planningController';
 
 export const app = express();
 
@@ -101,6 +102,33 @@ app.get('/api/v1/shifts', authenticateJwt, requirePermission('shifts:read'), res
 app.post('/api/v1/shifts', authenticateJwt, requirePermission('shifts:manage'), resourceController.createShift);
 app.patch('/api/v1/shifts/:id', authenticateJwt, requirePermission('shifts:manage'), resourceController.updateShift);
 app.delete('/api/v1/shifts/:id', authenticateJwt, requirePermission('shifts:manage'), resourceController.deleteShift);
+
+app.get('/api/v1/planning/shifts', authenticateJwt, requirePermission('planning:read'), planningController.listPlanningShifts);
+app.post('/api/v1/planning/shifts', authenticateJwt, requirePermission('planning:manage'), planningController.createPlanningShift);
+app.get('/api/v1/planning/shifts/:id/assignments', authenticateJwt, requirePermission('planning:read'), planningController.listShiftAssignments);
+app.post('/api/v1/planning/shifts/:id/assignments', authenticateJwt, requirePermission('planning:manage'), planningController.assignEmployee);
+app.get('/api/v1/planning/findings', authenticateJwt, requirePermission('planning:read'), planningController.listPlanningFindings);
+app.get('/api/v1/planning/periods', authenticateJwt, requirePermission('planning:read'), planningController.listSchedulePeriods);
+app.post('/api/v1/planning/periods', authenticateJwt, requirePermission('planning:manage'), planningController.createSchedulePeriod);
+app.post('/api/v1/planning/periods/:id/publish', authenticateJwt, requirePermission('planning:publish'), planningController.publishSchedulePeriod);
+app.get('/api/v1/planning/rule-profiles', authenticateJwt, requirePermission('planning:read'), planningController.listRuleProfiles);
+app.post('/api/v1/planning/rule-profiles', authenticateJwt, requirePermission('planning:rules:manage'), planningController.createRuleProfile);
+app.post('/api/v1/planning/rule-profiles/:profileId/versions', authenticateJwt, requirePermission('planning:rules:manage'), planningController.createRuleProfileVersion);
+app.post('/api/v1/planning/rule-profiles/:profileId/versions/:versionId/approve',
+  authenticateJwt, requirePermission('planning:rules:approve'), planningController.approveRuleProfileVersion);
+app.post('/api/v1/planning/findings/:findingId/exceptions',
+  authenticateJwt, requirePermission('planning:exceptions:manage'), planningController.requestRuleException);
+app.post('/api/v1/planning/exceptions/:exceptionId/decision',
+  authenticateJwt, requirePermission('planning:exceptions:approve'), planningController.decideRuleException);
+app.post('/api/v1/planning/templates', authenticateJwt, requirePermission('planning:manage'), planningController.createShiftTemplate);
+app.post('/api/v1/planning/templates/:templateId/apply', authenticateJwt, requirePermission('planning:manage'), planningController.applyShiftTemplate);
+app.get('/api/v1/planning/reports/work-hours', authenticateJwt, requirePermission('planning:reports:read'), planningController.workHoursReport);
+app.get('/api/v1/planning/reports/coverage', authenticateJwt, requirePermission('planning:reports:read'), planningController.coverageReport);
+app.get('/api/v1/planning/audit', authenticateJwt, requirePermission('planning:read'), planningController.listPlanningAudit);
+app.post('/api/v1/planning/shifts/:id/swaps', authenticateJwt, requirePermission('planning:swaps:manage'), planningController.createShiftSwapRequest);
+app.get('/api/v1/planning/swaps', authenticateJwt, requirePermission('planning:read'), planningController.listShiftSwapRequests);
+app.post('/api/v1/planning/swaps/:requestId/decision',
+  authenticateJwt, requirePermission('planning:swaps:approve'), planningController.decideShiftSwap);
 
 app.get('/api/v1/keys', authenticateJwt, requirePermission('keys:read'), resourceController.listKeys);
 app.post('/api/v1/keys', authenticateJwt, requirePermission('keys:manage'), resourceController.createKey);
