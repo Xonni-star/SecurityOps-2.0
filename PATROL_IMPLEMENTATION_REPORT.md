@@ -53,14 +53,14 @@ The changes are committed and pushed on branch `xonni-star-feature-patrol-manage
 
 ### GitHub CI
 
-The run on implementation commit `5a4e77678022b7de6cf199f50e8822913d05f3b3` was cancelled when a subsequent report-only commit was pushed:
+The latest completed run for implementation commit `1f3fcef541a65d799b70fb1e4ca884cf9e69b4cc` passed all four jobs:
 
-- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966780)
-- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966174)
-- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966704)
-- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43421987972/job/131873966664)
+- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875178116) — passed
+- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875178054) — passed
+- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875178251) — passed
+- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875177624) — passed
 
-The follow-up run for the report-only commit `e7f82e9a46d9a19ad9c6b1815ae643fc7f93db30` was queued at the last live refresh: [workflow run](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422153299). This report update may trigger another run; consult the PR's live Checks tab for the current result. The earlier successful run on `52e7ab0` is historical only. No merge or production-readiness claim is made.
+The report refresh itself is documentation-only; pushing it triggers a new run. The PR's live Checks tab is authoritative for that latest head. Earlier cancelled runs on intermediate report-only commits are not evidence of failure in the implementation. No merge or production-readiness claim is made.
 
 ## Required follow-up
 
