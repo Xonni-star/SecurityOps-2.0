@@ -42,6 +42,16 @@ interface PatrolRound {
   localStatus?: 'in_progress' | 'completion_pending';
 }
 
+interface PatrolAttachment {
+  id: string;
+  document_id: string;
+  title: string;
+  original_filename: string;
+  content_type: string;
+  size_bytes: number;
+  scan_status: string;
+}
+
 interface BarcodeDetectorInstance {
   detect(source: HTMLVideoElement): Promise<Array<{ rawValue: string }>>;
 }
@@ -158,6 +168,8 @@ export const MobilePatrolScanner: React.FC = () => {
   const sites = getTenantSites();
   const storedScans = getTenantPatrolScans();
   const userId = authUser?.id || currentUserId;
+  const permissions = authUser?.permissions ?? [];
+  const canUploadAttachment = permissions.includes('documents:create') && permissions.includes('documents:read');
   const [queuedScans, setQueuedScans] = useState<PatrolScanEvent[]>([]);
   const scans = [
     ...storedScans,
@@ -168,6 +180,10 @@ export const MobilePatrolScanner: React.FC = () => {
   const [siteId, setSiteId] = useState(sites[0]?.id || '');
   const [checkpoints, setCheckpoints] = useState<PatrolCheckpoint[]>([]);
   const [routes, setRoutes] = useState<PatrolRoute[]>([]);
+  const [documentCategories, setDocumentCategories] = useState<Array<{ id: string; name: string }>>([]);
+  const [selectedDocumentCategory, setSelectedDocumentCategory] = useState('');
+  const [roundAttachments, setRoundAttachments] = useState<PatrolAttachment[]>([]);
+  const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [selectedRouteId, setSelectedRouteId] = useState('');
   const [activeRound, setActiveRound] = useState<PatrolRound | null>(null);
   const [selectedMethod, setSelectedMethod] = useState<'QR_CODE' | 'NFC_TAG' | 'MANUELL'>('MANUELL');
@@ -198,6 +214,41 @@ export const MobilePatrolScanner: React.FC = () => {
   useEffect(() => {
     if (!siteId && sites.length) setSiteId(sites[0].id);
   }, [siteId, sites]);
+
+  useEffect(() => {
+    let active = true;
+    if (!isOnline || !canUploadAttachment) {
+      setDocumentCategories([]);
+      return () => { active = false; };
+    }
+    void apiClient.get<Array<{ id: string; name: string }>>('/documents/categories')
+      .then(categories => {
+        if (active) {
+          setDocumentCategories(categories);
+          setSelectedDocumentCategory(previous => categories.some(category => category.id === previous)
+            ? previous
+            : categories.find(category => category.name === 'Objektunterlagen')?.id ?? categories[0]?.id ?? '');
+        }
+      })
+      .catch(error => {
+        if (active) setErrorMessage(error instanceof Error ? error.message : 'DMS-Kategorien konnten nicht geladen werden.');
+      });
+    return () => { active = false; };
+  }, [isOnline, canUploadAttachment]);
+
+  useEffect(() => {
+    let active = true;
+    if (!activeRound || !isOnline) {
+      setRoundAttachments([]);
+      return () => { active = false; };
+    }
+    void apiClient.get<PatrolAttachment[]>(`/patrol/rounds/${activeRound.id}/attachments`)
+      .then(attachments => { if (active) setRoundAttachments(attachments); })
+      .catch(error => {
+        if (active) setErrorMessage(error instanceof Error ? error.message : 'Kontrollgangsanlagen konnten nicht geladen werden.');
+      });
+    return () => { active = false; };
+  }, [activeRound?.id, isOnline]);
 
   useEffect(() => {
     let active = true;
@@ -676,6 +727,28 @@ export const MobilePatrolScanner: React.FC = () => {
     }
   };
 
+  const uploadRoundAttachment = async (file: File | undefined) => {
+    if (!file || !activeRound || !siteId || !selectedDocumentCategory || !canUploadAttachment) return;
+    setUploadingAttachment(true);
+    try {
+      const metadata = new URLSearchParams({
+        title: file.name,
+        categoryId: selectedDocumentCategory,
+        description: `Kontrollgangsanlage ${activeRound.id}`,
+        relationshipType: 'site',
+        relationshipId: siteId
+      });
+      const document = await apiClient.uploadFile<{ id: string }>(`/documents?${metadata.toString()}`, file);
+      await apiClient.post(`/patrol/rounds/${activeRound.id}/attachments`, { documentId: document.id });
+      setRoundAttachments(await apiClient.get<PatrolAttachment[]>(`/patrol/rounds/${activeRound.id}/attachments`));
+      setErrorMessage(null);
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Anlage konnte nicht hochgeladen und verknüpft werden.');
+    } finally {
+      setUploadingAttachment(false);
+    }
+  };
+
   return (
     <div className="space-y-4 pb-20 text-xs">
       <div className="rounded-2xl border border-slate-800 bg-slate-900 p-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -762,6 +835,43 @@ export const MobilePatrolScanner: React.FC = () => {
               </li>
             ))}
           </ul>
+        </section>
+      )}
+
+      {activeRound && (
+        <section aria-label="Kontrollgangsanlagen" className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900 p-4">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="font-bold text-slate-100">Fotos und Anlagen</h3>
+              <p className="text-[11px] text-slate-400">Dateien werden im Dokumentenmanagement gespeichert und revisionssicher mit dem Rundgang verknüpft.</p>
+            </div>
+            {isOnline && canUploadAttachment && (
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <select value={selectedDocumentCategory} onChange={event => setSelectedDocumentCategory(event.target.value)} className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white">
+                  {documentCategories.map(category => <option key={category.id} value={category.id}>{category.name}</option>)}
+                </select>
+                <label className="cursor-pointer rounded-lg bg-indigo-700 px-3 py-2 text-center text-xs font-semibold text-white">
+                  {uploadingAttachment ? 'Upload läuft…' : 'Foto / Datei hinzufügen'}
+                  <input type="file" accept="image/*,application/pdf" capture="environment" disabled={uploadingAttachment || !selectedDocumentCategory} onChange={event => {
+                    void uploadRoundAttachment(event.target.files?.[0]);
+                    event.currentTarget.value = '';
+                  }} className="sr-only" />
+                </label>
+              </div>
+            )}
+          </div>
+          {!isOnline && <p className="text-[11px] text-amber-200">Anlagen benötigen derzeit eine Verbindung; Offline-Foto-Uploads sind nicht verfügbar.</p>}
+          {isOnline && !canUploadAttachment && <p className="text-[11px] text-amber-200">DMS-Upload nicht verfügbar: Es fehlen die Dokumentenrechte zum Lesen und Erstellen.</p>}
+          {roundAttachments.length > 0 && (
+            <ul className="space-y-1">
+              {roundAttachments.map(attachment => (
+                <li key={attachment.id} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 p-2 text-xs text-slate-300">
+                  <span>{attachment.title} · {attachment.original_filename} · {Math.ceil(attachment.size_bytes / 1024)} KB</span>
+                  <span className="text-[10px] text-slate-500">Scanstatus: {attachment.scan_status}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </section>
       )}
 

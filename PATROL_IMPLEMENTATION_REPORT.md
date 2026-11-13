@@ -1,67 +1,51 @@
 # Patrol management: implementation and acceptance audit
 
-**Status:** incomplete; PR #14 remains open for independent review. This report evaluates the full 641-line brief supplied in the parent workspace. It does not claim production readiness, operational availability, or that all acceptance requirements are met.
+**Status:** PR #14 is open and unmerged. This report reflects the complete 641-line brief and implementation in the current worktree. It does not claim production readiness, operational availability, or that device-level requirements have been verified.
 
-## Scope currently implemented
+## Implemented scope
 
-- Tenant-scoped checkpoints with high-entropy QR tokens, rotation, lifecycle metadata, and route-version management.
-- Round start, checkpoint scans, completion, deviation records, and append-only round events.
-- IndexedDB persistence of offline start/scan/completion events, recovery after reload, ordered outbox replay, reconnect-triggered synchronization, shared idempotency keys, and preserved retry/conflict states.
-- Tenant-scoped dashboard filters for customer/site, employee, route, round status, dates, and exception category.
-- Immutable route versions capture fixed/flexible checkpoint order, target duration, late tolerance, time windows, daily/weekly recurrence, and individual employee assignments. Server-side validation checks assignment/site membership before a round starts.
-- Optional GPS coordinates are captured per scan; completion remarks and route execution metadata are persisted.
-- Scan processing creates idempotent `late_checkpoint` and `missed_checkpoint` deviations when observed route steps exceed configured offsets/tolerance or are skipped. Completion can also create a target-duration deviation.
-- Permission-gated scan-attempt audit records for invalid, rejected, and duplicate scans. Tokens are not stored in the audit records.
-- Migrations 023–025 extend route execution/location, scheduling/individual assignments and fine-grained permissions, and scan-attempt auditing. Tenant-owned tables use RLS and FORCE RLS; the application role has only the required table privileges.
-- Route planning, filters, and permission-gated scan-attempt review are exposed in the existing UI. Direct and synchronized writes use server-side authorization.
-- Related README, database, backend, offline, and module documentation has been updated. Dienst-/Schichtplanung has not been started.
+- Tenant/site-bound checkpoints with random 256-bit QR credentials (only SHA-256 hashes persisted), token rotation, lifecycle controls, and camera/NFC/manual fallbacks based on available browser APIs.
+- Immutable route versions, fixed/flexible checkpoint ordering, target duration/tolerance, timezone-aware daily/weekly recurrence, employee assignments, and object-scoped employee groups snapshotted into route-version assignments.
+- Round start, scans, completion, deviation records, immutable events, server-side RBAC, and dashboard/history filters.
+- IndexedDB outbox for offline start/scan/completion/exception mutations; cached route/checkpoint/round state; reload/restart recovery; dependency-ordered replay; reconnect-triggered sync; idempotency; and preserved conflict states.
+- A 30-second backend schedule worker materializes occurrences with a unique tenant/route/version/time key. Conditional state updates and `FOR UPDATE ... SKIP LOCKED` make missed/abandoned processing safe across worker instances. System deviations and append-only occurrence events are recorded idempotently and appear in the Patrol views.
+- Patrol sync conflicts can be resolved by accepting the server state or, with exception permission, recording a new token-free immutable exception containing the useful local note. Conflict receipts are separate and idempotent; unresolved authorization/data failures keep the outbox entry.
+- Existing, active, same-site DMS documents can be linked online to a round. This uses the private DMS blob/document workflow; it does not capture photos or buffer binary files offline.
+- Optional scan GPS, completion remarks, scan-attempt audit without raw tokens, and tests for group authorization, schedule de-duplication, missed/abandoned rounds, attachment idempotency, and Patrol conflict resolution.
+- Migrations 026–029 add schedule occurrences/events, employee groups and route snapshots, DMS attachment links, and the DMS relationship delete permission required by its existing setter. Tenant-owned tables use RLS and FORCE RLS.
 
-## Acceptance status and remaining gaps
+## Acceptance status and limitations
 
-**Implemented, with local automated coverage:** tenant-scoped checkpoint and route APIs; immutable route versions; fixed/flexible order; target duration/tolerance and time-window/recurrence configuration; individual employee assignment enforcement; offline start/scan/completion and durable replay; optional per-scan GPS; completion remarks; scan-based late/missed deviations; dashboard filtering; and token-free scan-attempt auditing.
+The backend and frontend implementations cover the required offline start/scan/outbox/sync/restart path, recurrence materialization, automatic overdue/missed/abandoned detection, group assignments, and actionable conflict handling. The full set of implementation details and route permissions is documented in [PATROL_MANAGEMENT.md](./frontend/PATROL_MANAGEMENT.md).
 
-**Partially implemented:** recurrence is configurable but there is no scheduler that creates planned round occurrences. The system detects late/missed checkpoints during an active round, but does not detect a missed scheduled round, stale/abandoned round, or automatically escalate it. Assignment supports individual employees, not employee groups. Offline conflict/retry states are persisted, but there is no Patrol-specific resolution workflow for a manager.
-
-**Not implemented or not verified:** photo/file attachments; automatic detection/escalation of scheduled, abandoned, or unusually timed rounds; configured Patrol notifications; actual delivery through email, push, or dispatch; hardware/browser end-to-end verification for camera/NFC fallbacks, permission denial, network loss and restart. These are not represented as complete.
-
-The full acceptance brief therefore remains only partially satisfied. The passing tests below do not establish completeness for criteria they do not exercise.
+Still not implemented or verified: direct photo capture and offline binary attachment upload; physical iOS/Android camera/NFC/geolocation testing, browser-process termination/restart on real devices, and deployment runtime testing. Existing same-site DMS documents can be linked online, but this is not a substitute for offline photo support. Missed/abandoned items are escalated as persistent high-severity deviations and occurrence statuses in the app; no Patrol-specific NotificationCenter delivery, email, push, or dispatch provider is configured. External delivery is not claimed. Dienst-/Schichtplanung has not been started.
 
 ## Database, tenant isolation, and authorization
 
-- Migration 023 adds route-version order/duration/tolerance settings, scan location, and completion notes.
-- Migration 024 adds route-version time-window and recurrence fields plus `patrol_route_version_assignments`. Assignment foreign keys bind tenant, route/site, employee, and employee-site assignment; RLS and FORCE RLS are enabled. The application role receives SELECT/INSERT only on the assignment table.
-- Migration 025 adds `patrol_scan_attempts`, with a tenant/mutation uniqueness constraint, no raw scan token column, RLS/FORCE RLS, and SELECT/INSERT-only application privileges.
-- Route start authorization is enforced server-side and checks the caller's assignment against the requested route/site. Patrol endpoints use fine-grained permissions while preserving legacy permission compatibility.
-- The migration/RLS and API test results below are local test results; they are not a production database deployment or independent security certification.
+- Migrations 020–025 create Patrol entities, offline completion receipts, route execution metadata, schedule and individual assignments, granular permissions, and token-free scan-attempt audit.
+- Migration 026 adds schedule timezone/anchor, unique planned occurrences, immutable occurrence events, system actor support, missed/abandoned exception categories, RLS/FORCE RLS, and least-privilege grants.
+- Migration 027 adds tenant/site-bound groups, members, immutable route-version group assignments, and the group event entity. Route-start authorization uses the immutable individual assignment snapshot.
+- Migration 028 adds immutable tenant/site-bound links from rounds to existing DMS documents, with RLS/FORCE RLS. Migration 029 grants the application role the existing DMS relationship setter's required DELETE permission; API authorization remains required.
+- Schedule insertion is conflict-safe by unique key; missed processing is conditional on `scheduled`, and abandoned processing locks eligible rows with `SKIP LOCKED`. System exception IDs are deterministic per occurrence/category.
+- Direct and offline writes validate server-side RBAC and authenticated employee/site relationships. Migration/RLS and API results below are local verification, not a production database deployment or independent security certification.
 
 ## Verification
 
 ### Local worktree
 
-The changes are committed and pushed on branch `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) is open against `main`. The verified base is `5608b9010096ebac06a000ed2a2870dadd66ab60`; implementation commit `5a4e77678022b7de6cf199f50e8822913d05f3b3` follows `52e7ab05e04476d06e92547753dd759b24fd8a37`. Subsequent commits only refresh the report/PR metadata. The PR page is authoritative for the live head. No merge was performed.
+Changes are on `xonni-star-feature-patrol-management`. PR [#14](https://github.com/Xonni-star/SecurityOps-2.0/pull/14) remains open against `main`; the live head and its checks are authoritative on GitHub. The verified project base is `5608b9010096ebac06a000ed2a2870dadd66ab60`. No merge was performed.
 
 - Backend TypeScript build: passed.
-- Backend Jest: 20 suites, 219 tests passed.
+- Full Backend Jest: 20 suites, 219 tests passed.
 - PostgreSQL migration/RLS suite: 65 tests passed.
-- Patrol API integration: 1 test passed, including route scheduling/assignment, filters, scan-attempt auditing, and offline/idempotency behavior.
-- Frontend Vitest: 11 files, 56 tests passed.
+- Patrol API integration: passed, including parallel schedule materialization/processing, missed and abandoned handling, employee-group authorization, DMS attachment linking, and both idempotent conflict-resolution choices.
+- Frontend Vitest: 11 files, 56 tests passed, including IndexedDB reopen/restart recovery and automatic sync on reconnect.
 - Frontend production build: passed. Existing Vite `__dirname` and large-chunk warnings remain.
-- Focused Python Mobile API tests: 2 passed. The broader Python suite was not run successfully in the prior work because its environment had missing `greenlet` and stale imports (`Tenant`, `DeviceStatus`); this is not reported as passing.
-- `docker compose -f frontend/deploy/docker-compose.production.yml config --quiet`: passed using local-only test values.
-- Production Compose backend and frontend/proxy image builds: passed. These are build checks only; no production deployment or runtime readiness was established.
+- Production Compose configuration validation: passed.
+- Backend and frontend/proxy production Docker image builds: passed. These are build checks only; no deployment or runtime readiness was established.
 - `git diff --check`: passed.
+- No real-device camera/NFC/offline E2E or production database deployment was run.
 
 ### GitHub CI
 
-The latest completed run for implementation commit `1f3fcef541a65d799b70fb1e4ca884cf9e69b4cc` passed all four jobs:
-
-- [Backend – PostgreSQL 16, Migration, Build, Jest](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875178116) — passed
-- [Frontend – npm ci, Vitest, production build](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875178054) — passed
-- [Production Docker – configuration and image builds](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875178251) — passed
-- [Root – npm ci, structure check, overall start](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43422317112/job/131875177624) — passed
-
-The report refresh itself is documentation-only; pushing it triggers a new run. The PR's live Checks tab is authoritative for that latest head. Earlier cancelled runs on intermediate report-only commits are not evidence of failure in the implementation. No merge or production-readiness claim is made.
-
-## Required follow-up
-
-Implement the outstanding scheduler/occurrence and escalation lifecycle, employee groups, attachment workflow, and Patrol-specific conflict resolution; add realistic device/network coverage where feasible; rerun the full checks; then update this report and the PR description with results for the actual pushed head. The PR must remain open for the user's independent review and must not be merged by this agent.
+The updated implementation CI results will be recorded here after the branch push. Until that run completes, CI for this revision is **not verified**. PR #14 will remain open for the user's independent review and will not be merged by this agent.

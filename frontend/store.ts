@@ -1634,7 +1634,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
    * - Entfernt die Mutation erst nach bestätigtem Serverabschluss aus der lokalen Outbox.
    * - Bei Fehlern bleibt der Konflikt in der Outbox erhalten und wirft sauber einen Fehler.
    */
-  resolveConflict: async (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER'): Promise<void> => {
+  resolveConflict: async (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION'): Promise<void> => {
     const { syncQueue } = get();
     const item = syncQueue.find((q) => q.id === queueId);
     if (!item) {

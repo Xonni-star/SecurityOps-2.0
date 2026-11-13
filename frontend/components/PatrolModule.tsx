@@ -35,11 +35,21 @@ interface PatrolRoute {
   late_tolerance_minutes?: number;
   time_window_start?: string | null;
   time_window_end?: string | null;
+  schedule_timezone?: string;
   recurrence_frequency?: 'none' | 'daily' | 'weekly';
   recurrence_interval?: number;
   recurrence_days?: number[];
   assigned_employees?: Array<{ id: string; name: string }>;
+  assigned_employee_groups?: Array<{ id: string; name: string }>;
   checkpoints: Array<{ checkpointId: string; code: string; name: string; sequence: number; plannedOffsetMinutes: number }>;
+}
+
+interface PatrolEmployeeGroup {
+  id: string;
+  site_id: string;
+  name: string;
+  archived_at?: string | null;
+  employees: Array<{ id: string; name: string }>;
 }
 
 interface PatrolScan {
@@ -62,6 +72,17 @@ interface PatrolException {
   created_at: string;
 }
 
+interface PatrolScheduledOccurrence {
+  id: string;
+  site_name: string;
+  route_code: string;
+  route_version: number;
+  scheduled_at: string;
+  deadline_at: string;
+  status: 'scheduled' | 'in_progress' | 'completed' | 'missed' | 'abandoned';
+  employee_name?: string | null;
+}
+
 interface PatrolScanAttempt {
   id: string;
   employee_name?: string | null;
@@ -75,6 +96,7 @@ interface PatrolStats {
   scans: { total: number; verified: number; manual: number };
   exceptions: { total: number; urgent: number };
   rounds: { total: number; in_progress: number; completed: number };
+  scheduledOccurrences: { total: number; scheduled: number; missed: number; abandoned: number };
   scanAttempts: { total: number; rejected: number; duplicate: number } | null;
 }
 
@@ -120,8 +142,10 @@ export const PatrolModule: React.FC = () => {
   const [stats, setStats] = useState<PatrolStats | null>(null);
   const [checkpoints, setCheckpoints] = useState<PatrolCheckpoint[]>([]);
   const [routes, setRoutes] = useState<PatrolRoute[]>([]);
+  const [employeeGroups, setEmployeeGroups] = useState<PatrolEmployeeGroup[]>([]);
   const [scans, setScans] = useState<PatrolScan[]>([]);
   const [exceptions, setExceptions] = useState<PatrolException[]>([]);
+  const [scheduledOccurrences, setScheduledOccurrences] = useState<PatrolScheduledOccurrence[]>([]);
   const [scanAttempts, setScanAttempts] = useState<PatrolScanAttempt[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -146,10 +170,14 @@ export const PatrolModule: React.FC = () => {
   const [lateToleranceMinutes, setLateToleranceMinutes] = useState(5);
   const [timeWindowStart, setTimeWindowStart] = useState('');
   const [timeWindowEnd, setTimeWindowEnd] = useState('');
+  const [scheduleTimezone, setScheduleTimezone] = useState('UTC');
   const [recurrenceFrequency, setRecurrenceFrequency] = useState<'none' | 'daily' | 'weekly'>('none');
   const [recurrenceInterval, setRecurrenceInterval] = useState(1);
   const [recurrenceDays, setRecurrenceDays] = useState<number[]>([]);
   const [assignedEmployeeIds, setAssignedEmployeeIds] = useState<string[]>([]);
+  const [assignedEmployeeGroupIds, setAssignedEmployeeGroupIds] = useState<string[]>([]);
+  const [newGroupName, setNewGroupName] = useState('');
+  const [newGroupEmployeeIds, setNewGroupEmployeeIds] = useState<string[]>([]);
   const [selectedCheckpointIds, setSelectedCheckpointIds] = useState<string[]>([]);
   const [versionRouteId, setVersionRouteId] = useState('');
   const [exceptionCategory, setExceptionCategory] = useState('other');
@@ -162,22 +190,26 @@ export const PatrolModule: React.FC = () => {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const [dashboardData, checkpointData, routeData, scanData, exceptionData, attemptData] = await Promise.all([
+      const [dashboardData, checkpointData, routeData, groupData, scanData, exceptionData, attemptData, occurrenceData] = await Promise.all([
         apiClient.get<PatrolStats>(`/patrol/dashboard${filters}`),
         apiClient.get<PatrolCheckpoint[]>(`/patrol/checkpoints${siteId ? `?siteId=${encodeURIComponent(siteId)}` : ''}`),
         apiClient.get<PatrolRoute[]>(`/patrol/routes${siteId ? `?siteId=${encodeURIComponent(siteId)}` : ''}`),
+        apiClient.get<PatrolEmployeeGroup[]>(`/patrol/employee-groups${siteId ? `?siteId=${encodeURIComponent(siteId)}` : ''}`),
         apiClient.get<PatrolScan[]>(`/patrol/scans${filters}`),
         apiClient.get<PatrolException[]>(`/patrol/exceptions${filters}`),
         canReadScanAttempts
           ? apiClient.get<PatrolScanAttempt[]>(`/patrol/scan-attempts${filters}`)
-          : Promise.resolve([])
+          : Promise.resolve([]),
+        apiClient.get<PatrolScheduledOccurrence[]>(`/patrol/scheduled-occurrences${filters}`)
       ]);
       setStats(dashboardData);
       setCheckpoints(checkpointData);
       setRoutes(routeData);
+      setEmployeeGroups(groupData);
       setScans(scanData);
       setExceptions(exceptionData);
       setScanAttempts(attemptData);
+      setScheduledOccurrences(occurrenceData);
       setErrorMessage('');
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Kontrollgangsdaten konnten nicht geladen werden.');
@@ -332,12 +364,37 @@ export const PatrolModule: React.FC = () => {
     lateToleranceMinutes,
     timeWindowStart: timeWindowStart || null,
     timeWindowEnd: timeWindowEnd || null,
+    scheduleTimezone,
     recurrenceFrequency,
     recurrenceInterval,
     recurrenceDays: recurrenceFrequency === 'weekly' ? recurrenceDays : [],
     employeeIds: assignedEmployeeIds,
+    employeeGroupIds: assignedEmployeeGroupIds,
     checkpoints: selectedForRoute.map((point, index) => ({ checkpointId: point.id, plannedOffsetMinutes: index * point.required_interval_minutes }))
   });
+
+  const createEmployeeGroup = async () => {
+    if (!siteId || !newGroupName.trim() || !newGroupEmployeeIds.length) {
+      setErrorMessage('Wählen Sie ein Objekt, einen Gruppennamen und mindestens einen Mitarbeiter.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await apiClient.post('/patrol/employee-groups', {
+        siteId,
+        name: newGroupName.trim(),
+        employeeIds: newGroupEmployeeIds
+      });
+      setNewGroupName('');
+      setNewGroupEmployeeIds([]);
+      setNotice('Mitarbeitergruppe für dieses Objekt angelegt.');
+      await refresh();
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Mitarbeitergruppe konnte nicht angelegt werden.');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const createRoute = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -437,6 +494,9 @@ export const PatrolModule: React.FC = () => {
         <label className="text-[11px] text-slate-300">Zeitfenster bis
           <input type="time" value={timeWindowEnd} onChange={event => setTimeWindowEnd(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
         </label>
+        <label className="text-[11px] text-slate-300">Zeitzone (IANA)
+          <input value={scheduleTimezone} onChange={event => setScheduleTimezone(event.target.value)} placeholder="Europe/Berlin" maxLength={64} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+        </label>
         <label className="text-[11px] text-slate-300">Wiederholung
           <select value={recurrenceFrequency} onChange={event => {
             const frequency = event.target.value as 'none' | 'daily' | 'weekly';
@@ -472,7 +532,32 @@ export const PatrolModule: React.FC = () => {
           </label>
         )) : <span>Keine zugeordneten Mitarbeiter für dieses Objekt verfügbar.</span>}
       </fieldset>
-      <p className="text-[10px] text-slate-500">Wiederholungsregeln und Zeitfenster werden versionsgebunden gespeichert. Die automatische Erzeugung geplanter Rundgangsinstanzen ist noch nicht verfügbar.</p>
+      <fieldset className="flex flex-wrap gap-3 text-[11px] text-slate-300">
+        <legend>Mitarbeitergruppen (optionale Routenzuweisung)</legend>
+        {employeeGroups.filter(group => group.site_id === siteId && !group.archived_at).length
+          ? employeeGroups.filter(group => group.site_id === siteId && !group.archived_at).map(group => (
+            <label key={group.id} className="flex items-center gap-1">
+              <input type="checkbox" checked={assignedEmployeeGroupIds.includes(group.id)} onChange={event => setAssignedEmployeeGroupIds(current =>
+                event.target.checked ? [...current, group.id] : current.filter(value => value !== group.id)
+              )} />{group.name} ({group.employees.length})
+            </label>
+          )) : <span>Für dieses Objekt sind keine aktiven Mitarbeitergruppen angelegt.</span>}
+      </fieldset>
+      <div className="space-y-2 rounded-lg border border-slate-800 p-3">
+        <p className="text-[11px] text-slate-300">Mitarbeitergruppe für das ausgewählte Objekt anlegen</p>
+        <input value={newGroupName} onChange={event => setNewGroupName(event.target.value)} placeholder="Gruppenname" maxLength={120} className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white" />
+        <div className="flex flex-wrap gap-3 text-[11px] text-slate-300">
+          {employees.map(([id, name]) => (
+            <label key={id} className="flex items-center gap-1">
+              <input type="checkbox" checked={newGroupEmployeeIds.includes(id)} onChange={event => setNewGroupEmployeeIds(current =>
+                event.target.checked ? [...current, id] : current.filter(value => value !== id)
+              )} />{name}
+            </label>
+          ))}
+        </div>
+        <button type="button" onClick={() => void createEmployeeGroup()} disabled={saving || !siteId} className="rounded-lg border border-slate-700 px-3 py-2 text-xs text-slate-200 disabled:opacity-50">Gruppe anlegen</button>
+      </div>
+      <p className="text-[10px] text-slate-500">Wiederholungen werden mit lokalem Datum in der IANA-Zeitzone versioniert und automatisch in geplante Rundgänge überführt.</p>
     </div>
   );
 
@@ -521,7 +606,7 @@ export const PatrolModule: React.FC = () => {
         </label>
         <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Abweichungstyp
           <select value={category} onChange={event => setCategory(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-white">
-            <option value="">Alle Abweichungen</option><option value="missed_checkpoint">Kontrollpunkt ausgelassen</option><option value="late_checkpoint">Verspätet</option><option value="access_blocked">Zugang blockiert</option><option value="hazard">Gefahr</option><option value="damage">Schaden</option><option value="other">Sonstige</option>
+            <option value="">Alle Abweichungen</option><option value="missed_checkpoint">Kontrollpunkt ausgelassen</option><option value="late_checkpoint">Verspäteter Kontrollpunkt</option><option value="missed_round">Geplanter Rundgang verpasst</option><option value="abandoned_round">Rundgang abgebrochen</option><option value="access_blocked">Zugang blockiert</option><option value="hazard">Gefahr</option><option value="damage">Schaden</option><option value="other">Sonstige</option>
           </select>
         </label>
         <label className="rounded-xl border border-slate-800 bg-slate-900 p-3 text-slate-300">Von
@@ -532,8 +617,20 @@ export const PatrolModule: React.FC = () => {
         </label>
         <MetricCard label="Scans" value={stats?.scans.total} detail={`${stats?.scans.verified ?? 0} Token-verifiziert · ${stats?.scans.manual ?? 0} manuell`} icon={<CheckCircle2 className="h-4 w-4 text-emerald-400" />} />
         <MetricCard label="Rundgänge / Abweichungen" value={stats ? `${stats.rounds.completed}/${stats.rounds.total} · ${stats.exceptions.total}` : undefined} detail={`${stats?.exceptions.urgent ?? 0} dringlich/kritisch`} icon={<AlertTriangle className="h-4 w-4 text-amber-400" />} />
+        <MetricCard label="Geplante Kontrollen" value={stats?.scheduledOccurrences?.scheduled} detail={`${stats?.scheduledOccurrences?.missed ?? 0} überfällig · ${stats?.scheduledOccurrences?.abandoned ?? 0} abgebrochen`} icon={<Clock3 className="h-4 w-4 text-amber-400" />} />
         {canReadScanAttempts && <MetricCard label="Scanversuche" value={stats?.scanAttempts?.total} detail={`${stats?.scanAttempts?.rejected ?? 0} abgewiesen · ${stats?.scanAttempts?.duplicate ?? 0} doppelt`} icon={<ShieldCheck className="h-4 w-4 text-amber-400" />} />}
       </section>
+
+      <DataPanel title="Geplante und überfällige Kontrollgänge" loading={loading} empty={!scheduledOccurrences.length}>
+        <div className="max-h-80 space-y-2 overflow-auto">
+          {scheduledOccurrences.map(occurrence => (
+            <article key={occurrence.id} className="flex flex-col gap-1 rounded-lg border border-slate-800 bg-slate-950 p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div><strong className="text-sm text-slate-100">{occurrence.route_code} · {occurrence.site_name}</strong><p className="text-[11px] text-slate-400">{formatTime(occurrence.scheduled_at)} · Version {occurrence.route_version}{occurrence.employee_name ? ` · ${occurrence.employee_name}` : ''}</p></div>
+              <span className={`rounded px-2 py-1 text-[10px] ${occurrence.status === 'missed' || occurrence.status === 'abandoned' ? 'bg-red-500/15 text-red-200' : 'bg-indigo-500/15 text-indigo-200'}`}>{occurrence.status}</span>
+            </article>
+          ))}
+        </div>
+      </DataPanel>
 
       {canReadScanAttempts && <section className="overflow-hidden rounded-2xl border border-slate-800 bg-slate-900">
         <h2 className="border-b border-slate-800 px-4 py-3 font-semibold text-white">Abgewiesene und doppelte Scanversuche</h2>
@@ -661,7 +758,7 @@ export const PatrolModule: React.FC = () => {
             <article key={route.id} className="rounded-lg border border-slate-800 bg-slate-950 p-3">
               <div className="flex items-center justify-between gap-2"><strong className="text-slate-100">{route.route_code} · {route.name}</strong><span className="rounded bg-indigo-500/15 px-2 py-1 text-indigo-200">v{route.current_version}{route.active ? '' : ' · inaktiv'}</span></div>
               <p className="mt-1 text-[11px] text-slate-400">{route.site_name} · {route.checkpoints.map(point => point.code).join(route.flexible_order ? ' · ' : ' → ')}</p>
-              <p className="mt-1 text-[10px] text-slate-500">{route.flexible_order ? 'Flexible Reihenfolge' : 'Feste Reihenfolge'} · Soll {route.target_duration_minutes ?? '—'} Min. · Verspätungstoleranz {route.late_tolerance_minutes ?? 5} Min.</p>
+              <p className="mt-1 text-[10px] text-slate-500">{route.flexible_order ? 'Flexible Reihenfolge' : 'Feste Reihenfolge'} · Soll {route.target_duration_minutes ?? '—'} Min. · Verspätungstoleranz {route.late_tolerance_minutes ?? 5} Min. · {route.schedule_timezone ?? 'UTC'}</p>
               {canManage && route.active && <button disabled={saving} onClick={() => void archiveRoute(route.id)} className="mt-2 rounded bg-slate-800 px-2 py-1 text-[10px] text-amber-200">Route archivieren</button>}
             </article>
           ))}</div>

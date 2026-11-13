@@ -217,10 +217,17 @@ app.patch('/api/v1/patrol/checkpoints/:id/status', authenticateJwt, requireAnyPe
 app.post('/api/v1/patrol/checkpoints/:id/rotate-token', authenticateJwt, requireAnyPermission('patrol:checkpoint:manage', 'patrol:manage'), patrolController.rotateCheckpointToken);
 app.post('/api/v1/patrol/checkpoints/:id/archive', authenticateJwt, requireAnyPermission('patrol:checkpoint:manage', 'patrol:manage'), patrolController.archiveCheckpoint);
 app.get('/api/v1/patrol/routes', authenticateJwt, requireAnyPermission('patrol:route:read', 'patrol:read'), patrolController.listRoutes);
+app.get('/api/v1/patrol/employee-groups', authenticateJwt, requireAnyPermission('patrol:route:read', 'patrol:read'), patrolController.listPatrolEmployeeGroups);
+app.post('/api/v1/patrol/employee-groups', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.createPatrolEmployeeGroup);
+app.patch('/api/v1/patrol/employee-groups/:id', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.updatePatrolEmployeeGroup);
+app.post('/api/v1/patrol/employee-groups/:id/archive', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.archivePatrolEmployeeGroup);
 app.post('/api/v1/patrol/routes', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.createRoute);
 app.post('/api/v1/patrol/routes/:id/versions', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.createRouteVersion);
 app.post('/api/v1/patrol/routes/:id/archive', authenticateJwt, requireAnyPermission('patrol:route:manage', 'patrol:manage'), patrolController.archiveRoute);
 app.get('/api/v1/patrol/rounds', authenticateJwt, requireAnyPermission('patrol:round:read', 'patrol:read'), patrolController.listRounds);
+app.get('/api/v1/patrol/rounds/:id/attachments', authenticateJwt, requireAnyPermission('patrol:round:read', 'patrol:round:perform', 'patrol:manage', 'patrol:audit'), patrolController.listRoundAttachments);
+app.post('/api/v1/patrol/rounds/:id/attachments', authenticateJwt, requireAnyPermission('patrol:round:perform', 'patrol:manage'), patrolController.addRoundAttachment);
+app.get('/api/v1/patrol/scheduled-occurrences', authenticateJwt, requireAnyPermission('patrol:round:read', 'patrol:analytics:read', 'patrol:manage'), patrolController.listScheduledOccurrences);
 app.get('/api/v1/patrol/scans', authenticateJwt, requireAnyPermission('patrol:history:read', 'patrol:round:read', 'patrol:read'), patrolController.listScans);
 app.get('/api/v1/patrol/scan-attempts', authenticateJwt, requireAnyPermission('patrol:scan-attempt:read', 'patrol:history:read', 'patrol:audit'), patrolController.listScanAttempts);
 app.get('/api/v1/patrol/exceptions', authenticateJwt, requireAnyPermission('patrol:exception:read', 'patrol:read'), patrolController.listExceptions);

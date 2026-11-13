@@ -675,8 +675,8 @@ export interface ResponseEnvelope<T = any> {
 
 export interface ConflictResolutionPayload {
   clientUuid: string;
-  entityType: 'task' | 'shift' | 'key' | 'guardbook';
-  strategy: 'USE_LOCAL' | 'USE_SERVER';
+  entityType: 'task' | 'shift' | 'key' | 'guardbook' | 'patrol';
+  strategy: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION';
   expectedVersion: number;
   localPayload?: Record<string, any>;
 }
@@ -685,6 +685,6 @@ export interface ConflictResolutionResult {
   applied: boolean;
   clientUuid: string;
   entityType: string;
-  strategy: 'USE_LOCAL' | 'USE_SERVER';
+  strategy: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION';
   serverState: any;
 }

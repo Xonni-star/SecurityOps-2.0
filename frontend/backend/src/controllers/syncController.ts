@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { createHash } from 'crypto';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 import { createHandover, handoverCreateSchema, HandoverConflictError } from '../services/handoverService';
@@ -37,10 +38,25 @@ const syncPushBatchSchema = z.object({
 
 const conflictResolveSchema = z.object({
   clientUuid: z.string().min(8).max(64),
-  entityType: z.enum(['task', 'shift', 'key', 'guardbook']),
-  strategy: z.enum(['USE_LOCAL', 'USE_SERVER']),
+  entityType: z.enum(['task', 'shift', 'key', 'guardbook', 'patrol']),
+  strategy: z.enum(['USE_LOCAL', 'USE_SERVER', 'RECORD_AS_EXCEPTION']),
   expectedVersion: z.number().int().positive('expectedVersion muss eine positive Ganzzahl sein.'),
   localPayload: z.record(z.any()).optional()
+}).superRefine((value, ctx) => {
+  if (value.entityType === 'patrol' && value.strategy === 'USE_LOCAL') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['strategy'],
+      message: 'Patrol-Ereignisse sind append-only; lokale Daten können nur als neue Abweichung dokumentiert werden.'
+    });
+  }
+  if (value.entityType !== 'patrol' && value.strategy === 'RECORD_AS_EXCEPTION') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['strategy'],
+      message: 'Diese Auflösungsstrategie ist nur für Kontrollgangskonflikte zulässig.'
+    });
+  }
 });
 
 export interface SyncResultItem {
@@ -609,6 +625,11 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverId: 'none',
                 status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
                 serverVersion: mut.baseVersion,
+                conflictData: statusCode === 409 ? {
+                  serverVersion: mut.baseVersion,
+                  clientVersion: mut.baseVersion,
+                  reason: (error as Error).message
+                } : undefined,
                 message: (error as Error).message
               };
             }
@@ -633,6 +654,11 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverId: 'none',
                 status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
                 serverVersion: mut.baseVersion,
+                conflictData: statusCode === 409 ? {
+                  serverVersion: mut.baseVersion,
+                  clientVersion: mut.baseVersion,
+                  reason: (error as Error).message
+                } : undefined,
                 message: (error as Error).message
               };
             }
@@ -676,6 +702,11 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 serverId: 'none',
                 status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
                 serverVersion: mut.baseVersion,
+                conflictData: statusCode === 409 ? {
+                  serverVersion: mut.baseVersion,
+                  clientVersion: mut.baseVersion,
+                  reason: (error as Error).message
+                } : undefined,
                 message: (error as Error).message
               };
             }
@@ -845,6 +876,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
   try {
     const tenantId = req.user!.tenantId;
     const userEmail = req.user!.email;
+    const userId = req.user!.userId;
     const body = conflictResolveSchema.parse(req.body);
     const permissionByEntity = {
       guardbook: 'logbook:create',
@@ -852,7 +884,12 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       task: 'tasks:manage',
       key: 'keys:manage'
     } as const;
-    if (!req.user!.permissions.includes(permissionByEntity[body.entityType])) {
+    const canResolve = body.entityType === 'patrol'
+      ? body.strategy === 'RECORD_AS_EXCEPTION'
+        ? req.user!.permissions.includes('patrol:exception:create') || req.user!.permissions.includes('patrol:manage')
+        : hasPatrolMutationPermission(body.localPayload?.recordType, req.user!.permissions)
+      : req.user!.permissions.includes(permissionByEntity[body.entityType]);
+    if (!canResolve) {
       res.status(403).json({ success: false, message: 'Zugriff verweigert: fehlende Berechtigung für diese Konfliktauflösung.' });
       return;
     }
@@ -895,6 +932,82 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
 
       let updated = false;
       let actualServerData: any = null;
+
+      if (body.entityType === 'patrol') {
+        const conflictReceipt = await client.query(
+          `SELECT client_mutation_id FROM sync_idempotency_receipts
+            WHERE tenant_id=$1 AND client_mutation_id=$2
+              AND entity_type='patrol' AND status='CONFLICT'`,
+          [tenantId, body.clientUuid]
+        );
+        if (!conflictReceipt.rows.length) {
+          throw new ConflictError('Für diese Mutation liegt kein offener Kontrollgangskonflikt vor.');
+        }
+
+        const local = body.localPayload || {};
+        const recordType = typeof local.recordType === 'string' ? local.recordType : 'unknown';
+        if (body.strategy === 'RECORD_AS_EXCEPTION') {
+          let siteId = local.siteId;
+          if (!siteId && local.roundId) {
+            const round = await client.query(
+              'SELECT site_id FROM patrol_rounds WHERE tenant_id=$1 AND id=$2',
+              [tenantId, local.roundId]
+            );
+            siteId = round.rows[0]?.site_id;
+          }
+          const localNote = [local.notes, local.description]
+            .find(value => typeof value === 'string' && value.trim().length > 0);
+          const description = [
+            `Offline-Ereignis '${recordType}' (Mutation ${body.clientUuid}) konnte nicht automatisch synchronisiert werden.`,
+            typeof localNote === 'string' ? `Erfasste Notiz: ${localNote.trim().slice(0, 3500)}` : ''
+          ].filter(Boolean).join(' ');
+          const capturedAt = local.capturedAt || local.scannedAt || local.startedAt || local.completedAt;
+          if (typeof capturedAt !== 'string' || !siteId) {
+            throw new ConflictError('Das lokale Ereignis enthält keinen gültigen Objekt- oder Erfassungszeitpunkt und kann nicht als Abweichung dokumentiert werden.');
+          }
+          const exceptionPayload = {
+            siteId,
+            ...(typeof local.roundId === 'string' ? { roundId: local.roundId } : {}),
+            ...(typeof local.checkpointId === 'string' ? { checkpointId: local.checkpointId } : {}),
+            category: 'other',
+            severity: 'high',
+            description,
+            capturedAt
+          };
+          const resolutionMutationId = `pc_${createHash('sha256')
+            .update(`${tenantId}:${body.clientUuid}`, 'utf8').digest('hex').slice(0, 61)}`;
+          const exception = await recordPatrolException(
+            client,
+            tenantId,
+            userId,
+            resolutionMutationId,
+            exceptionPayload,
+            capturedAt,
+            computePayloadHash(exceptionPayload)
+          );
+          actualServerData = {
+            id: exception.id,
+            site_id: siteId,
+            round_id: exceptionPayload.roundId || null,
+            category: 'other',
+            description,
+            idempotent: exception.idempotent
+          };
+        } else {
+          const roundId = typeof local.roundId === 'string' ? local.roundId : local.roundId?.toString();
+          if (roundId) {
+            const round = await client.query(
+              `SELECT id,site_id,route_id,status,started_at,completed_at
+                 FROM patrol_rounds WHERE tenant_id=$1 AND id=$2`,
+              [tenantId, roundId]
+            );
+            actualServerData = round.rows[0] || { id: roundId, status: 'not_recorded' };
+          } else {
+            actualServerData = { id: body.clientUuid, status: 'not_recorded' };
+          }
+        }
+        updated = true;
+      }
 
       // 3. Fachliche Durchführung je Entitätstyp
       // A. TASK
@@ -1077,15 +1190,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           actualServerData = currentGb;
           updated = true;
         }
-      } else {
+      } else if (body.entityType !== 'patrol') {
         throw new ConflictError(`Konfliktstrategie für Typ '${body.entityType}' nicht unterstützt.`);
       }
 
       // 4. Revisionssichere Protokollierung der Konfliktentscheidung (nur beim ERSTEN Mal!)
       await client.query(
         `INSERT INTO audit_logs (tenant_id, user_email, role, action_type, severity, target_entity, details, ip_address)
-         VALUES ($1, $2, 'Einsatzleitung', 'CONFLICT_RESOLVED', 'INFO', $3, $4, $5)`,
-        [tenantId, userEmail, `Conflict:${body.clientUuid}`, `Konflikt aufgelöst: Strategie=${body.strategy}, Entity=${body.entityType}`, req.ip || '127.0.0.1']
+         VALUES ($1, $2, $3, 'CONFLICT_RESOLVED', 'INFO', $4, $5, $6)`,
+        [tenantId, userEmail, req.user!.role, `Conflict:${body.clientUuid}`,
+          `Konflikt aufgelöst: Strategie=${body.strategy}, Entity=${body.entityType}`, req.ip || '127.0.0.1']
       );
 
       conflictResponseData = {

@@ -4,6 +4,7 @@ import { PoolClient } from 'pg';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 import { computePayloadHash } from '../services/syncHash';
+import { materializePatrolOccurrences } from '../services/patrolScheduleWorker';
 
 const uuid = z.string().uuid();
 const dateTime = z.string().datetime({ offset: true });
@@ -25,13 +26,23 @@ const listQueryBaseSchema = z.object({
   from: z.string().date().optional(),
   to: z.string().date().optional(),
   status: z.enum(['in_progress', 'completed', 'abandoned']).optional(),
-  category: z.enum(['missed_checkpoint', 'late_checkpoint', 'access_blocked', 'hazard', 'damage', 'other']).optional(),
+  category: z.enum([
+    'missed_checkpoint', 'late_checkpoint', 'missed_round', 'abandoned_round',
+    'access_blocked', 'hazard', 'damage', 'other'
+  ]).optional(),
   search: z.string().trim().max(120).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0)
 }).strict();
 
 const listQuerySchema = listQueryBaseSchema.superRefine((query, ctx) => {
+  if (query.from && query.to && query.from > query.to) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['to'], message: 'Das Enddatum darf nicht vor dem Startdatum liegen.' });
+  }
+});
+const occurrenceQuerySchema = listQueryBaseSchema.extend({
+  status: z.enum(['scheduled', 'in_progress', 'completed', 'missed', 'abandoned']).optional()
+}).superRefine((query, ctx) => {
   if (query.from && query.to && query.from > query.to) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['to'], message: 'Das Enddatum darf nicht vor dem Startdatum liegen.' });
   }
@@ -69,10 +80,19 @@ const routeBaseSchema = z.object({
   lateToleranceMinutes: z.number().int().min(0).max(1440).default(5),
   timeWindowStart: z.string().regex(/^\d{2}:\d{2}$/).nullable().default(null),
   timeWindowEnd: z.string().regex(/^\d{2}:\d{2}$/).nullable().default(null),
+  scheduleTimezone: z.string().trim().min(1).max(64).default('UTC').refine(value => {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: value });
+      return true;
+    } catch {
+      return false;
+    }
+  }, 'Ungültige IANA-Zeitzone.'),
   recurrenceFrequency: z.enum(['none', 'daily', 'weekly']).default('none'),
   recurrenceInterval: z.number().int().min(1).max(365).default(1),
   recurrenceDays: z.array(z.number().int().min(0).max(6)).max(7).default([]),
   employeeIds: z.array(uuid).max(200).default([]),
+  employeeGroupIds: z.array(uuid).max(100).default([]),
   checkpoints: z.array(z.object({
     checkpointId: uuid,
     plannedOffsetMinutes: z.number().int().min(0).max(10080).default(0)
@@ -87,6 +107,7 @@ function validateUniqueRouteCheckpoints(
     recurrenceFrequency: 'none' | 'daily' | 'weekly';
     recurrenceDays: number[];
     employeeIds: string[];
+    employeeGroupIds: string[];
   },
   ctx: z.RefinementCtx
 ): void {
@@ -108,6 +129,9 @@ function validateUniqueRouteCheckpoints(
   if (new Set(route.employeeIds).size !== route.employeeIds.length) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['employeeIds'], message: 'Mitarbeiter dürfen nicht doppelt zugeordnet werden.' });
   }
+  if (new Set(route.employeeGroupIds).size !== route.employeeGroupIds.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['employeeGroupIds'], message: 'Mitarbeitergruppen dürfen nicht doppelt zugeordnet werden.' });
+  }
 }
 
 const routeSchema = routeBaseSchema.superRefine(validateUniqueRouteCheckpoints);
@@ -118,7 +142,10 @@ const exceptionSchema = z.object({
   roundId: uuid.optional(),
   scanId: uuid.optional(),
   checkpointId: uuid.optional(),
-  category: z.enum(['missed_checkpoint', 'late_checkpoint', 'access_blocked', 'hazard', 'damage', 'other']),
+  category: z.enum([
+    'missed_checkpoint', 'late_checkpoint', 'missed_round', 'abandoned_round',
+    'access_blocked', 'hazard', 'damage', 'other'
+  ]),
   severity: z.enum(['low', 'normal', 'high', 'critical']).default('normal'),
   description: z.string().trim().min(1).max(5000),
   clientMutationId: z.string().min(8).max(64).regex(/^[A-Za-z0-9_-]+$/),
@@ -656,10 +683,12 @@ async function insertRouteVersion(
     lateToleranceMinutes: number;
     timeWindowStart: string | null;
     timeWindowEnd: string | null;
+    scheduleTimezone: string;
     recurrenceFrequency: 'none' | 'daily' | 'weekly';
     recurrenceInterval: number;
     recurrenceDays: number[];
     employeeIds: string[];
+    employeeGroupIds: string[];
   },
   checkpoints: Array<{ checkpointId: string; plannedOffsetMinutes: number }>
 ): Promise<string> {
@@ -667,12 +696,13 @@ async function insertRouteVersion(
     `INSERT INTO patrol_route_versions
        (tenant_id,route_id,version,name,change_reason,created_by_user_id,flexible_order,
         target_duration_minutes,late_tolerance_minutes,time_window_start,time_window_end,
-        recurrence_frequency,recurrence_interval,recurrence_days)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING id`,
+        recurrence_frequency,recurrence_interval,recurrence_days,schedule_timezone,schedule_anchor_date)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
+       (CURRENT_TIMESTAMP AT TIME ZONE $16::text)::date) RETURNING id`,
     [tenantId, routeId, version, name, changeReason, actorUserId, settings.flexibleOrder,
       settings.targetDurationMinutes, settings.lateToleranceMinutes, settings.timeWindowStart,
       settings.timeWindowEnd, settings.recurrenceFrequency, settings.recurrenceInterval,
-      settings.recurrenceDays]
+      settings.recurrenceDays, settings.scheduleTimezone, settings.scheduleTimezone]
   );
   const versionId = inserted.rows[0].id as string;
   for (const [index, item] of checkpoints.entries()) {
@@ -683,15 +713,41 @@ async function insertRouteVersion(
       [tenantId, versionId, item.checkpointId, siteId, index + 1, item.plannedOffsetMinutes]
     );
   }
-  if (settings.employeeIds.length) {
+  const groupMembers = settings.employeeGroupIds.length
+    ? await db.query(
+      `SELECT g.id AS group_id,m.employee_id
+         FROM patrol_employee_groups g
+         JOIN patrol_employee_group_members m
+           ON m.tenant_id=g.tenant_id AND m.employee_group_id=g.id AND m.site_id=g.site_id
+        WHERE g.tenant_id=$1 AND g.site_id=$2 AND g.id=ANY($3::uuid[]) AND g.archived_at IS NULL`,
+      [tenantId, siteId, settings.employeeGroupIds]
+    )
+    : { rows: [] as Array<{ group_id: string; employee_id: string }> };
+  if (new Set(groupMembers.rows.map(member => member.group_id)).size !== settings.employeeGroupIds.length) {
+    throw statusError(400, 'Alle Routengruppen müssen aktiv, objektbezogen und mindestens einem Mitarbeiter zugeordnet sein.');
+  }
+  if (settings.employeeGroupIds.length) {
+    await db.query(
+      `INSERT INTO patrol_route_version_group_assignments
+         (tenant_id,route_version_id,route_id,site_id,employee_group_id,created_by_user_id)
+       SELECT $1,$2,$3,$4,selected.group_id,$5
+         FROM unnest($6::uuid[]) AS selected(group_id)`,
+      [tenantId, versionId, routeId, siteId, actorUserId, settings.employeeGroupIds]
+    );
+  }
+  const resolvedEmployeeIds = [...new Set([
+    ...settings.employeeIds,
+    ...groupMembers.rows.map(member => member.employee_id)
+  ])];
+  if (resolvedEmployeeIds.length) {
     const assignedEmployees = await db.query(
       `SELECT e.id FROM employees e
         JOIN employee_site_assignments esa
           ON esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=$3
        WHERE e.tenant_id=$1 AND e.id=ANY($2::uuid[]) AND e.archived_at IS NULL`,
-      [tenantId, settings.employeeIds, siteId]
+      [tenantId, resolvedEmployeeIds, siteId]
     );
-    if (assignedEmployees.rows.length !== settings.employeeIds.length) {
+    if (assignedEmployees.rows.length !== resolvedEmployeeIds.length) {
       throw statusError(400, 'Alle Routenzuweisungen müssen aktive Mitarbeiter mit Objektzuordnung enthalten.');
     }
     await db.query(
@@ -699,12 +755,13 @@ async function insertRouteVersion(
         (tenant_id,route_version_id,route_id,site_id,employee_id,created_by_user_id)
        SELECT $1,$2,$3,$4,employee_id,$5
          FROM unnest($6::uuid[]) AS selected(employee_id)`,
-      [tenantId, versionId, routeId, siteId, actorUserId, settings.employeeIds]
+      [tenantId, versionId, routeId, siteId, actorUserId, resolvedEmployeeIds]
     );
   }
   await writeEvent(db, tenantId, siteId, actorUserId, 'route_version', versionId, 'created', {
     routeId, version, changeReason, checkpointCount: checkpoints.length,
-    assignedEmployeeCount: settings.employeeIds.length
+    assignedEmployeeCount: resolvedEmployeeIds.length,
+    assignedGroupCount: settings.employeeGroupIds.length
   });
   return versionId;
 }
@@ -718,6 +775,7 @@ export async function listRoutes(req: Request, res: Response, next: NextFunction
                 v.id AS version_id,v.change_reason,v.created_at AS version_created_at,
                 v.flexible_order,v.target_duration_minutes,v.late_tolerance_minutes,
                 v.time_window_start,v.time_window_end,v.recurrence_frequency,v.recurrence_interval,v.recurrence_days,
+                v.schedule_timezone,
                 COALESCE((
                   SELECT jsonb_agg(jsonb_build_object('id',e.id,'name',concat_ws(' ',e.first_name,e.last_name))
                                    ORDER BY e.last_name,e.first_name)
@@ -725,6 +783,13 @@ export async function listRoutes(req: Request, res: Response, next: NextFunction
                     JOIN employees e ON e.tenant_id=a.tenant_id AND e.id=a.employee_id
                    WHERE a.tenant_id=r.tenant_id AND a.route_version_id=v.id
                 ),'[]'::jsonb) AS assigned_employees,
+                COALESCE((
+                  SELECT jsonb_agg(jsonb_build_object('id',g.id,'name',g.name) ORDER BY lower(g.name))
+                    FROM patrol_route_version_group_assignments a
+                    JOIN patrol_employee_groups g
+                      ON g.tenant_id=a.tenant_id AND g.id=a.employee_group_id
+                   WHERE a.tenant_id=r.tenant_id AND a.route_version_id=v.id
+                ),'[]'::jsonb) AS assigned_employee_groups,
                 COALESCE(jsonb_agg(jsonb_build_object(
                   'checkpointId',c.id,'code',c.code,'name',c.name,'sequence',vc.sequence_no,
                   'plannedOffsetMinutes',vc.planned_offset_minutes
@@ -736,11 +801,160 @@ export async function listRoutes(req: Request, res: Response, next: NextFunction
           WHERE r.tenant_id=$1 AND ($2::uuid IS NULL OR r.site_id=$2)
           GROUP BY r.id,r.tenant_id,r.site_id,s.name,r.route_code,r.name,r.current_version,r.active,r.created_at,r.updated_at,
                    v.id,v.change_reason,v.created_at,v.flexible_order,v.target_duration_minutes,v.late_tolerance_minutes,
-                   v.time_window_start,v.time_window_end,v.recurrence_frequency,v.recurrence_interval,v.recurrence_days
+                   v.time_window_start,v.time_window_end,v.recurrence_frequency,v.recurrence_interval,v.recurrence_days,
+                   v.schedule_timezone
           ORDER BY s.name,r.route_code`,
         [req.user!.tenantId, siteId || null]
       );
       return result.rows;
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function listPatrolEmployeeGroups(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { siteId } = listQueryBaseSchema.pick({ siteId: true }).parse(req.query);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const result = await db.query(
+        `SELECT g.id,g.site_id,g.name,g.archived_at,g.created_at,
+                COALESCE(jsonb_agg(jsonb_build_object(
+                  'id',e.id,'name',concat_ws(' ',e.first_name,e.last_name)
+                ) ORDER BY e.last_name,e.first_name) FILTER (WHERE e.id IS NOT NULL),'[]'::jsonb) AS employees
+           FROM patrol_employee_groups g
+           LEFT JOIN patrol_employee_group_members m
+             ON m.tenant_id=g.tenant_id AND m.employee_group_id=g.id
+           LEFT JOIN employees e
+             ON e.tenant_id=m.tenant_id AND e.id=m.employee_id AND e.archived_at IS NULL
+          WHERE g.tenant_id=$1 AND ($2::uuid IS NULL OR g.site_id=$2)
+          GROUP BY g.id,g.tenant_id,g.site_id,g.name,g.archived_at,g.created_at
+          ORDER BY g.archived_at NULLS FIRST,lower(g.name),g.id`,
+        [req.user!.tenantId, siteId || null]
+      );
+      return result.rows;
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function createPatrolEmployeeGroup(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const input = z.object({
+      siteId: uuid,
+      name: z.string().trim().min(1).max(120),
+      employeeIds: z.array(uuid).min(1).max(200)
+    }).strict().superRefine((value, ctx) => {
+      if (new Set(value.employeeIds).size !== value.employeeIds.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['employeeIds'], message: 'Mitarbeiter dürfen nicht doppelt vorkommen.' });
+      }
+    }).parse(req.body);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const valid = await db.query(
+        `SELECT e.id FROM employees e
+          JOIN employee_site_assignments a
+            ON a.tenant_id=e.tenant_id AND a.employee_id=e.id AND a.site_id=$3
+         WHERE e.tenant_id=$1 AND e.id=ANY($2::uuid[]) AND e.archived_at IS NULL`,
+        [req.user!.tenantId, input.employeeIds, input.siteId]
+      );
+      if (valid.rows.length !== input.employeeIds.length) {
+        throw statusError(400, 'Alle Gruppenmitglieder müssen aktive Mitarbeiter mit Objektzuordnung sein.');
+      }
+      const group = await db.query(
+        `INSERT INTO patrol_employee_groups (tenant_id,site_id,name,created_by_user_id)
+         VALUES ($1,$2,$3,$4) RETURNING id,site_id,name,archived_at,created_at`,
+        [req.user!.tenantId, input.siteId, input.name, req.user!.userId]
+      );
+      await db.query(
+        `INSERT INTO patrol_employee_group_members
+          (tenant_id,employee_group_id,site_id,employee_id,created_by_user_id)
+         SELECT $1,$2,$3,employee_id,$4
+           FROM unnest($5::uuid[]) AS selected(employee_id)`,
+        [req.user!.tenantId, group.rows[0].id, input.siteId, req.user!.userId, input.employeeIds]
+      );
+      await writeEvent(db, req.user!.tenantId, input.siteId, req.user!.userId,
+        'employee_group', group.rows[0].id, 'created', {
+          name: input.name,
+          employeeIds: input.employeeIds
+        });
+      return { ...group.rows[0], employee_ids: input.employeeIds };
+    });
+    res.status(201).json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function updatePatrolEmployeeGroup(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const groupId = uuid.parse(req.params.id);
+    const input = z.object({
+      name: z.string().trim().min(1).max(120).optional(),
+      employeeIds: z.array(uuid).min(1).max(200).optional()
+    }).strict().refine(value => Object.keys(value).length > 0).superRefine((value, ctx) => {
+      if (value.employeeIds && new Set(value.employeeIds).size !== value.employeeIds.length) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['employeeIds'], message: 'Mitarbeiter dürfen nicht doppelt vorkommen.' });
+      }
+    }).parse(req.body);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const group = await db.query(
+        `SELECT id,site_id,name FROM patrol_employee_groups
+          WHERE tenant_id=$1 AND id=$2 AND archived_at IS NULL FOR UPDATE`,
+        [req.user!.tenantId, groupId]
+      );
+      if (!group.rows.length) throw statusError(404, 'Aktive Mitarbeitergruppe nicht gefunden.');
+      if (input.employeeIds) {
+        const valid = await db.query(
+          `SELECT e.id FROM employees e
+            JOIN employee_site_assignments a
+              ON a.tenant_id=e.tenant_id AND a.employee_id=e.id AND a.site_id=$3
+           WHERE e.tenant_id=$1 AND e.id=ANY($2::uuid[]) AND e.archived_at IS NULL`,
+          [req.user!.tenantId, input.employeeIds, group.rows[0].site_id]
+        );
+        if (valid.rows.length !== input.employeeIds.length) {
+          throw statusError(400, 'Alle Gruppenmitglieder müssen aktive Mitarbeiter mit Objektzuordnung sein.');
+        }
+        await db.query(
+          'DELETE FROM patrol_employee_group_members WHERE tenant_id=$1 AND employee_group_id=$2',
+          [req.user!.tenantId, groupId]
+        );
+        await db.query(
+          `INSERT INTO patrol_employee_group_members
+            (tenant_id,employee_group_id,site_id,employee_id,created_by_user_id)
+           SELECT $1,$2,$3,employee_id,$4
+             FROM unnest($5::uuid[]) AS selected(employee_id)`,
+          [req.user!.tenantId, groupId, group.rows[0].site_id, req.user!.userId, input.employeeIds]
+        );
+      }
+      const updated = await db.query(
+        `UPDATE patrol_employee_groups
+            SET name=COALESCE($1,name),updated_at=CURRENT_TIMESTAMP
+          WHERE tenant_id=$2 AND id=$3
+          RETURNING id,site_id,name,archived_at,created_at`,
+        [input.name ?? null, req.user!.tenantId, groupId]
+      );
+      await writeEvent(db, req.user!.tenantId, group.rows[0].site_id, req.user!.userId,
+        'employee_group', groupId, 'updated', {
+          ...(input.name ? { name: input.name } : {}),
+          ...(input.employeeIds ? { employeeIds: input.employeeIds } : {})
+        });
+      return { ...updated.rows[0], employee_ids: input.employeeIds };
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function archivePatrolEmployeeGroup(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const groupId = uuid.parse(req.params.id);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const result = await db.query(
+        `UPDATE patrol_employee_groups SET archived_at=CURRENT_TIMESTAMP,updated_at=CURRENT_TIMESTAMP
+          WHERE tenant_id=$1 AND id=$2 AND archived_at IS NULL
+          RETURNING id,site_id`,
+        [req.user!.tenantId, groupId]
+      );
+      if (!result.rows.length) throw statusError(404, 'Aktive Mitarbeitergruppe nicht gefunden.');
+      await writeEvent(db, req.user!.tenantId, result.rows[0].site_id, req.user!.userId,
+        'employee_group', groupId, 'archived');
+      return { id: groupId, archived: true };
     });
     res.json({ success: true, data });
   } catch (error) { next(error); }
@@ -871,6 +1085,158 @@ export async function listRounds(req: Request, res: Response, next: NextFunction
         [req.user!.tenantId, includeAllRounds, req.user!.userId, filters.siteId || null,
           filters.clientId || null, filters.employeeId || null, filters.routeId || null, filters.status || null,
           filters.from || null, filters.to || null, filters.limit, filters.offset]
+      );
+      return result.rows;
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function listRoundAttachments(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const roundId = uuid.parse(req.params.id);
+    const includeAll = req.user!.permissions.includes('patrol:round:read') ||
+      req.user!.permissions.includes('patrol:manage') ||
+      req.user!.permissions.includes('patrol:audit');
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const round = await db.query(
+        'SELECT id,site_id,guard_user_id FROM patrol_rounds WHERE tenant_id=$1 AND id=$2',
+        [req.user!.tenantId, roundId]
+      );
+      if (!round.rows.length || (!includeAll && round.rows[0].guard_user_id !== req.user!.userId)) {
+        throw statusError(404, 'Kontrollgang nicht gefunden.');
+      }
+      const attachments = await db.query(
+        `SELECT a.id,a.document_id,d.title,v.original_filename,v.content_type,v.size_bytes::int AS size_bytes,
+                v.scan_status,a.linked_by_user_id,a.created_at
+           FROM patrol_attachments a
+           JOIN documents d ON d.tenant_id=a.tenant_id AND d.id=a.document_id
+           JOIN document_versions v
+             ON v.tenant_id=d.tenant_id AND v.document_id=d.id AND v.version_number=d.current_version
+          WHERE a.tenant_id=$1 AND a.round_id=$2
+          ORDER BY a.created_at,a.id`,
+        [req.user!.tenantId, roundId]
+      );
+      return attachments.rows;
+    });
+    res.json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function addRoundAttachment(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const roundId = uuid.parse(req.params.id);
+    const { documentId } = z.object({ documentId: uuid }).strict().parse(req.body);
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const round = await db.query(
+        `SELECT id,site_id,guard_user_id,status FROM patrol_rounds
+          WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
+        [req.user!.tenantId, roundId]
+      );
+      if (!round.rows.length) throw statusError(404, 'Kontrollgang nicht gefunden.');
+      const canManage = req.user!.permissions.includes('patrol:manage');
+      if (!canManage && round.rows[0].guard_user_id !== req.user!.userId) {
+        throw statusError(404, 'Kontrollgang nicht gefunden.');
+      }
+      if (round.rows[0].status === 'abandoned') {
+        throw statusError(409, 'An abgebrochene Kontrollgänge können keine Anlagen angefügt werden.');
+      }
+      const document = await db.query(
+        `SELECT d.id,d.title,v.scan_status,rel.site_id AS linked_site_id
+           FROM documents d
+           JOIN document_versions v
+             ON v.tenant_id=d.tenant_id AND v.document_id=d.id AND v.version_number=d.current_version
+           JOIN document_relationships rel
+             ON rel.tenant_id=d.tenant_id AND rel.document_id=d.id AND rel.relationship_type='site'
+          WHERE d.tenant_id=$1 AND d.id=$2 AND d.archived_at IS NULL`,
+        [req.user!.tenantId, documentId]
+      );
+      if (!document.rows.length || document.rows[0].linked_site_id !== round.rows[0].site_id) {
+        throw statusError(404, 'Aktives, dem Objekt zugeordnetes Dokument nicht gefunden.');
+      }
+      if (document.rows[0].scan_status === 'infected') {
+        throw statusError(422, 'Als infiziert erkannte Dokumente dürfen nicht angefügt werden.');
+      }
+      const inserted = await db.query(
+        `INSERT INTO patrol_attachments
+          (tenant_id,site_id,round_id,document_id,linked_by_user_id)
+         VALUES ($1,$2,$3,$4,$5)
+         ON CONFLICT (tenant_id,round_id,document_id) DO NOTHING
+         RETURNING id`,
+        [req.user!.tenantId, round.rows[0].site_id, roundId, documentId, req.user!.userId]
+      );
+      if (inserted.rows.length) {
+        await writeEvent(db, req.user!.tenantId, round.rows[0].site_id, req.user!.userId,
+          'round', roundId, 'attachment_linked', { documentId });
+      }
+      return {
+        id: inserted.rows[0]?.id ?? null,
+        roundId,
+        documentId,
+        title: document.rows[0].title,
+        idempotent: inserted.rows.length === 0
+      };
+    });
+    res.status(data.idempotent ? 200 : 201).json({ success: true, data });
+  } catch (error) { next(error); }
+}
+
+export async function listScheduledOccurrences(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const filters = occurrenceQuerySchema.parse(req.query);
+    const includeAll = req.user!.permissions.includes('patrol:manage') ||
+      req.user!.permissions.includes('patrol:audit') ||
+      req.user!.permissions.includes('patrol:analytics:read');
+    const data = await withTenantTransaction(req.user!.tenantId, async db => {
+      const result = await db.query(
+        `SELECT o.id,o.site_id,s.name AS site_name,s.client_id,o.route_id,r.route_code,r.name AS route_name,
+                o.route_version,o.scheduled_at,o.window_ends_at,o.deadline_at,o.status,o.round_id,
+                o.resolved_at,o.created_at,
+                round.guard_user_id,employee.id AS employee_id,
+                concat_ws(' ',employee.first_name,employee.last_name) AS employee_name
+           FROM patrol_schedule_occurrences o
+           JOIN sites s ON s.id=o.site_id AND s.tenant_id=o.tenant_id
+           JOIN patrol_routes r ON r.tenant_id=o.tenant_id AND r.id=o.route_id
+           LEFT JOIN patrol_rounds round ON round.tenant_id=o.tenant_id AND round.id=o.round_id
+           LEFT JOIN employees employee ON employee.tenant_id=o.tenant_id
+             AND employee.account_user_id=round.guard_user_id
+          WHERE o.tenant_id=$1
+            AND ($2::boolean OR EXISTS (
+              SELECT 1 FROM employees e
+              JOIN employee_site_assignments esa
+                ON esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=o.site_id
+              WHERE e.tenant_id=o.tenant_id AND e.account_user_id=$3 AND e.archived_at IS NULL
+                AND (
+                  NOT EXISTS (SELECT 1 FROM patrol_route_version_assignments a
+                               WHERE a.tenant_id=o.tenant_id AND a.route_id=o.route_id
+                                 AND a.route_version_id=(SELECT v.id FROM patrol_route_versions v
+                                   WHERE v.tenant_id=o.tenant_id AND v.route_id=o.route_id
+                                     AND v.version=o.route_version))
+                  OR EXISTS (SELECT 1 FROM patrol_route_version_assignments a
+                              WHERE a.tenant_id=o.tenant_id AND a.route_id=o.route_id
+                                AND a.route_version_id=(SELECT v.id FROM patrol_route_versions v
+                                  WHERE v.tenant_id=o.tenant_id AND v.route_id=o.route_id
+                                    AND v.version=o.route_version)
+                                AND a.employee_id=e.id)
+                )
+            ))
+            AND ($4::uuid IS NULL OR o.site_id=$4)
+            AND ($5::uuid IS NULL OR s.client_id=$5)
+            AND ($6::uuid IS NULL OR o.route_id=$6)
+            AND ($7::uuid IS NULL OR employee.id=$7 OR EXISTS (
+              SELECT 1 FROM patrol_route_version_assignments a
+               JOIN employees e ON e.tenant_id=a.tenant_id AND e.id=a.employee_id
+              WHERE a.tenant_id=o.tenant_id AND a.route_id=o.route_id AND e.id=$7
+                AND a.route_version_id=(SELECT v.id FROM patrol_route_versions v
+                  WHERE v.tenant_id=o.tenant_id AND v.route_id=o.route_id AND v.version=o.route_version)
+            ))
+            AND ($8::text IS NULL OR o.status=$8)
+            AND ($9::date IS NULL OR o.scheduled_at >= $9::date)
+            AND ($10::date IS NULL OR o.scheduled_at < $10::date + interval '1 day')
+          ORDER BY o.scheduled_at DESC,o.id DESC LIMIT $11 OFFSET $12`,
+        [req.user!.tenantId, includeAll, req.user!.userId, filters.siteId || null, filters.clientId || null,
+          filters.routeId || null, filters.employeeId || null, filters.status || null, filters.from || null,
+          filters.to || null, filters.limit, filters.offset]
       );
       return result.rows;
     });
@@ -1069,6 +1435,9 @@ export async function recordPatrolRoundStart(
   const roundId = input.roundId || crypto.randomUUID();
   const collision = await db.query('SELECT 1 FROM patrol_rounds WHERE tenant_id=$1 AND id=$2', [tenantId, roundId]);
   if (collision.rows.length) throw statusError(409, 'Kontrollgangs-ID ist bereits vergeben.');
+  if (routeId && routeVersion !== null) {
+    await materializePatrolOccurrences(db, tenantId, new Date(input.startedAt), 0, 0);
+  }
   const inserted = await db.query(
     `INSERT INTO patrol_rounds
       (id,tenant_id,site_id,route_id,route_version,guard_user_id,client_mutation_id,payload_hash,client_captured_at,started_at)
@@ -1080,6 +1449,35 @@ export async function recordPatrolRoundStart(
   await writeEvent(db, tenantId, input.siteId, userId, 'round', round.id, 'started', {
     routeId, routeVersion, clientCapturedAt: input.startedAt
   });
+  if (routeId && routeVersion !== null) {
+    const occurrence = await db.query(
+      `SELECT o.id
+         FROM patrol_schedule_occurrences o
+         JOIN patrol_route_versions v
+           ON v.tenant_id=o.tenant_id AND v.route_id=o.route_id AND v.version=o.route_version
+        WHERE o.tenant_id=$1 AND o.route_id=$2 AND o.route_version=$3
+          AND o.status='scheduled' AND o.round_id IS NULL
+          AND o.scheduled_at - make_interval(mins => v.late_tolerance_minutes) <= $4::timestamptz
+          AND o.deadline_at >= $4::timestamptz
+        ORDER BY abs(EXTRACT(EPOCH FROM (o.scheduled_at - $4::timestamptz)))
+        LIMIT 1 FOR UPDATE OF o SKIP LOCKED`,
+      [tenantId, routeId, routeVersion, input.startedAt]
+    );
+    if (occurrence.rows.length) {
+      await db.query(
+        `UPDATE patrol_schedule_occurrences
+            SET status='in_progress',round_id=$1,updated_at=CURRENT_TIMESTAMP
+          WHERE tenant_id=$2 AND id=$3 AND status='scheduled'`,
+        [round.id, tenantId, occurrence.rows[0].id]
+      );
+      await db.query(
+        `INSERT INTO patrol_schedule_occurrence_events
+           (tenant_id,occurrence_id,actor_user_id,actor_type,action,details)
+         VALUES ($1,$2,$3,'user','round_started',jsonb_build_object('roundId',$4::uuid))`,
+        [tenantId, occurrence.rows[0].id, userId, round.id]
+      );
+    }
+  }
   return { ...round, idempotent: false };
 }
 
@@ -1169,6 +1567,21 @@ export async function recordPatrolRoundCompletion(
     clientMutationId,
     notes: input.notes
   });
+  const scheduledOccurrence = await db.query(
+    `UPDATE patrol_schedule_occurrences
+        SET status='completed',resolved_at=$1,updated_at=$1
+      WHERE tenant_id=$2 AND round_id=$3 AND status='in_progress'
+      RETURNING id`,
+    [input.completedAt, tenantId, input.roundId]
+  );
+  if (scheduledOccurrence.rows.length) {
+    await db.query(
+      `INSERT INTO patrol_schedule_occurrence_events
+         (tenant_id,occurrence_id,actor_user_id,actor_type,action,details,occurred_at)
+       VALUES ($1,$2,$3,'user','round_completed',jsonb_build_object('roundId',$4::uuid),$5)`,
+      [tenantId, scheduledOccurrence.rows[0].id, userId, input.roundId, input.completedAt]
+    );
+  }
   if (round.rows[0].route_id && round.rows[0].route_version !== null) {
     const routeSettings = await db.query(
       `SELECT target_duration_minutes,late_tolerance_minutes
@@ -1229,7 +1642,7 @@ export async function getDashboard(req: Request, res: Response, next: NextFuncti
   try {
     const filters = listQuerySchema.parse(req.query);
     const data = await withTenantTransaction(req.user!.tenantId, async db => {
-      const [scans, exceptions, rounds] = await Promise.all([
+      const [scans, exceptions, rounds, scheduledOccurrences] = await Promise.all([
         db.query(
           `SELECT count(*)::int AS total,
                   count(*) FILTER (WHERE p.verification_status='verified')::int AS verified,
@@ -1283,6 +1696,25 @@ export async function getDashboard(req: Request, res: Response, next: NextFuncti
               AND ($8::date IS NULL OR r.started_at < $8::date + interval '1 day')`,
           [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
             filters.routeId || null, filters.status || null, filters.from || null, filters.to || null]
+        ),
+        db.query(
+          `SELECT count(*)::int AS total,
+                  count(*) FILTER (WHERE o.status='scheduled')::int AS scheduled,
+                  count(*) FILTER (WHERE o.status='missed')::int AS missed,
+                  count(*) FILTER (WHERE o.status='abandoned')::int AS abandoned
+             FROM patrol_schedule_occurrences o
+             JOIN sites s ON s.id=o.site_id AND s.tenant_id=o.tenant_id
+             LEFT JOIN patrol_rounds r ON r.tenant_id=o.tenant_id AND r.id=o.round_id
+             LEFT JOIN employees e ON e.tenant_id=r.tenant_id AND e.account_user_id=r.guard_user_id
+            WHERE o.tenant_id=$1 AND ($2::uuid IS NULL OR o.site_id=$2)
+              AND ($3::uuid IS NULL OR s.client_id=$3)
+              AND ($4::uuid IS NULL OR e.id=$4)
+              AND ($5::uuid IS NULL OR o.route_id=$5)
+              AND ($6::text IS NULL OR o.status=$6)
+              AND ($7::date IS NULL OR o.scheduled_at >= $7::date)
+              AND ($8::date IS NULL OR o.scheduled_at < $8::date + interval '1 day')`,
+          [req.user!.tenantId, filters.siteId || null, filters.clientId || null, filters.employeeId || null,
+            filters.routeId || null, filters.status || null, filters.from || null, filters.to || null]
         )
       ]);
       const canReadAttempts = req.user!.permissions.includes('patrol:scan-attempt:read') ||
@@ -1309,6 +1741,7 @@ export async function getDashboard(req: Request, res: Response, next: NextFuncti
         scans: scans.rows[0],
         exceptions: exceptions.rows[0],
         rounds: rounds.rows[0],
+        scheduledOccurrences: scheduledOccurrences.rows[0],
         scanAttempts: attempts?.rows[0] ?? null
       };
     });
