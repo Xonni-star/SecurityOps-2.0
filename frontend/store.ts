@@ -229,6 +229,12 @@ function errorText(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
 }
 
+function offlineQueuePreviewPayload(entityType: OfflineQueueItem['entityType'], payload: any): any {
+  if (entityType !== 'patrol' || typeof payload?.checkpointToken !== 'string') return payload;
+  const { checkpointToken: _checkpointToken, ...safePayload } = payload;
+  return { ...safePayload, tokenStoredLocally: true };
+}
+
 // PostgreSQL ist die maßgebliche Datenquelle. Die Mapper übersetzen die
 // snake_case-API-Antworten in die bestehenden Frontend-Typen.
 function mapClientRow(row: any, tenantId: string): Client {
@@ -1458,7 +1464,12 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         baseVersion: queueEntry.baseVersion ?? 1
       });
 
-      set((state) => ({ syncQueue: [queueEntry, ...state.syncQueue] }));
+      set((state) => ({
+        syncQueue: [{
+          ...queueEntry,
+          payload: offlineQueuePreviewPayload(queueEntry.entityType, queueEntry.payload)
+        }, ...state.syncQueue]
+      }));
     } catch (err: any) {
       console.error('[OUTBOX WRITE FAILED]', err);
       get().addNotification(
@@ -1512,14 +1523,16 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
 
       try {
         for (const items of [
-          pendingItems.filter((p) => !['client', 'site', 'employee', 'handover'].includes(p.entityType)),
+          pendingItems.filter((p) => !['client', 'site', 'employee', 'handover', 'patrol'].includes(p.entityType)),
+          pendingItems.filter((p) => p.entityType === 'patrol'),
           pendingItems.filter((p) => p.entityType === 'handover'),
           pendingItems.filter((p) => p.entityType === 'client'),
           pendingItems.filter((p) => p.entityType === 'site'),
           pendingItems.filter((p) => p.entityType === 'employee')
         ]) {
           if (!items.length) continue;
-          const path = items[0].entityType === 'handover' ? '/handovers/sync'
+          const path = items[0].entityType === 'patrol' ? '/patrol/sync'
+            : items[0].entityType === 'handover' ? '/handovers/sync'
             : items[0].entityType === 'client' ? '/customers/sync'
               : items[0].entityType === 'site' ? '/sites/sync'
                 : items[0].entityType === 'employee' ? '/employees/sync'
@@ -1553,7 +1566,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           tenantId: p.tenantId,
           entityType: p.entityType as any,
           action: p.action,
-          payload: p.payload,
+          payload: offlineQueuePreviewPayload(p.entityType, p.payload),
           createdAt: p.occurredAt,
           retryCount: p.retryCount,
           status: p.status === 'CONFLICT' ? 'conflict' : 'pending'
@@ -2342,11 +2355,34 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   addPatrolScan: async (scan) => {
-    const { currentTenantId, isOnline } = get();
+    const { currentTenantId, isOnline, patrolScans } = get();
     const scannedAt = new Date().toISOString();
     const id = crypto.randomUUID();
-    const record: PatrolScanEvent = { ...scan, id, tenantId: currentTenantId, scannedAt, offlineCaptured: !isOnline };
-    await get().enqueueOfflineAction({ tenantId: currentTenantId, entityType: 'patrol', action: 'CREATE', payload: record });
+    const { checkpointToken, ...displayScan } = scan;
+    const record: PatrolScanEvent = { ...displayScan, id, tenantId: currentTenantId, scannedAt, offlineCaptured: !isOnline };
+    const queuedPatrol = await offlineVault.getOutbox(currentTenantId, 'patrol');
+    const recentQueued = queuedPatrol.some(item => item.payload.checkpointId === scan.checkpointId &&
+      Math.abs(Date.parse(scannedAt) - Date.parse(item.payload.scannedAt || item.occurredAt)) < 2 * 60 * 1000);
+    const recentLocal = patrolScans.some(item => item.checkpointId === scan.checkpointId &&
+      Math.abs(Date.parse(scannedAt) - Date.parse(item.scannedAt)) < 2 * 60 * 1000);
+    if (recentQueued || recentLocal) {
+      throw new Error('Dieser Kontrollpunkt wurde innerhalb des Zwei-Minuten-Fensters bereits erfasst.');
+    }
+    await get().enqueueOfflineAction({
+      tenantId: currentTenantId,
+      entityType: 'patrol',
+      action: 'CREATE',
+      payload: {
+        siteId: scan.siteId,
+        checkpointId: scan.checkpointId,
+        method: scan.method,
+        checkpointToken,
+        checkpointTokenVersion: scan.checkpointTokenVersion,
+        roundId: scan.roundId,
+        notes: scan.notes,
+        scannedAt
+      }
+    });
     set((state) => ({ patrolScans: [record, ...state.patrolScans] }));
     if (isOnline) void get().triggerManualSync();
   },

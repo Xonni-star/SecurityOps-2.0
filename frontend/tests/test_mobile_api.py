@@ -14,16 +14,6 @@ def test_mobile_duty_endpoint_structure():
     assert duty_payload["start_time"] == "06:00"
     assert "+49" in duty_payload["site_manager_phone"]
 
-def test_patrol_checkpoint_scan_validation():
-    """Verifies that scan payload enforces required RFID tag and method."""
-    scan = {
-        "checkpoint_code": "CP-01",
-        "method": "NFC_TAG",
-        "verified_tag": "RFID-9901-A"
-    }
-    assert scan["method"] in ["QR_CODE", "NFC_TAG", "MANUELL"]
-    assert scan["verified_tag"].startswith("RFID-")
-
 def test_shift_swap_request_lifecycle():
     """Verifies that shift swap starts with status ANGEFRAGT and can be decided."""
     swap = {

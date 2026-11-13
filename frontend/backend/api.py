@@ -26,17 +26,6 @@ async def get_mobile_today_duty(
         "required_checkpoints": 4
     })
 
-@app.post("/api/v1/mobile/patrol/scan", response_model=ResponseEnvelope, tags=["Mobile Mitarbeiter-App"])
-async def register_checkpoint_scan(
-    payload: Dict[str, Any],
-    context: Dict[str, Any] = Depends(get_current_user_context)
-):
-    """Records QR or NFC checkpoint scan idempotently with anti-duplicate validation."""
-    return ResponseEnvelope(
-        message=f"Kontrollpunkt {payload.get('checkpoint_code', 'CP')} erfolgreich erfasst.",
-        data={"scan_id": str(uuid.uuid4()), "verified": True}
-    )
-
 @app.post("/api/v1/mobile/shifts/swap", response_model=ResponseEnvelope, tags=["Mobile Mitarbeiter-App"])
 async def request_shift_swap(
     payload: Dict[str, Any],

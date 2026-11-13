@@ -37,7 +37,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
     getTenantTasks,
     getTenantKeys,
     getTenantDocuments,
-    currentUserRole
+    currentUserRole,
+    authUser
   } = useSecurityStore();
 
   const shifts = getTenantShifts();
@@ -53,6 +54,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
 
   const canAccessRoster = currentUserRole !== UserRole.AUDITOR;
   const canAccessAdmin = currentUserRole === UserRole.ADMIN || currentUserRole === UserRole.GF || currentUserRole === UserRole.EINSATZLEITUNG;
+  const canAccessPatrol = Boolean(authUser?.permissions.some(permission =>
+    ['patrol:read', 'patrol:create', 'patrol:manage'].includes(permission)
+  ));
 
   const menuSections = [
     {
@@ -60,6 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
       items: [
         { id: 'mobile_app', label: 'Mitarbeiter-App (Mobil)', icon: Smartphone, visible: true },
         { id: 'dashboard', label: 'Einsatz-Dashboard', icon: LayoutDashboard, visible: true },
+        { id: 'patrol', label: 'Kontrollgänge', icon: MapPin, visible: canAccessPatrol },
         { id: 'guardbook', label: 'Digitales Wachbuch', icon: BookOpen, badge: criticalLogsCount, badgeColor: 'bg-rose-500', visible: true },
         { id: 'roster', label: 'Dienstplanung (Soll/Ist)', icon: CalendarDays, badge: openShiftsCount, badgeColor: 'bg-amber-500', visible: canAccessRoster },
         { id: 'alarms', label: 'Alarm- & Notfallmanagement', icon: Siren, visible: true },

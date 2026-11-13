@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 import { createHandover, handoverCreateSchema, HandoverConflictError } from '../services/handoverService';
 import { computePayloadHash } from '../services/syncHash';
+import { recordPatrolException, recordPatrolScan } from './patrolController';
 
 export { canonicalStringify, computePayloadHash } from '../services/syncHash';
 
@@ -81,7 +82,10 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
-        if (!hasMutationPermission(mut.entityType, req.user!.permissions)) {
+        const hasPermission = mut.entityType === 'patrol' && mut.payload.recordType === 'exception'
+          ? req.user!.permissions.includes('patrol:exception:create')
+          : hasMutationPermission(mut.entityType, req.user!.permissions);
+        if (!hasPermission) {
           results.push({
             clientUuid: mut.clientUuid,
             serverId: 'none',
@@ -568,36 +572,41 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         // 5. PATROL
         else if (mut.entityType === 'patrol') {
           if (mut.action === 'CREATE') {
-            const insPatrol = await client.query(
-              `INSERT INTO patrol_scans (tenant_id, site_id, checkpoint_id, checkpoint_code, checkpoint_name, guard_id, scanned_at, method, verified_tag, notes, client_mutation_id)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-               ON CONFLICT (tenant_id, client_mutation_id) DO NOTHING
-               RETURNING id`,
-              [
-                tenantId,
-                mut.payload.siteId,
-                mut.payload.checkpointId || null,
-                mut.payload.checkpointCode || 'CP-01',
-                mut.payload.checkpointName || 'Kontrollpunkt',
-                mut.payload.guardId || userId,
-                mut.payload.scannedAt || mut.clientTimestamp,
-                mut.payload.method || 'QR_CODE',
-                mut.payload.verifiedTag || 'RFID-TAG',
-                mut.payload.notes || null,
-                mut.clientUuid
-              ]
-            );
-
-            const pId = insPatrol.rows.length > 0
-              ? insPatrol.rows[0].id
-              : (await client.query('SELECT id FROM patrol_scans WHERE tenant_id = $1 AND client_mutation_id = $2', [tenantId, mut.clientUuid])).rows[0]?.id;
-
-            itemResult = {
-              clientUuid: mut.clientUuid,
-              serverId: pId || 'unknown',
-              status: 'SYNCED',
-              serverVersion: 1
-            };
+            try {
+              if (mut.payload.recordType === 'exception') {
+                const { recordType: _recordType, ...exceptionPayload } = mut.payload;
+                const exception = await recordPatrolException(
+                  client, tenantId, userId, mut.clientUuid, exceptionPayload, mut.clientTimestamp, payloadHash
+                );
+                itemResult = {
+                  clientUuid: mut.clientUuid,
+                  serverId: exception.id,
+                  status: 'SYNCED',
+                  serverVersion: 1
+                };
+              } else {
+                const scan = await recordPatrolScan(
+                  client, tenantId, userId, mut.clientUuid, mut.payload, mut.clientTimestamp, payloadHash
+                );
+                itemResult = {
+                  clientUuid: mut.clientUuid,
+                  serverId: scan.id,
+                  status: 'SYNCED',
+                  serverVersion: 1,
+                  message: scan.verificationStatus === 'manual' ? 'Manuelle Erfassung; Kontrollpunkt-Token wurde nicht verifiziert.' : undefined
+                };
+              }
+            } catch (error) {
+              const statusCode = Number((error as any)?.statusCode);
+              if (statusCode < 400 || statusCode >= 500) throw error;
+              itemResult = {
+                clientUuid: mut.clientUuid,
+                serverId: 'none',
+                status: statusCode === 409 ? 'CONFLICT' : 'REJECTED',
+                serverVersion: mut.baseVersion,
+                message: (error as Error).message
+              };
+            }
           } else {
             itemResult = {
               clientUuid: mut.clientUuid,
@@ -728,6 +737,19 @@ export async function pushHandoverMutations(req: Request, res: Response, next: N
     const body = syncPushBatchSchema.parse(req.body);
     if (body.mutations.some(mutation => mutation.entityType !== 'handover')) {
       throw Object.assign(new Error('Dieser Endpunkt akzeptiert ausschließlich Übergabemutationen.'), { statusCode: 400 });
+    }
+    req.body = body;
+    return pushSyncMutations(req, res, next);
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function pushPatrolMutations(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const body = syncPushBatchSchema.parse(req.body);
+    if (body.mutations.some(mutation => mutation.entityType !== 'patrol')) {
+      throw Object.assign(new Error('Dieser Endpunkt akzeptiert ausschließlich Kontrollgangsmutationen.'), { statusCode: 400 });
     }
     req.body = body;
     return pushSyncMutations(req, res, next);

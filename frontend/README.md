@@ -16,6 +16,12 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 Siehe [Alarm-API](./ALARM_EMERGENCY_API.md), [Offline-Architektur](./OFFLINE_ARCHITECTURE.md) und den [Implementierungsbericht](../ALARM_EMERGENCY_IMPLEMENTATION_REPORT.md).
 
+## Kontrollgangsmanagement
+
+`PatrolModule.tsx` stellt Dashboard, Filter, Kontrollpunkt- und Routenversionenverwaltung, Rundgänge, Scans, Abweichungen und Auditereignisse über die versionierte Express-API bereit. Kontrollpunkt-QR-Payloads enthalten zufällige Tokens; nur deren SHA-256-Hash wird gespeichert. Mobile Erfassung nutzt die native `BarcodeDetector`-API, wo verfügbar, Web NFC auf unterstützten Browsern sowie einen ausdrücklich als manuell markierten Fallback. Offline-Scans und Abweichungen werden dauerhaft in der IndexedDB-Outbox vorgemerkt und über `/api/v1/patrol/sync` wiederholt synchronisiert. Eine erfolgreiche Tokenprüfung erfolgt erst serverseitig beim Sync; gelöschte oder rotierte Tokens führen dann zur Ablehnung statt zu einem bestätigten Scan.
+
+Die Benutzerzuordnung des Wachpersonals wird serverseitig über Mitarbeiterkonto und Objektzuordnung abgeleitet. Daher sind für bestätigte Scans verknüpfte Mitarbeiterkonten und aktive Objektzuweisungen nötig. Es gibt keine integrierte Patrol-Alarmzustellung; Abweichungen werden nur erfasst und angezeigt. Details und Einschränkungen stehen in [PATROL_MANAGEMENT.md](./PATROL_MANAGEMENT.md) und [PATROL_IMPLEMENTATION_REPORT.md](../PATROL_IMPLEMENTATION_REPORT.md).
+
 ---
 
 ## 2. Installations-, Build- und Testbefehle

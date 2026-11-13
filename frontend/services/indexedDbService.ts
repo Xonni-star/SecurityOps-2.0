@@ -3,7 +3,7 @@
 // Behandelt transaction.onerror und transaction.onabort als echte Fehler. Keine verschluckten Fehler!
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export interface OutboxMutation {
   id: string; // Eindeutige client_mutation_id (UUID v4)
@@ -74,7 +74,15 @@ interface StoredAlarmPlanCache {
   cachedAt: string;
 }
 
-class IndexedDbService {
+interface StoredPatrolCheckpointCache {
+  cacheKey: string;
+  tenantId: string;
+  userId: string;
+  checkpoints: Array<Record<string, unknown>>;
+  cachedAt: string;
+}
+
+export class IndexedDbService {
   private db: IDBDatabase | null = null;
   private currentDeviceId: string = '';
 
@@ -84,6 +92,11 @@ class IndexedDbService {
 
   getDeviceId(): string {
     return this.currentDeviceId;
+  }
+
+  close(): void {
+    this.db?.close();
+    this.db = null;
   }
 
   private getOrCreateDeviceId(): string {
@@ -150,6 +163,11 @@ class IndexedDbService {
         if (!db.objectStoreNames.contains('alarmPlanCache')) {
           const planCache = db.createObjectStore('alarmPlanCache', { keyPath: 'cacheKey' });
           planCache.createIndex('tenantUser', ['tenantId', 'userId'], { unique: true });
+        }
+
+        if (!db.objectStoreNames.contains('patrolCheckpointCache')) {
+          const checkpointCache = db.createObjectStore('patrolCheckpointCache', { keyPath: 'cacheKey' });
+          checkpointCache.createIndex('tenantUser', ['tenantId', 'userId'], { unique: true });
         }
       };
 
@@ -487,6 +505,38 @@ class IndexedDbService {
       const request = tx.objectStore('alarmPlanCache').get(`${tenantId}:${userId}`);
       request.onsuccess = () => resolve((request.result as StoredAlarmPlanCache) ?? null);
       request.onerror = () => reject(request.error || new Error('Lesen des Offline-Notfallplancaches fehlgeschlagen'));
+    });
+  }
+
+  async savePatrolCheckpointCache(
+    tenantId: string,
+    userId: string,
+    checkpoints: Array<Record<string, unknown>>
+  ): Promise<void> {
+    const db = await this.init();
+    const cache: StoredPatrolCheckpointCache = {
+      cacheKey: `${tenantId}:${userId}`,
+      tenantId,
+      userId,
+      checkpoints,
+      cachedAt: new Date().toISOString()
+    };
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('patrolCheckpointCache', 'readwrite');
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error || new Error('Speichern der Kontrollpunkt-Offline-Daten fehlgeschlagen'));
+      tx.onabort = () => reject(tx.error || new Error('Kontrollpunkt-Cache-Transaktion abgebrochen'));
+      tx.objectStore('patrolCheckpointCache').put(cache);
+    });
+  }
+
+  async getPatrolCheckpointCache(tenantId: string, userId: string): Promise<StoredPatrolCheckpointCache | null> {
+    const db = await this.init();
+    return new Promise((resolve, reject) => {
+      const request = db.transaction('patrolCheckpointCache', 'readonly')
+        .objectStore('patrolCheckpointCache').get(`${tenantId}:${userId}`);
+      request.onsuccess = () => resolve((request.result as StoredPatrolCheckpointCache) ?? null);
+      request.onerror = () => reject(request.error || new Error('Lesen des Kontrollpunkt-Offline-Caches fehlgeschlagen'));
     });
   }
 

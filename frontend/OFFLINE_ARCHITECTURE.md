@@ -25,6 +25,8 @@ Notfallpläne, Alarmarten und erlaubte Sites werden benutzerspezifisch zwischeng
 
 Die Handover-Outbox ermöglicht Offline-Erfassung des Übergabeprotokolls und initialer Aufgaben. Bestätigungen, spätere Aufgabenänderungen und DMS-Verknüpfungen benötigen eine Online-Verbindung. Die Erfassung setzt eine aktive Sitzung und zuvor geladene Objekt-/Mitarbeiter-Stammdaten voraus; nach App-Neustart ohne Netzwerk können Sitzung und Stammdaten nicht wiederhergestellt werden. Eine verspätete Erfassung ändert keine bestätigten Serverprotokolle; Korrekturen werden als Historienereignis hinzugefügt.
 
+Kontrollgang-Scans und Abweichungen verwenden dieselbe IndexedDB-Outbox mit stabiler Mutations-ID und tenant-/benutzerbezogenem Kontrollpunktcache (Schema-Version 5). Die Outbox bleibt bei Netzwerkfehlern erhalten und kann nach App-Neustart erneut übertragen werden; ein gezielter Test öffnet die Outbox über eine neue Serviceinstanz. Scans werden separat an `POST /api/v1/patrol/sync` gesendet; die Servertransaktion validiert Mitarbeiter-/Objektzuordnung, Kontrollpunkt, Token-Hash und Tokenversion und prüft Idempotenz sowie das Zwei-Minuten-Duplikatfenster. Eine wiederverwendete Mutations-ID mit anderem Payload-Hash oder ein veralteter/rotierter Token wird abgewiesen. Der Token ist bis zur serverseitigen Prüfung Teil der lokalen Mutation und wird aus sichtbaren Queue-Vorschauen redigiert; nach bestätigter Übertragung wird die Mutation entfernt. Offline-Erfassung ist deshalb noch keine serverseitig bestätigte oder verifizierte Kontrolle. Start und Abschluss eines Rundgangs benötigen derzeit eine Verbindung; bereits gestartete aktive Rundgänge können bei Online-Verbindung nach App-Neustart wieder geladen werden.
+
 ---
 
 ## 3. Datenintegrität & Append-Only Modell

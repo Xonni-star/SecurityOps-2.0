@@ -638,7 +638,10 @@ export interface PatrolScanEvent {
   guardName: string;
   scannedAt: string;
   method: 'QR_CODE' | 'NFC_TAG' | 'MANUELL';
-  verifiedTag: string;
+  verifiedTag?: string;
+  checkpointToken?: string;
+  checkpointTokenVersion?: number;
+  roundId?: string;
   photoUrl?: string;
   notes?: string;
   offlineCaptured: boolean;
