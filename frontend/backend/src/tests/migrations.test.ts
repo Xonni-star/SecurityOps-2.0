@@ -900,7 +900,8 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       '015_alarm_emergency_management.sql',
       '016_alarm_lifecycle_and_offline.sql',
       '017_handover_management.sql',
-      '018_handover_confirmation_identity.sql'
+      '018_handover_confirmation_identity.sql',
+      '019_employee_account_link_permission.sql'
     ]);
     fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
     fs.rmSync(path.join(dir, '012_document_management.sql'), { force: true });
