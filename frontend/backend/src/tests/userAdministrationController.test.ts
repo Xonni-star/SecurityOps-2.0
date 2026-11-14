@@ -173,9 +173,9 @@ describe('user administration security controls', () => {
   });
 
   test('rejects unsupported owner-scoped grants rather than treating them as tenant-wide', async () => {
-    const req = request(['roles:manage', 'employees:read'], {
+    const req = request(['roles:manage', 'employees:update'], {
       name: 'Own data',
-      permissions: [{ code: 'employees:read', dataScope: 'OWN' }]
+      permissions: [{ code: 'employees:update', dataScope: 'OWN' }]
     });
     const res = response();
 
@@ -184,5 +184,55 @@ describe('user administration security controls', () => {
     expect(withTenantTransaction).not.toHaveBeenCalled();
     expect(next).toHaveBeenCalledTimes(1);
     expect(res.statusCode).toBe(200);
+  });
+
+  test('rejects site grants for permissions without a site-scoped policy', async () => {
+    const req = request(['roles:manage', 'customers:create'], {
+      name: 'Unsupported site scope',
+      permissions: [{ code: 'customers:create', siteId: '55555555-5555-4555-8555-555555555555', dataScope: 'SITE' }]
+    });
+    const res = response();
+
+    await createRole(req, res, next);
+
+    expect(transaction.query).not.toHaveBeenCalled();
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(200);
+  });
+
+  test('persists OWN only for a permission backed by a direct owner relationship', async () => {
+    transaction.query
+      .mockResolvedValueOnce({ rows: [{ id: roleId, name: 'Personal data' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'permission-id', code: 'employees:read' }] })
+      .mockResolvedValueOnce({ rows: [{ id: 'permission-id', code: 'employees:read' }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const req = request(['roles:manage', 'employees:read'], {
+      name: 'Personal data',
+      permissions: [{ code: 'employees:read', dataScope: 'OWN' }]
+    });
+    const res = response();
+
+    await createRole(req, res, next);
+
+    const insert = transaction.query.mock.calls.find(([sql]) =>
+      String(sql).includes('INSERT INTO tenant_role_permissions')
+    );
+    expect(insert?.[1]).toEqual([tenantId, roleId, 'permission-id', null, 'OWN', false]);
+    expect(res.statusCode).toBe(201);
+  });
+
+  test('site-filtered user lists omit role and site assignments from other sites', async () => {
+    transaction.query.mockResolvedValueOnce({ rows: [] });
+    const res = response();
+
+    await listUsers({
+      ...request(['users:read']),
+      query: { siteId: '55555555-5555-4555-8555-555555555555' }
+    } as unknown as Request, res, next);
+
+    const [sql, values] = transaction.query.mock.calls[0];
+    expect(values).toEqual([tenantId, '55555555-5555-4555-8555-555555555555']);
+    expect(String(sql)).toContain('AND ($2::uuid IS NULL OR tur.site_id=$2::uuid)');
+    expect(String(sql).match(/tur\.site_id=\$2::uuid/g)).toHaveLength(2);
   });
 });

@@ -15,7 +15,7 @@ export async function materializePatrolOccurrences(
   daysBehind = 0,
   daysAhead = 7
 ): Promise<number> {
-  const result = await db.query(
+  const inserted = await db.query(
     `WITH active_versions AS (
        SELECT r.id AS route_id,r.site_id,r.tenant_id,r.current_version,
               v.schedule_timezone,v.schedule_anchor_date,v.time_window_start,v.time_window_end,
@@ -63,14 +63,30 @@ export async function materializePatrolOccurrences(
        ON CONFLICT (tenant_id,route_id,route_version,scheduled_at) DO NOTHING
        RETURNING id,tenant_id,route_id,scheduled_at
      )
-     INSERT INTO patrol_schedule_occurrence_events
-       (tenant_id,occurrence_id,actor_type,action,details)
-     SELECT tenant_id,id,'system','materialized',
-            jsonb_build_object('routeId',route_id,'scheduledAt',scheduled_at)
-       FROM inserted`,
+     SELECT id,tenant_id,route_id,scheduled_at FROM inserted`,
     [tenantId, now.toISOString(), daysBehind, daysAhead]
   );
-  return result.rowCount ?? 0;
+  if (!inserted.rows.length) return 0;
+
+  const eventRows = inserted.rows.map((occurrence: {
+    id: string;
+    route_id: string;
+    scheduled_at: string;
+  }) => ({
+    id: occurrence.id,
+    details: {
+      routeId: occurrence.route_id,
+      scheduledAt: occurrence.scheduled_at
+    }
+  }));
+  await db.query(
+    `INSERT INTO patrol_schedule_occurrence_events
+       (tenant_id,occurrence_id,actor_type,action,details)
+     SELECT $1,(event->>'id')::uuid,'system','materialized',event->'details'
+       FROM jsonb_array_elements($2::jsonb) AS event`,
+    [tenantId, JSON.stringify(eventRows)]
+  );
+  return inserted.rowCount ?? 0;
 }
 
 function systemMutationId(occurrenceId: string, category: string): string {
