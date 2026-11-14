@@ -1,36 +1,45 @@
-# SecurityOps 2.0 - PostgreSQL 16+ Database Architecture & Schema Specification
+# SecurityOps 2.0 - PostgreSQL-Datenbankarchitektur
 
-## 1. System Overview
-SecurityOps 2.0 uses PostgreSQL 16+ with SQLAlchemy 2.0 (Asyncpg) and Alembic. The database is built around three foundational architectural principles:
-1. **Multi-Tenancy (Row Level Security & Composite FKs)**: Eliminates cross-tenant data contamination physically at the database level.
-2. **Offline-First Resilience**: Full support for client UUID idempotency keys, revision counters, and conflict resolution.
-3. **DIN 77200 & § 34a GewO Compliance**: Revisionssichere Auditprotokolle (`audit_logs`) und lückenlose Bewacherregister-Nachweisführung.
+> **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.** Dieses Schema-Dokument beschreibt den TypeScript/PostgreSQL-Quellcode. Es ist keine DIN-/§ 34a-Konformitäts- oder Zertifizierungsaussage. Nicht jede Tabelle oder jedes Modul hat denselben RLS-/FK- oder Reifegrad.
+
+## 1. Systemübersicht
+
+Das Backend ist TypeScript/Node.js mit Express und PostgreSQL 16+. SQL-Migrationen liegen in `frontend/backend/src/migrations/` und werden über den eigenen Migrationsrunner angewendet; SQLAlchemy, Asyncpg und Alembic gehören nicht zur aktuellen Architektur. Für vorhandene und neue Tabellen gelten die jeweiligen Migrationen als maßgebliche Definition. Einige Workflows unterstützen offline erfasste, idempotent synchronisierte Mutationen; das System ist nicht generell offline-first.
+
+Mandantengrenzen werden je nach Modul durch Anwendungsprüfungen, RLS, `FORCE ROW LEVEL SECURITY`, zusammengesetzte Foreign Keys oder eine Kombination davon abgesichert. Diese Eigenschaften gelten nicht automatisch für jede Tabelle.
 
 ---
 
-## 2. Multi-Tenant Composite Foreign Key Pattern
-Unlike standard single-column foreign keys that only enforce `id`, SecurityOps 2.0 enforces composite foreign keys `(parent_id, tenant_id)` referencing `(id, tenant_id)` in the parent table.
+## 2. Tenant-aware Foreign Keys
+
+Zusammengesetzte Foreign Keys binden Beziehungen dort, wo die Migration sie definiert, an denselben Mandanten:
 
 ```sql
--- Example: SecurityObject foreign key to Customer
-CONSTRAINT fk_objects_customer_tenant FOREIGN KEY (customer_id, tenant_id)
-    REFERENCES customers(id, tenant_id) ON DELETE RESTRICT;
+-- Beispielmuster, sofern die jeweilige Migration diesen Constraint definiert:
+FOREIGN KEY (parent_id, tenant_id) REFERENCES parent_table(id, tenant_id)
 ```
-**Advantage**: Even if an application bug attempts to insert an object with `customer_id` from Tenant B into Tenant A, PostgreSQL physically aborts the transaction with an `IntegrityError`.
+
+Eine nicht aufgeführte Beziehung darf nicht als tenant-validiert vorausgesetzt werden.
 
 ---
 
 ## 3. PostgreSQL Row Level Security (RLS)
-Every tenant-scoped table has RLS enabled:
+
+Tenant-Tabellen werden in den jeweiligen Migrationen mit Policies auf `app.current_tenant` geschützt; bei unterstützten Tabellen wird RLS erzwungen (`FORCE ROW LEVEL SECURITY`). Nicht jede historische Tabelle wurde automatisch nachgerüstet. Anwendungszugriffe sollen die dafür vorgesehenen Tenant-Transaktionshelfer verwenden. Ein repräsentatives Policy-Muster ist:
 ```sql
 ALTER TABLE logbook_entries ENABLE ROW LEVEL SECURITY;
+ALTER TABLE logbook_entries FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY tenant_isolation_policy ON logbook_entries
-    AS RESTRICTIVE
+    AS PERMISSIVE
     FOR ALL
     USING (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant', true), '')::uuid);
 ```
+
+### Benutzer-, Rollen- und Berechtigungsverwaltung (Migration 033)
+
+Migration `033_tenant_user_role_administration.sql` ergänzt `tenant_memberships`, tenant-eigene `tenant_roles`, `tenant_role_permissions` mit optionalem Objekt-/Site-Bezug und Datenzugriffsscope, `tenant_user_roles` sowie gehashte einmalige Reset-Tokens. Sie ergänzt tenantgebundene zusammengesetzte Fremdschlüssel und RLS/FORCE RLS für diese Tabellen und für die vorhandenen `user_roles` und `user_sessions`. Authentifizierte Requests beziehen den Mandanten aus der Sitzung; Login-/Session-Auflösung verwendet eng begrenzte Lookup-Policies, bevor der Tenant-Kontext gesetzt ist. Einzelheiten und Grenzen der Site-Autorisierung stehen in [USER_ADMINISTRATION_API.md](./USER_ADMINISTRATION_API.md).
 
 ## 4. Dokumentenmanagement (Migration 012)
 

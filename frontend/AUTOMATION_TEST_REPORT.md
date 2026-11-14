@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Phase 8: Automatisierungs-Testbericht
 
+> **Historischer Snapshot:** Die Szenarien und BESTANDEN-Angaben beschreiben einen früheren Entwicklungsstand und sind kein Nachweis aktueller automatischer Jobs oder Produktivabnahme.
+
 ## 1. Getestete Automatisierungsszenarien
 | Nr | Szenario | Status | Verifikation |
 |---|---|---|---|

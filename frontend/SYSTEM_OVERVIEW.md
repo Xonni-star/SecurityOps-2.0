@@ -1,7 +1,9 @@
 # SecurityOps 2.0 - Phase 13: System-Gesamtübersicht (Release 1.0)
 
+> **Historischer Snapshot:** Versions-, Normen- und Modulreife-Angaben dieses Dokuments sind veraltet und keine aktuelle Bestands- oder Produktionsaussage. Maßgeblich sind [README.md](../README.md) und die jeweiligen API-Dokumente.
+
 ## 1. Systemstatus und Versionsstand
-- **Release-Version**: 1.0.0 (Gold Master)
+- **Dokumentierter Release-Stand**: 1.0.0 (historische Angabe, kein aktueller Release)
 - **Normative Grundlage**: DIN 77200-1:2020-10, BGV C7 (DGUV V23), § 34a GewO / BewachV, ArbZG, DSGVO / BDSG.
 - **Architekturmuster**: Modularer Monolith mit entkoppelten Fachmodul-Controllern, strikter PostgreSQL 16+ Row Level Security (RLS) und nativer IndexedDB Offline-First Outbox/Inbox Replikation.
 

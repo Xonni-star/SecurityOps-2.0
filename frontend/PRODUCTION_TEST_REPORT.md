@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Phase 12: Produktionsreife- & Deployment-Testbericht
 
+> **Historischer Snapshot:** Die hier aufgeführten BESTANDEN-Ergebnisse sind nicht auf den aktuellen Code oder Deployment-Stack übertragbar und stellen keine Produktionsfreigabe dar. Der aktuelle Installer liegt unter `frontend/deploy/install.sh`; die aktuelle Compose-Datei unter `frontend/deploy/docker-compose.production.yml`.
+
 ## 1. Verifizierte Testszenarien
 | Prüfbereich | Szenario | Status | Verifikation |
 |---|---|---|---|

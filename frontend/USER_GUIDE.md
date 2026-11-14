@@ -1,7 +1,8 @@
-# SecurityOps 2.0 – Vollständig bebildertes Benutzerhandbuch
+# SecurityOps 2.0 – Benutzerhandbuch
 
-## 1. Einführung & Systemarchitektur
-SecurityOps 2.0 ist eine zertifizierte Sicherheitsdienstverwaltungssoftware nach DIN 77200-1:2020-10 und § 34a GewO. Dieses Handbuch führt Schritt für Schritt mit Abbildungen, nummerierten Markierungen (Callouts) und Erklärungen durch alle Kernarbeitsabläufe.
+> **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.** SecurityOps 2.0 ist weder als DIN-77200-konform noch nach § 34a GewO zertifiziert. Dieses Handbuch enthält beispielhafte Bedienhinweise; nicht alle genannten Bilddateien, Funktionen oder Abläufe sind im aktuellen Build verfügbar.
+
+## 1. Einführung
 
 ### Bildverzeichnis (In-App & Dokumentation)
 Alle Abbildungen sind im zentralen Dokumentationsverzeichnis `docs/handbuch/images/` sowie direkt in der Webanwendung unter dem Menüpunkt **Bebildertes Handbuch** verfügbar:

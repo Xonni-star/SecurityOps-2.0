@@ -1,5 +1,14 @@
 import { migrationPool } from '../config/database';
 
+export async function insertTenantMembership(tenantId: string, userId: string): Promise<void> {
+  await migrationPool.query(
+    `INSERT INTO tenant_memberships (tenant_id,user_id,first_name,last_name,phone)
+     SELECT $1,id,first_name,last_name,phone FROM users WHERE id=$2
+     ON CONFLICT (tenant_id,user_id) DO NOTHING`,
+    [tenantId, userId]
+  );
+}
+
 export function authHeaders(credential: string): Record<string, string> {
   // Opaque random session fixtures are accepted only after the server resolves
   // their database hash; Authorization headers are deliberately not used.

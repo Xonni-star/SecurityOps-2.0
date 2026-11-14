@@ -57,13 +57,30 @@ async function getEmployeeSiteIds(db: any, tenantId: string, employeeId: string)
 export async function listEmployees(req: Request,res: Response,next: NextFunction): Promise<void> {
   try {
     const tenantId=req.user!.tenantId;
+    const siteId=req.query.siteId===undefined?null:z.string().uuid().parse(req.query.siteId);
     const data=await withTenantTransaction(tenantId,async db=>{
-      const employees=await db.query(`SELECT ${employeeSelect} FROM employees ORDER BY archived_at NULLS FIRST,last_name,first_name`);
-      const siteAssignments=await db.query('SELECT employee_id,site_id FROM employee_site_assignments');
-      const qualifications=await db.query(`SELECT q.id,q.employee_id,q.qualification_type,q.certificate_number,q.issue_date,q.expiry_date,q.verified,q.status,q.document_reference,q.revision_version FROM employee_qualifications q JOIN employees e ON e.id=q.employee_id AND e.tenant_id=q.tenant_id ORDER BY q.issue_date DESC NULLS LAST`);
-      const absences=await db.query(`SELECT id,employee_id,absence_type,date_from,date_to,status,notes,reviewed_by,reviewed_at,revision_version FROM employee_absences ORDER BY date_from DESC`);
+      if(siteId){
+        const validSite=await db.query('SELECT 1 FROM sites WHERE tenant_id=$1 AND id=$2',[tenantId,siteId]);
+        if(!validSite.rows.length)return null;
+      }
+      const employees=await db.query(
+        `SELECT ${employeeSelect} FROM employees e
+          WHERE e.tenant_id=$1 AND ($2::uuid IS NULL OR EXISTS (
+            SELECT 1 FROM employee_site_assignments esa
+             WHERE esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=$2
+          ))
+          ORDER BY archived_at NULLS FIRST,last_name,first_name`,
+        [tenantId,siteId]
+      );
+      const siteAssignments=await db.query(
+        'SELECT employee_id,site_id FROM employee_site_assignments WHERE tenant_id=$1 AND ($2::uuid IS NULL OR site_id=$2)',
+        [tenantId,siteId]
+      );
+      const qualifications=await db.query(`SELECT q.id,q.employee_id,q.qualification_type,q.certificate_number,q.issue_date,q.expiry_date,q.verified,q.status,q.document_reference,q.revision_version FROM employee_qualifications q JOIN employees e ON e.id=q.employee_id AND e.tenant_id=q.tenant_id WHERE e.tenant_id=$1 AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM employee_site_assignments esa WHERE esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=$2)) ORDER BY q.issue_date DESC NULLS LAST`,[tenantId,siteId]);
+      const absences=await db.query(`SELECT a.id,a.employee_id,a.absence_type,a.date_from,a.date_to,a.status,a.notes,a.reviewed_by,a.reviewed_at,a.revision_version FROM employee_absences a JOIN employees e ON e.id=a.employee_id AND e.tenant_id=a.tenant_id WHERE e.tenant_id=$1 AND ($2::uuid IS NULL OR EXISTS (SELECT 1 FROM employee_site_assignments esa WHERE esa.tenant_id=e.tenant_id AND esa.employee_id=e.id AND esa.site_id=$2)) ORDER BY a.date_from DESC`,[tenantId,siteId]);
       return employees.rows.map(e=>({...e,assigned_site_ids:siteAssignments.rows.filter(s=>s.employee_id===e.id).map(s=>s.site_id),qualifications:qualifications.rows.filter(q=>q.employee_id===e.id).map(q=>({...q,status:statusFromQualification(q.verified,q.expiry_date)})),absences:absences.rows.filter(a=>a.employee_id===e.id)}));
     });
+    if(data===null){res.status(404).json({success:false,message:'Objekt nicht gefunden.'});return;}
     res.json({success:true,data});
   } catch(error){next(error);}
 }

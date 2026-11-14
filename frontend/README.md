@@ -1,6 +1,8 @@
-# SecurityOps 2.0 - Zentrale Sicherheitsdienstverwaltung nach DIN 77200 & § 34a GewO
+# SecurityOps 2.0 - Sicherheitsdienstverwaltung
 
-SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software für Sicherheitsunternehmen mit PostgreSQL 16+ Row-Level-Security (RLS), digitalem Wachbuch, Dienstplanung und mobiler Mitarbeiter-App.
+SecurityOps 2.0 ist ein Softwareprojekt für Sicherheitsdienstprozesse mit React/Vite, einer TypeScript/Express-API und PostgreSQL 16+ Row-Level-Security (RLS). Der fachliche Bezug zu DIN 77200 oder § 34a GewO ist keine Zertifizierungs-, Rechtskonformitäts- oder Produktionsfreigabe.
+
+> **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.** Einzelne Module und End-to-End-Abnahmen haben unterschiedliche Reifegrade. Historische Berichte sind keine Aussage zur aktuellen Produktreife.
 
 ---
 
@@ -33,6 +35,10 @@ Siehe [Alarm-API](./ALARM_EMERGENCY_API.md), [Offline-Architektur](./OFFLINE_ARC
 Offline-Start, Scans, Abschluss und Abweichungen werden dauerhaft in der IndexedDB-Outbox vorgemerkt und bei Wiederverbindung über `/api/v1/patrol/sync` synchronisiert. Kontrollpunkte, Routen und lokale Rundgangszustände lassen sich nach Browser-Neustart wiederherstellen. Eine erfolgreiche Tokenprüfung erfolgt erst serverseitig beim Sync; gelöschte oder rotierte Tokens führen zur Ablehnung statt zu einem bestätigten Scan. Details, Endpunkte und offene Kriterien stehen in [PATROL_MANAGEMENT.md](./PATROL_MANAGEMENT.md) und [PATROL_IMPLEMENTATION_REPORT.md](../PATROL_IMPLEMENTATION_REPORT.md).
 
 Die Benutzerzuordnung des Wachpersonals wird serverseitig über Mitarbeiterkonto und Objektzuordnung abgeleitet. Daher sind für bestätigte Scans verknüpfte Mitarbeiterkonten und aktive Objektzuweisungen nötig. Verspätete Scans, beim Scan fällige ausgelassene Kontrollpunkte und zu lange abgeschlossene Runden erzeugen idempotente Abweichungen; ungültige und doppelte Scanversuche werden ohne Tokengeheimnis revisionssicher protokolliert. Zeitfenster/Wiederholungen werden gespeichert, aber noch nicht durch einen Zeitplaner ausgeführt. Mitarbeitergruppen, Fotoanlagen, vollständige Fälligkeitserkennung und ein Patrol-Benachrichtigungsprovider sind nicht verfügbar/implementiert. Die vollständige Spezifikation ist gelesen; der Implementierungsbericht führt die verbleibenden Punkte einzeln auf.
+
+## Benutzer- und Rechteverwaltung
+
+Der aktuelle PR-Arbeitsstand ergänzt die vorhandene Authentifizierung/RBAC um tenant-scoped Benutzerverwaltung, konfigurierbare tenant-eigene Rollen, Berechtigungszuordnung mit Tenant-/Site-Scope, Status-/Sperrverwaltung, Sitzungswiderruf, Auditverlauf, sichere Passwortänderung und zeitlich begrenzte Passwort-Reset-Tokens. Der Mandant wird serverseitig aus der Session abgeleitet; Rollen/Berechtigungen werden nicht global für andere Mandanten geändert. Die Verwaltung ist online; Offlineänderungen an Konten oder Rechten sind nicht vorgesehen und ein Reset-Token wird nicht per E-Mail zugestellt. Diese Erweiterung ist noch nicht in `main`; API-Vertrag und Einschränkungen stehen in [USER_ADMINISTRATION_API.md](./USER_ADMINISTRATION_API.md).
 
 ---
 
@@ -74,12 +80,12 @@ npm run build
 npm audit
 ```
 
-Audit snapshot (2026-11-13): frontend `npm audit` — 0 vulnerabilities. Backend `npm --prefix frontend/backend audit` — 7 low findings in the Jest/`ts-jest` development-test toolchain, including `deepmerge` GHSA-gcqx-w48m-w2h4; `npm --prefix frontend/backend audit --omit=dev` — 0 vulnerabilities. The suggested forced fix is a breaking Jest downgrade, so no unrelated dependency change was applied. The Phase 2 test/build/audit results and exact CI heads are recorded in the [final status report](../PHASE_2_FINAL_COMPLETION_REPORT.md).
+Audit snapshot (2026-11-14): frontend `npm audit` — 0 vulnerabilities. Backend `npm --prefix frontend/backend audit` — 7 LOW findings for `deepmerge@4.3.1` (GHSA-gcqx-w2h4) in Jest/`ts-jest` development dependencies; `npm --prefix frontend/backend audit --omit=dev` — 0 production findings. Upstream has no patched 4.x release; do not force npm's breaking downgrade. Exact current test evidence is in [NEXT_DEVELOPMENT_REPORT.md](../docs/development/NEXT_DEVELOPMENT_REPORT.md).
 
 ---
 
 ## 3. Architektur & Sicherheitsgarantien
-1. **RLS & Mandantenisolation**: PostgreSQL 16+ erzwingt `FORCE ROW LEVEL SECURITY`. Ohne gesetzten Transaktionskontext (`SET LOCAL app.current_tenant`) liefert die Datenbank physisch 0 Datensätze.
+1. **RLS & Mandantenisolation**: RLS und `FORCE ROW LEVEL SECURITY` sind für ausgewählte tenantgebundene Tabellen konfiguriert; dies gilt nicht pauschal für jede historische Tabelle. Tenant-scoped API-Zugriffe setzen ihren Datenbankkontext aus der authentifizierten Sitzung.
 2. **Offline-Sync & Idempotenz**:
    - `POST /api/v1/sync/push` verarbeitet Mutationen atomar via PostgreSQL Transaction Advisory Locks und persistiert Quittungen in `sync_idempotency_receipts`.
    - `POST /api/v1/sync/conflicts/resolve` trennt Konfliktentscheidungen in `sync_conflict_resolution_receipts`.

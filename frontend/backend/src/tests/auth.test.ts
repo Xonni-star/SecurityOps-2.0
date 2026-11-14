@@ -1,12 +1,12 @@
 import { authenticateJwt } from '../middleware/auth';
-import { query } from '../config/database';
+import { withSessionLookupTransaction } from '../config/database';
 
-jest.mock('../config/database', () => ({ query: jest.fn() }));
+jest.mock('../config/database', () => ({ withSessionLookupTransaction: jest.fn() }));
 
 describe('session authentication database failures', () => {
   test('forwards database errors instead of reporting an expired session', async () => {
     const databaseError = new Error('database unavailable');
-    (query as jest.Mock).mockRejectedValueOnce(databaseError);
+    (withSessionLookupTransaction as jest.Mock).mockRejectedValueOnce(databaseError);
     const req: any = {
       headers: { cookie: `secops_session=${'a'.repeat(43)}` }
     };

@@ -47,6 +47,28 @@ export async function seedDatabase(): Promise<void> {
       ON CONFLICT (id) DO NOTHING;
     `, [TENANT_FRANKFURT_ID, TENANT_BAVARIA_ID]);
 
+    const tenantRoleTemplates = [
+      ['Mandantenadministrator','Mandantenbezogene Benutzer- und Rollenverwaltung'],
+      ['Geschäftsführung','Konfigurierbare Leitungsrolle'],
+      ['Einsatzleitung','Konfigurierbare Einsatzleitungsrolle'],
+      ['Objektleitung','Konfigurierbare Objektleitungsrolle'],
+      ['Disposition','Konfigurierbare Dispositionsrolle'],
+      ['Personalverwaltung','Konfigurierbare Personalverwaltungsrolle'],
+      ['Mitarbeiter','Konfigurierbare Mitarbeitendenrolle'],
+      ['Sicherheitsmitarbeiter','Konfigurierbare Sicherheitsmitarbeitendenrolle'],
+      ['Revisor/Auditor','Konfigurierbare revisionsorientierte Leserolle']
+    ];
+    for (const tenantId of [TENANT_FRANKFURT_ID,TENANT_BAVARIA_ID]) {
+      await withTenantTransaction(tenantId, async (tx) => {
+        for (const [name,description] of tenantRoleTemplates) {
+          await tx.query(
+            'INSERT INTO tenant_roles (tenant_id,name,description) VALUES ($1,$2,$3) ON CONFLICT (tenant_id,name) DO NOTHING',
+            [tenantId,name,description]
+          );
+        }
+      });
+    }
+
     // 2. Rollen anlegen
     const roles = [
       'Systemadministrator',
@@ -298,14 +320,35 @@ export async function seedDatabase(): Promise<void> {
 
     const userId = userRes.rows[0].id;
 
-    // Benutzer Mandant Frankfurt mit Rolle Einsatzleitung zuordnen
-    if (einsatzRole.rows.length > 0) {
-      await client.query(`
-        INSERT INTO user_roles (user_id, role_id, tenant_id)
-        VALUES ($1, $2, $3)
-        ON CONFLICT DO NOTHING;
-      `, [userId, einsatzRole.rows[0].id, TENANT_FRANKFURT_ID]);
-    }
+    // Tenant-local identity and role grants remain inside RLS context.
+    await withTenantTransaction(TENANT_FRANKFURT_ID, async (tx) => {
+      await tx.query(
+        `INSERT INTO tenant_memberships (tenant_id,user_id,first_name,last_name,phone)
+         VALUES ($1,$2,'Alexander','Schmidt','+49 171 4455881') ON CONFLICT DO NOTHING`,
+        [TENANT_FRANKFURT_ID,userId]
+      );
+      if (einsatzRole.rows.length > 0) {
+        const tenantRole = await tx.query(
+          `SELECT id FROM tenant_roles
+            WHERE tenant_id=$1 AND name=(SELECT name FROM roles WHERE id=$2)`,
+          [TENANT_FRANKFURT_ID,einsatzRole.rows[0].id]
+        );
+        if (tenantRole.rows.length > 0) {
+          await tx.query(
+            `INSERT INTO tenant_role_permissions (tenant_id,role_id,permission_id,data_scope,can_delegate)
+             SELECT $1,$2,rp.permission_id,'TENANT',false
+               FROM role_permissions rp WHERE rp.role_id=$3
+             ON CONFLICT DO NOTHING`,
+            [TENANT_FRANKFURT_ID,tenantRole.rows[0].id,einsatzRole.rows[0].id]
+          );
+          await tx.query(
+            `INSERT INTO tenant_user_roles (tenant_id,user_id,role_id,assigned_by)
+             VALUES ($1,$2,$3,NULL) ON CONFLICT DO NOTHING`,
+            [TENANT_FRANKFURT_ID,userId,tenantRole.rows[0].id]
+          );
+        }
+      }
+    });
 
     // 5. Daten für Mandant Frankfurt (Tenant A) innerhalb geschützter RLS-Transaktion anlegen
     await withTenantTransaction(TENANT_FRANKFURT_ID, async (tx) => {

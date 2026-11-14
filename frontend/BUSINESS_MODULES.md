@@ -1,28 +1,18 @@
-# SecurityOps 2.0 - Phase 5 Business Modules & System Integration Specification
+# SecurityOps 2.0 - Fachmodule und aktueller Status
 
-## 1. Modulübersicht und Status
-| Modul | Status | Beschreibung | Verknüpfte Module |
-|---|---|---|---|
-| **Kunden & Verträge** | Vollständig | Stammdaten, Adressen, SLA-Level, automatische Kündigungsfristen-Überwachung | Objekte, Dokumente, Aufgaben |
-| **Objektverwaltung** | Vollständig | Zentraler Detail-Tab-Workspace (Overview, Kontrollpunkte, Wachbuch, Roster, Schlüssel, Alarmpläne) | Kunden, Mitarbeiter, Dienstplan, Wachbuch |
-| **Personal & § 34a GewO** | Vollständig | Bewacherregister-Profile, Qualifikationsüberwachung, Urlaubs- und Krankenverwaltung | Dienstplan, Aufgaben, DMS |
-| **Dienstplanung** | Vollständig | Soll/Ist-Vergleich, Qualifikationsprüfung, ArbZG-Konflikterkennung | Mitarbeiter, Objekte, Wachbuch |
-| **Digitales Wachbuch** | Vollständig | Revisionssichere Protokollierung, Rundgänge, Schichtwechsel, lückenlose Historie | Vorfälle, Aufgaben, Objekte |
-| **Vorfallmanagement** | Vollständig | Workflow: Erfassung -> Bewertung -> Zuweisung -> Maßnahme -> Eskalation -> Abschluss | Aufgaben, DMS, Benachrichtigungen |
-| **Qualitätsmanagement & SOP** | Implementiert, nicht deployed | Versionierte Dienstanweisungen mit Prüfung/Freigabe, Zuweisungen und digitaler Kenntnisnahme; Erinnerungen und JSON-Berichte. Offline-Vormerkungen werden erst nach Serverbestätigung abgeschlossen; kein Hintergrundscheduler/CSV-/PDF-Export. | Mitarbeiter, Objekte, DMS |
-| **Alarmmanagement** | Offen (PR #12 separat, nicht Bestandteil von `main`) | BMA/EMA Eskalationsketten, Notfall-Ansprechpartner, Evakuierungspläne | Objekte, Notfall-SOPs |
-| **Übergabemanagement** | Implementiert, nicht deployed | Mandantengeschützte Objekt-/Schichtprotokolle, getrennte Übergabe-/Übernahmebestätigungen, append-only Historie, fortgeführte Aufgaben, DMS-Verweise und IndexedDB-Synchronisierung | Mitarbeiter, Objekte, Dienstplan, Aufgaben, DMS |
-| **Schlüsselverwaltung** | Vollständig | Generalschlüssel-Depot, Ausgabe-/Rücknahmeprotokolle, automatische Verzugserkennung | Mitarbeiter, Objekte, Aufgaben |
-| **Aufgaben & Maßnahmen** | Vollständig | Modulübergreifende Aufgaben-Pipeline (generiert aus Vorfällen, Schlüsselverzug, Audit-Mängeln) | Vorfälle, Schlüssel, QM |
-| **Dokumentenmanagement (DMS)** | Vollständig | Polymorphe Zuordnung zu Kunden, Objekten, Personalakten und Vorfällen | Alle Fachmodule |
-| **Automatisierung & Watchdog** | Vollständig | Hintergrundprüfer für Nachweise, Verträge, Schlüsselrückgaben und Eskalationen | Benachrichtigungen, Aufgaben |
-| **Globale Suche (Ctrl+K)** | Vollständig | Mandantensichere Volltextsuche über alle 7 Hauptentitäten | Alle Fachmodule |
+> **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.** Frühere Aussagen wie „Vollständig“ waren keine belastbare Produktreife-Aussage. Status und Grenzen beziehen sich auf den dokumentierten Code-/PR-Stand; siehe auch die [zentrale Statusübersicht](../README.md).
 
----
+| Modul | Status | Verifizierter Umfang / Grenze |
+|---|---|---|
+| Kunden | API integriert | Tenant-scoped Liste, Anlage, Änderung, Archivierung und Offline-Mutationen |
+| Objekte | API integriert | Tenant-scoped CRUD, Archivierung, Wiederherstellung und Sync |
+| Mitarbeiter | API integriert | Stammdaten, Site-Zuordnungen, Qualifikationen, Abwesenheiten und Kontoverknüpfung |
+| Schichten | API integriert, Planung fachlich unvollständig | CRUD/Synchronisierung vorhanden; Überschneidungs-, Ruhezeit-, Arbeitszeit- und Tarifprüfungen fehlen |
+| Wachbuch, Schlüssel und Aufgaben | API integriert, Abnahme begrenzt | API-/Sync-Pfade vorhanden; nicht alle Offline-/Auditfälle sind abgenommen |
+| Dokumente, SOP, Alarmmanagement | Implementiert, nicht deployed | Tenant-scoped APIs und Workflows; externe Malware-/E-Mail-/Push-Dienste fehlen |
+| Übergaben und Kontrollgänge | In `main` integriert, nicht deployed | APIs und begrenzte Offline-Sync-Pfade; Offline-Binäranhänge und externe Benachrichtigungen fehlen |
+| Benutzer und Rechte | Tenant-scoped Administration im aktuellen PR-Arbeitsstand | Benutzerlebenszyklus, tenant-eigene Rollen, Site-Grants, Audit und Passwort-Reset-Vorbereitung; noch nicht in `main` |
+| Offline-Sync | Teilweise integriert | Workflow-spezifische Outbox-/Sync-Pfade; nicht jede Funktion oder Datei ist offline verfügbar |
+| Dienstplanung | Phase-2-Backend/UI in offenen PRs [#16](https://github.com/Xonni-star/SecurityOps-2.0/pull/16) und [#19](https://github.com/Xonni-star/SecurityOps-2.0/pull/19), nicht deployed | API-gestützte Kalender- und Planungsabläufe; keine Rechtskonformitätsaussage |
 
-## 2. Schlüssel-Integrationen (Cross-Module Workflows)
-1. **Wachbuch & Aufgaben**: Bei Vorkommnissen mit Priorität *Kritisch* oder *Dringend* generiert das System automatisch eine Bearbeitungsaufgabe mit Frist für den Objektleiter.
-2. **Schlüssel & Aufgaben**: Wenn ein ausgegebener Schlüssel den vereinbarten Rückgabezeitpunkt überschreitet, setzt die Watchdog-Engine den Status auf *Überfällig* und erzeugt eine Eskalationsaufgabe.
-3. **Mitarbeiter & Dienstplan**: Bei der Schichtdisposition werden sowohl die Arbeitsunfähigkeit/Urlaub als auch die geforderte Qualifikation (§ 34a Sachkunde, Brandschutzhelfer) geprüft und bei Nichteignung als Konflikt markiert.
-4. **Polymorphe Dokumentenablage**: Dokumente werden in einer zentralen DMS-Tabelle gespeichert und können flexibel mit Kunden, Objekten, Mitarbeitern oder Vorfällen verknüpft werden, ohne Dateiduplikate zu erzeugen.
-5. **Übergabe & Aufgaben**: Nicht erledigte Übergabeaufgaben bleiben am Objekt offen und werden in nachfolgenden Übergaben angezeigt; Erledigung und Zuweisungsänderungen erzeugen eine Historie.
+Die hier genannten Integrationen dokumentieren implementierte Quellcodepfade, keine vollständige Abnahme, Zertifizierung oder Produktivbereitstellung. Für detaillierte Einschränkungen gelten die jeweiligen Modul-API-Dokumente und der [aktuelle Entwicklungsbericht](../docs/development/NEXT_DEVELOPMENT_REPORT.md).
