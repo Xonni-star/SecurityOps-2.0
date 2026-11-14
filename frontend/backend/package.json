@@ -10,7 +10,8 @@
     "migrate": "ts-node src/migrations/runner.ts",
     "seed": "ts-node src/seeds/seed.ts",
     "test": "jest --runInBand --detectOpenHandles",
-    "test:clamav-integration": "ts-node src/integration/clamavAdapter.integration.ts"
+    "test:clamav-integration": "ts-node src/integration/clamavAdapter.integration.ts",
+    "test:dms-api-integration": "ts-node src/integration/dmsApi.integration.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1169.0",

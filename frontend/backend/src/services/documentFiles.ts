@@ -175,7 +175,7 @@ export interface DocumentObjectStore {
   delete(key: string): Promise<void>;
 }
 
-class S3DocumentObjectStore implements DocumentObjectStore {
+export class S3DocumentObjectStore implements DocumentObjectStore {
   private readonly client = new S3Client({
     endpoint: env.DMS_S3_ENDPOINT,
     region: env.DMS_S3_REGION,
