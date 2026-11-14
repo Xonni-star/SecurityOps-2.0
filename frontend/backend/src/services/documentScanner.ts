@@ -41,8 +41,8 @@ export class ClamAvDocumentScanner implements DocumentScanner {
         settled = true;
         const result = response.replace(/\0/g, '').trim();
         socket.destroy();
-        if (/\bOK\s*$/.test(result)) resolve('clean');
-        else if (/\bFOUND\s*$/.test(result)) resolve('infected');
+        if (result === 'stream: OK') resolve('clean');
+        else if (/^stream: .+ FOUND$/.test(result)) resolve('infected');
         else reject(new Error('Scanner returned an invalid response.'));
       };
       socket.setTimeout(env.DMS_CLAMAV_TIMEOUT_MS, () => fail(new Error('Scanner timed out.')));
