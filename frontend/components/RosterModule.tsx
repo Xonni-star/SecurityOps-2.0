@@ -68,6 +68,7 @@ interface TemplateFormState {
 const ruleCodeLabels: Record<PlanningRuleCode, string> = {
   minimum_rest_minutes: 'Mindest-Ruhezeit (Minuten)',
   maximum_shift_minutes: 'Maximale Schichtdauer (Minuten)',
+  maximum_daily_minutes: 'Maximale tägliche Arbeitszeit (Minuten)',
   maximum_weekly_minutes: 'Maximale Wochenarbeitszeit (Minuten)',
   overtime_threshold_weekly_minutes: 'Überstundenschwelle je Woche (Minuten)',
   minimum_break_minutes: 'Mindestpause (Minuten)',
@@ -84,6 +85,7 @@ const ruleCodeLabels: Record<PlanningRuleCode, string> = {
 const numericRuleCodes = new Set<PlanningRuleCode>([
   'minimum_rest_minutes',
   'maximum_shift_minutes',
+  'maximum_daily_minutes',
   'maximum_weekly_minutes',
   'overtime_threshold_weekly_minutes',
   'minimum_break_minutes',

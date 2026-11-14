@@ -497,6 +497,80 @@ export async function validateShiftCandidate(
     }
   }
 
+  const maximumDailyMinutes = numericRule(rules, 'maximum_daily_minutes');
+  if (maximumDailyMinutes !== undefined) {
+    const firstLocalDate = dateAtInstant(resolved.startsAt, resolved.timeZone);
+    const lastLocalDate = dateAtInstant(
+      new Date(resolved.endsAt.getTime() - 1),
+      resolved.timeZone
+    );
+    const dailyWork = await client.query(
+      `WITH days AS (
+         SELECT ($3::date + offsets.day_index)::date AS local_date,
+                (($3::date + offsets.day_index)::timestamp AT TIME ZONE $8) AS day_start,
+                (($3::date + offsets.day_index + 1)::timestamp AT TIME ZONE $8) AS day_end
+           FROM generate_series(0, $4::date - $3::date) AS offsets(day_index)
+       ), work_shifts AS (
+         SELECT s.starts_at, s.ends_at, s.break_minutes, FALSE AS is_candidate
+           FROM shifts s
+          WHERE s.tenant_id=$1 AND s.id IS DISTINCT FROM $5::uuid
+            AND s.planning_status <> 'cancelled'
+            AND s.starts_at < ((($4::date + 1)::timestamp) AT TIME ZONE $8)
+            AND s.ends_at > ($3::date::timestamp AT TIME ZONE $8)
+            AND (s.employee_id=$2 OR EXISTS (
+              SELECT 1 FROM shift_staffing_assignments a
+               WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id
+                 AND a.employee_id=$2 AND a.status='assigned'
+            ))
+         UNION ALL
+         SELECT $6::timestamptz, $7::timestamptz, $9::integer, TRUE
+       ), split_shifts AS (
+         SELECT d.local_date,
+                w.is_candidate,
+                EXTRACT(EPOCH FROM (LEAST(w.ends_at,d.day_end)-GREATEST(w.starts_at,d.day_start))) / 60 AS segment_minutes,
+                EXTRACT(EPOCH FROM (w.ends_at-w.starts_at)) / 60 AS shift_minutes,
+                w.break_minutes
+           FROM work_shifts w
+           CROSS JOIN days d
+          WHERE w.starts_at < d.day_end AND w.ends_at > d.day_start
+       )
+       SELECT local_date::text AS local_date,
+              COALESCE(SUM(GREATEST(0, segment_minutes -
+                LEAST(break_minutes::numeric,shift_minutes) * segment_minutes / shift_minutes)
+                ) FILTER (WHERE NOT is_candidate),0) AS existing_minutes,
+              COALESCE(SUM(GREATEST(0, segment_minutes -
+                LEAST(break_minutes::numeric,shift_minutes) * segment_minutes / shift_minutes)
+                ) FILTER (WHERE is_candidate),0) AS candidate_minutes
+         FROM split_shifts
+        GROUP BY local_date
+        ORDER BY local_date`,
+      [
+        candidate.tenantId, candidate.employeeId, firstLocalDate, lastLocalDate,
+        candidate.excludeShiftId ?? null, resolved.startsAt, resolved.endsAt,
+        resolved.timeZone, candidate.breakMinutes ?? 0
+      ]
+    );
+    const overLimitDay = dailyWork.rows.find(row =>
+      Number(row.existing_minutes) + Number(row.candidate_minutes) > maximumDailyMinutes
+    );
+    if (overLimitDay) {
+      const existingMinutes = Number(overLimitDay.existing_minutes);
+      const candidateMinutes = Number(overLimitDay.candidate_minutes);
+      addRuleFinding(
+        'MAXIMUM_DAILY_WORK',
+        'Die konfigurierte tägliche Arbeitszeit wird überschritten.',
+        {
+          localDate: overLimitDay.local_date,
+          existingMinutes,
+          candidateMinutes,
+          dailyWorkMinutes: existingMinutes + candidateMinutes,
+          maximumDailyMinutes
+        },
+        'maximum_daily_minutes'
+      );
+    }
+  }
+
   return { resolved, findings, profileVersionId };
 }
 

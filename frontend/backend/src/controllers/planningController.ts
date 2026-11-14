@@ -53,6 +53,7 @@ const ruleSchema = z.object({
   code: z.enum([
     'minimum_rest_minutes',
     'maximum_shift_minutes',
+    'maximum_daily_minutes',
     'maximum_weekly_minutes',
     'overtime_threshold_weekly_minutes',
     'minimum_break_minutes',
@@ -74,7 +75,7 @@ const ruleSchema = z.object({
   severity: z.enum(['warning', 'blocking']).default('blocking')
 }).strict().superRefine((rule, ctx) => {
   const numericCodes = new Set([
-    'minimum_rest_minutes', 'maximum_shift_minutes', 'maximum_weekly_minutes',
+    'minimum_rest_minutes', 'maximum_shift_minutes', 'maximum_daily_minutes', 'maximum_weekly_minutes',
     'overtime_threshold_weekly_minutes',
     'minimum_break_minutes', 'break_after_minutes',
     'night_window_start_minute', 'night_window_end_minute'

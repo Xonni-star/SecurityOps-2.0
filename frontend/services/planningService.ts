@@ -227,6 +227,7 @@ export interface ShiftSwap {
 export type PlanningRuleCode =
   | 'minimum_rest_minutes'
   | 'maximum_shift_minutes'
+  | 'maximum_daily_minutes'
   | 'maximum_weekly_minutes'
   | 'overtime_threshold_weekly_minutes'
   | 'minimum_break_minutes'
