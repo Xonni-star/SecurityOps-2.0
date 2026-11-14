@@ -235,8 +235,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
   test('site-scoped sync grants authorize only mutations for their assigned site', async () => {
     const siteB = await withTenantTransaction(testTenantA, async tx => {
       const client = await tx.query(
-        `INSERT INTO clients (tenant_id,client_number,company_name,contract_start,contract_end)
-         VALUES ($1,$2,'Site Scope Test','2025-01-01','2026-01-01') RETURNING id`,
+        `INSERT INTO clients
+          (tenant_id,client_number,company_name,contact_person,email,phone,address,contract_start,contract_end)
+         VALUES ($1,$2,'Site Scope Test','Scope contact','scope-sync@example.test','030','Test address','2025-01-01','2026-01-01')
+         RETURNING id`,
         [testTenantA, `SITE-SCOPE-${Date.now()}`]
       );
       const site = await tx.query(
@@ -261,11 +263,11 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       return { id: site.rows[0].id as string, employeeId: employee.rows[0].id as string };
     });
 
-    const roleId = (await pool.query(
+    const roleId = (await migrationPool.query(
       `INSERT INTO tenant_roles (tenant_id,name,description) VALUES ($1,$2,'Site-scoped sync test') RETURNING id`,
       [testTenantA, `SiteSync_${Date.now()}`]
     )).rows[0].id as string;
-    await pool.query(
+    await migrationPool.query(
       `INSERT INTO tenant_role_permissions (tenant_id,role_id,permission_id,site_id,data_scope)
        SELECT $1,$2,p.id,$3,'SITE' FROM permissions p WHERE p.code=ANY($4::text[])`,
       [testTenantA, roleId, siteAId, ['logbook:create', 'employees:read', 'users:read']]
@@ -276,7 +278,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       [`site.scoped.${Date.now()}@secops.local`]
     )).rows[0].id as string;
     await insertTenantMembership(testTenantA, siteScopedUserId);
-    await pool.query(
+    await migrationPool.query(
       `INSERT INTO tenant_user_roles (tenant_id,user_id,role_id) VALUES ($1,$2,$3)`,
       [testTenantA, siteScopedUserId, roleId]
     );
@@ -286,7 +288,7 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       [`site.assignment.target.${Date.now()}@secops.local`]
     )).rows[0].id as string;
     await insertTenantMembership(testTenantA, siteScopedTargetUserId);
-    await pool.query(
+    await migrationPool.query(
       `INSERT INTO tenant_user_roles (tenant_id,user_id,role_id,site_id)
        VALUES ($1,$2,$3,$4),($1,$2,$3,$5)`,
       [testTenantA, siteScopedTargetUserId, roleId, siteAId, siteB.id]

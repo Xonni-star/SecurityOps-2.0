@@ -174,7 +174,7 @@ export async function getMutationSiteIds(
       ? payload.roundId
       : payload.id;
   let lookup: [string, unknown] | null = null;
-  if (typeof id === 'string') {
+  if (typeof id === 'string' && z.string().uuid().safeParse(id).success) {
     if (entityType === 'shift') lookup = ['SELECT site_id FROM shifts WHERE tenant_id=$1 AND id=$2', id];
     else if (entityType === 'key') lookup = ['SELECT site_id FROM keys WHERE tenant_id=$1 AND id=$2', id];
     else if (entityType === 'guardbook' && action === 'UPDATE') {

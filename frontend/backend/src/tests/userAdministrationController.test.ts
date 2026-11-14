@@ -232,7 +232,7 @@ describe('user administration security controls', () => {
 
     const [sql, values] = transaction.query.mock.calls[0];
     expect(values).toEqual([tenantId, '55555555-5555-4555-8555-555555555555']);
-    expect(String(sql)).toContain('AND ($2 IS NULL OR tur.site_id=$2)');
-    expect(String(sql).match(/tur\.site_id=\$2/g)).toHaveLength(2);
+    expect(String(sql)).toContain('AND ($2::uuid IS NULL OR tur.site_id=$2::uuid)');
+    expect(String(sql).match(/tur\.site_id=\$2::uuid/g)).toHaveLength(2);
   });
 });
