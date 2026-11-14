@@ -67,7 +67,8 @@ npm run dev
 | `JWT_SECRET` | **ja (Legacy-Konfigurationsprüfung)** | Mindestens 32 Zeichen; aktuelle Sitzung verwendet opake Cookies und signiert keine JWTs |
 | `JWT_EXPIRES_IN` | nein | Sitzungsdauer im Format `<Zahl><s\|m\|h\|d>`, z. B. `8h` |
 | `CORS_ORIGIN` | **ja** | Kommagetrennte Whitelist, z. B. `http://localhost:3000` |
-| `RATE_LIMIT_MAX` | nein | Globales per-IP-Limit je Minute (Standard `120`); In-Memory-Zähler ist nicht zwischen Backend-Replikas geteilt |
+| `RATE_LIMIT_MAX` | nein | Globales per-IP-Limit je Minute (Standard `120`) |
+| `RATE_LIMIT_REDIS_URL` | Entwicklung: nein; Produktion: **ja** | Gemeinsamer Redis-Store für API-Limits; alle Backend-Replikas müssen dieselbe Redis-Instanz verwenden |
 
 Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich unsicheren Secrets.
 
