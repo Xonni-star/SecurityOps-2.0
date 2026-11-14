@@ -34,6 +34,12 @@ function shiftConflict(serverPayload?: Record<string, unknown>) {
     conflictDetails: {
       clientVersion: 1,
       serverVersion: 2,
+      clientPayload: {
+        id: 'shift-a',
+        shift_date: '2026-11-14',
+        start_time: '08:00',
+        revision_version: 1
+      },
       ...(serverPayload ? { serverPayload } : {})
     }
   };
@@ -86,6 +92,9 @@ describe('SyncManagerModal shift conflict snapshots', () => {
     await act(async () => openConflict.click());
 
     expect(container.textContent).toContain('"shift_date": "2026-11-14"');
+    expect(container.textContent).toContain('"start_time": "08:00"');
+    expect(container.textContent).toContain('Revision 1');
+    expect(container.textContent).toContain('Revision 2');
     expect(container.textContent).not.toContain('Konfliktauflösung ist gesperrt');
     const useLocal = Array.from(container.querySelectorAll('button'))
       .find(button => button.textContent?.includes('Lokale Version durchsetzen'));
@@ -110,5 +119,31 @@ describe('SyncManagerModal shift conflict snapshots', () => {
     expect(decisions).toHaveLength(2);
     expect(decisions.every(button => button.disabled)).toBe(true);
     expect(mocks.store.resolveConflict).not.toHaveBeenCalled();
+  });
+
+  test('shows server rejection details and keeps failed items retryable', async () => {
+    mocks.store.syncQueue = [{
+      ...shiftConflict(),
+      status: 'failed',
+      errorMessage: 'HTTP 403: Fehlende Berechtigung'
+    }];
+    await act(async () => root.render(<SyncManagerModal isOpen onClose={vi.fn()} />));
+
+    expect(container.textContent).toContain('HTTP 403: Fehlende Berechtigung');
+    const retry = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('Jetzt Synchronisieren'));
+    expect(retry?.disabled).toBe(false);
+    expect(container.textContent).toContain('Warteschlange (1)');
+  });
+
+  test('does not present fabricated storage estimates when the browser lacks support', async () => {
+    mocks.getStorageEstimates.mockResolvedValue(null);
+    await act(async () => root.render(<SyncManagerModal isOpen onClose={vi.fn()} />));
+    const storageTab = Array.from(container.querySelectorAll('button'))
+      .find(button => button.textContent?.includes('IndexedDB Speicher'));
+    await act(async () => storageTab?.click());
+
+    expect(container.textContent).toContain('Dieser Browser stellt keine verlässliche Speicherbelegung bereit.');
+    expect(container.textContent).not.toContain('1.19 MB');
   });
 });
