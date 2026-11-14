@@ -6,7 +6,7 @@
 
 **Integration branch:** `xonni-star-phase3-pr-integration`, based on `main` at `b94e21d0aab727eadabedd69995956edaa39a44f`.
 
-**Integration pull request:** Not yet created.
+**Integration pull request:** [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25), open against `main`; integration CI pending.
 
 ## What is already in `main`
 
