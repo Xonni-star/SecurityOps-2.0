@@ -17,13 +17,13 @@ Alle folgenden Pfade liegen unter `/api/v1`. Erfolgsantworten verwenden `{ "succ
 | Methode und Pfad | Routenberechtigung | Zweck |
 |---|---|---|
 | `GET /admin/users?q=&status=&roleId=&siteId=` | `users:read` | Suche nach Name/E-Mail; optionale Filter `ACTIVE`, `INACTIVE`, `LOCKED`, Rolle und Objekt |
-| `POST /admin/users` | `users:manage` | Konto, Mitgliedschaft und erste Rollenzuordnung anlegen; gibt einmaligen Reset-Token zurück |
+| `POST /admin/users` | `users:manage` | Konto, Mitgliedschaft und erste Rollenzuordnung anlegen und Passwort-Reset-E-Mail zustellen |
 | `GET /admin/users/:id` | `users:read` | Mandantenmitgliedschaft, Profil und Rollenzuordnungen |
 | `PATCH /admin/users/:id` | `users:manage` | Vorname, Nachname und Telefon aktualisieren |
 | `POST /admin/users/:id/status/:action` | `users:manage` | `activate`, `deactivate`, `lock` oder `unlock` |
 | `POST /admin/users/:id/roles` | `users:manage` | Mandantenrolle optionalen Site-IDs zuordnen |
 | `DELETE /admin/users/:id/roles/:assignmentId` | `users:manage` | Eine Rollenzuordnung entfernen |
-| `POST /admin/users/:id/password-reset` | `users:manage` | Einmaligen, 30 Minuten gültigen Reset-Token vorbereiten |
+| `POST /admin/users/:id/password-reset` | `users:manage` | Einmaligen, 30 Minuten gültigen Reset-Token per E-Mail zustellen |
 | `GET /admin/users/:id/audit` | `users:read` | Bis zu 100 Audit-Ereignisse des Benutzers zurückgeben |
 | `POST /auth/password` | Authentifizierte Sitzung | Eigenes Passwort ändern; aktuelles Passwort und neues Passwort mit 12–256 Zeichen erforderlich |
 | `POST /auth/password-reset/complete` | Reset-Token | Zurücksetzung mit Tenant-ID, Token und neuem Passwort abschließen |
@@ -41,7 +41,7 @@ Anfrage zum Anlegen eines Benutzers:
 }
 ```
 
-Die Einrichtung des Passworts erfolgt über den zurückgegebenen Reset-Token; dem Konto wird kein vorhersagbares Standardpasswort zugewiesen. Klartext-Tokens werden nicht gespeichert, nur einmal zurückgegeben, laufen nach 30 Minuten ab und werden bei Ersetzung oder Nutzung ungültig. Es gibt keinen E-Mail-/SMS-Anbieter; ein Administrator muss den Token über einen sicheren separaten Kanal zustellen. Deaktivierung, Sperre und Rollenänderungen widerrufen betroffene Sitzungen im Mandanten. Eine Passwortänderung widerruft andere Sitzungen über alle Mitgliedschaften hinweg; eine abgeschlossene Zurücksetzung widerruft alle Sitzungen. Passworthashes verwenden Argon2id.
+Dem Konto wird kein vorhersagbares Standardpasswort zugewiesen. Der Klartext-Token wird weder in der API-Antwort noch in Logs oder Auditdetails ausgegeben, sondern nur an den konfigurierten E-Mail-Provider übergeben. Er wird nicht gespeichert, läuft nach 30 Minuten ab und wird bei Ersetzung oder Nutzung ungültig. Ohne registrierten Provider antworten Benutzeranlage und Reset-Vorbereitung mit HTTP 503; es wird kein Token angelegt und keine Zustellung behauptet. Der Backend-Vertrag dafür ist `PasswordResetDeliveryProvider` unter `backend/src/services/passwordResetDelivery.ts`; ein konkreter E-Mail-Dienst und dessen Zugangsdaten sind nicht enthalten und müssen durch das Deployment bereitgestellt werden. Deaktivierung, Sperre und Rollenänderungen widerrufen betroffene Sitzungen im Mandanten. Eine Passwortänderung widerruft andere Sitzungen über alle Mitgliedschaften hinweg; eine abgeschlossene Zurücksetzung widerruft alle Sitzungen. Passworthashes verwenden Argon2id.
 
 ## Rollen- und Berechtigungsendpunkte
 
