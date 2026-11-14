@@ -2373,7 +2373,7 @@ export async function workHoursReport(req: Request, res: Response, next: NextFun
                  WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id AND a.status='assigned'
               )
          )
-         SELECT s.id AS shift_id,s.site_id,si.time_zone,s.shift_date::text AS shift_date,
+         SELECT s.id AS shift_id,s.site_id,s.time_zone,s.shift_date::text AS shift_date,
                 s.starts_at,s.ends_at,s.break_minutes,a.employee_id,
                 e.personnel_number,e.first_name,e.last_name,
                 t.actual_start_at,t.actual_end_at,t.break_minutes AS actual_break_minutes,
