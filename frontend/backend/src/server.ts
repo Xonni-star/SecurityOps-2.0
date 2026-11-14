@@ -3,12 +3,14 @@ import { env } from './config/env';
 import { verifyAppDatabaseRole } from './config/database';
 import { startAlarmEscalationWorker, stopAlarmEscalationWorker } from './services/alarmEscalationWorker';
 import { startPatrolScheduleWorker, stopPatrolScheduleWorker } from './services/patrolScheduleWorker';
+import { connectRateLimitRedis } from './config/rateLimitRedis';
 
 async function bootstrap() {
   try {
     // 3. Vor dem Start des HTTP-Servers die Datenbankrolle zwingend verifizieren:
     // Der Anwendungsbenutzer DARF KEIN Superuser und KEIN BYPASSRLS sein!
     await verifyAppDatabaseRole();
+    await connectRateLimitRedis();
 
     const server = app.listen(env.PORT, () => {
       console.log(`[SECURITYOPS 2.0 BACKEND] Gestartet auf Port ${env.PORT} (${env.NODE_ENV}).`);
