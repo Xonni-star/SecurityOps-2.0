@@ -571,6 +571,83 @@ export async function validateShiftCandidate(
     }
   }
 
+  const maximumMonthlyMinutes = numericRule(rules, 'maximum_monthly_minutes');
+  if (maximumMonthlyMinutes !== undefined) {
+    const firstLocalDate = dateAtInstant(resolved.startsAt, resolved.timeZone);
+    const lastLocalDate = dateAtInstant(
+      new Date(resolved.endsAt.getTime() - 1),
+      resolved.timeZone
+    );
+    const monthlyWork = await client.query(
+      `WITH months AS (
+         SELECT month_start::date AS local_month_start,
+                month_start AT TIME ZONE $8 AS month_start_at,
+                (month_start + interval '1 month') AT TIME ZONE $8 AS month_end_at
+           FROM generate_series(
+             date_trunc('month', $3::date)::timestamp,
+             date_trunc('month', $4::date)::timestamp,
+             interval '1 month'
+           ) AS generated(month_start)
+       ), work_shifts AS (
+         SELECT s.starts_at, s.ends_at, s.break_minutes, FALSE AS is_candidate
+           FROM shifts s
+          WHERE s.tenant_id=$1 AND s.id IS DISTINCT FROM $5::uuid
+            AND s.planning_status <> 'cancelled'
+            AND s.starts_at < ((date_trunc('month', $4::date) + interval '1 month') AT TIME ZONE $8)
+            AND s.ends_at > (date_trunc('month', $3::date)::timestamp AT TIME ZONE $8)
+            AND (s.employee_id=$2 OR EXISTS (
+              SELECT 1 FROM shift_staffing_assignments a
+               WHERE a.tenant_id=s.tenant_id AND a.shift_id=s.id
+                 AND a.employee_id=$2 AND a.status='assigned'
+            ))
+         UNION ALL
+         SELECT $6::timestamptz, $7::timestamptz, $9::integer, TRUE
+       ), split_shifts AS (
+         SELECT m.local_month_start,
+                w.is_candidate,
+                EXTRACT(EPOCH FROM (LEAST(w.ends_at,m.month_end_at)-GREATEST(w.starts_at,m.month_start_at))) / 60 AS segment_minutes,
+                EXTRACT(EPOCH FROM (w.ends_at-w.starts_at)) / 60 AS shift_minutes,
+                w.break_minutes
+           FROM work_shifts w
+           JOIN months m ON w.starts_at < m.month_end_at AND w.ends_at > m.month_start_at
+       )
+       SELECT local_month_start::text AS local_month_start,
+              COALESCE(SUM(GREATEST(0, segment_minutes -
+                LEAST(break_minutes::numeric,shift_minutes) * segment_minutes / shift_minutes)
+                ) FILTER (WHERE NOT is_candidate),0) AS existing_minutes,
+              COALESCE(SUM(GREATEST(0, segment_minutes -
+                LEAST(break_minutes::numeric,shift_minutes) * segment_minutes / shift_minutes)
+                ) FILTER (WHERE is_candidate),0) AS candidate_minutes
+         FROM split_shifts
+        GROUP BY local_month_start
+        ORDER BY local_month_start`,
+      [
+        candidate.tenantId, candidate.employeeId, firstLocalDate, lastLocalDate,
+        candidate.excludeShiftId ?? null, resolved.startsAt, resolved.endsAt,
+        resolved.timeZone, candidate.breakMinutes ?? 0
+      ]
+    );
+    const overLimitMonth = monthlyWork.rows.find(row =>
+      Number(row.existing_minutes) + Number(row.candidate_minutes) > maximumMonthlyMinutes
+    );
+    if (overLimitMonth) {
+      const existingMinutes = Number(overLimitMonth.existing_minutes);
+      const candidateMinutes = Number(overLimitMonth.candidate_minutes);
+      addRuleFinding(
+        'MAXIMUM_MONTHLY_WORK',
+        'Die konfigurierte monatliche Arbeitszeit wird überschritten.',
+        {
+          localMonthStart: overLimitMonth.local_month_start,
+          existingMinutes,
+          candidateMinutes,
+          monthlyWorkMinutes: existingMinutes + candidateMinutes,
+          maximumMonthlyMinutes
+        },
+        'maximum_monthly_minutes'
+      );
+    }
+  }
+
   return { resolved, findings, profileVersionId };
 }
 

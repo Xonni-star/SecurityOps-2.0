@@ -55,6 +55,7 @@ const ruleSchema = z.object({
     'maximum_shift_minutes',
     'maximum_daily_minutes',
     'maximum_weekly_minutes',
+    'maximum_monthly_minutes',
     'overtime_threshold_weekly_minutes',
     'minimum_break_minutes',
     'break_after_minutes',
@@ -76,6 +77,7 @@ const ruleSchema = z.object({
 }).strict().superRefine((rule, ctx) => {
   const numericCodes = new Set([
     'minimum_rest_minutes', 'maximum_shift_minutes', 'maximum_daily_minutes', 'maximum_weekly_minutes',
+    'maximum_monthly_minutes',
     'overtime_threshold_weekly_minutes',
     'minimum_break_minutes', 'break_after_minutes',
     'night_window_start_minute', 'night_window_end_minute'
