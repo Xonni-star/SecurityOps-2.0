@@ -11,6 +11,7 @@
     "seed": "ts-node src/seeds/seed.ts",
     "test": "jest --runInBand --detectOpenHandles",
     "test:clamav-integration": "ts-node src/integration/clamavAdapter.integration.ts",
+    "test:backup-restore": "bash ../deploy/test_backup_restore.sh",
     "test:dms-api-integration": "ts-node src/integration/dmsApi.integration.ts"
   },
   "dependencies": {

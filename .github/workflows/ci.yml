@@ -212,6 +212,22 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  restore-full-schema:
+    name: Restore – vollständiges Schema und lokales DMS-Objektsnapshot
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      RESTORE_TEST_MINIO_IMAGE: ghcr.io/disaster37/minio@sha256:282ffcd2e0a3906086ab49cd70765617b20ce5c24ccf7d788043eb9b4ae59e6f
+      RESTORE_TEST_MC_IMAGE: ghcr.io/disaster37/minio@sha256:282ffcd2e0a3906086ab49cd70765617b20ce5c24ccf7d788043eb9b4ae59e6f
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Isolierten Backup-/Restore-Test ausführen
+        run: npm run test:backup-restore --prefix frontend/backend
+
   clamav-adapter-integration:
     name: ClamAV – DMS INSTREAM adapter integration
     runs-on: ubuntu-latest
