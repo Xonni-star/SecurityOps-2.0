@@ -24,7 +24,7 @@ function request(overrides: Partial<Request> = {}): Request {
     query: {},
     body: {},
     user: {
-      userId, tenantId, email: 'guard@example.test', role: 'Objektleitung',
+      userId, tenantId, email: 'guard@example.test', fullName: 'Guard User', role: 'Objektleitung',
       permissions: ['alarm:read', 'alarm:report', 'alarm:respond'], sessionHash: 'hash'
     },
     ...overrides
@@ -62,7 +62,7 @@ describe('site-scoped alarm workflow', () => {
 
     await syncAlarmMutations(request({
       user: {
-        userId, tenantId, email: 'guard@example.test', role: 'Objektleitung',
+        userId, tenantId, email: 'guard@example.test', fullName: 'Guard User', role: 'Objektleitung',
         permissions: [...permissions], sessionHash: 'hash'
       },
       body: { mutations: [{ clientMutationId: `denied-${type}`, type, payload }] }
@@ -95,7 +95,7 @@ describe('site-scoped alarm workflow', () => {
 
     await transitionAlarmIncidentV2(request({
       user: {
-        userId, tenantId, email: 'lead@example.test', role: 'Einsatzleitung',
+        userId, tenantId, email: 'lead@example.test', fullName: 'Lead User', role: 'Einsatzleitung',
         permissions: ['alarm:read', 'alarm:respond'], sessionHash: 'hash'
       },
       body: { status: 'archiviert', note: 'Archiviert', revisionVersion: 1 }

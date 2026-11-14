@@ -1,4 +1,5 @@
 import { describe, test, expect, beforeEach, vi } from 'vitest';
+import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('../services/apiClient', () => {
   const apiClient = {
@@ -23,7 +24,7 @@ vi.mock('../services/apiClient', () => {
 });
 
 import { useSecurityStore } from '../store';
-import { apiClient } from '../services/apiClient';
+import { apiClient, ApiError } from '../services/apiClient';
 import { offlineVault, type StoredSOPAcknowledgement } from '../services/indexedDbService';
 
 const mockedApi = apiClient as unknown as {
@@ -31,7 +32,6 @@ const mockedApi = apiClient as unknown as {
   post: ReturnType<typeof vi.fn>;
   patch: ReturnType<typeof vi.fn>;
   setCsrfToken: ReturnType<typeof vi.fn>;
-  post: ReturnType<typeof vi.fn>;
 };
 const durableSOPQueue = new Map<string, StoredSOPAcknowledgement>();
 
@@ -217,9 +217,322 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
 
     expect(state.guardBook[0].title).toBe('API Wachbucheintrag');
     expect(state.guardBook[0].siteId).toBe(siteRow.id);
-
     expect(state.isLoadingData).toBe(false);
     expect(state.dataLoadError).toBeNull();
+  });
+
+  test('replays the authenticated outbox after restoring a session while already online', async () => {
+    mockReadEndpoints();
+    const readEndpoint = mockedApi.get.getMockImplementation();
+    mockedApi.get.mockImplementation((endpoint: string) => endpoint === '/auth/me'
+      ? Promise.resolve({
+        id: 'restored-user',
+        tenantId: 'tenant-frankfurt',
+        permissions: ['shifts:manage']
+      })
+      : readEndpoint!(endpoint));
+    const queued = {
+      id: 'restored-shift-mutation',
+      tenantId: 'tenant-frankfurt',
+      userId: 'restored-user',
+      entityType: 'shift',
+      action: 'CREATE',
+      payload: { siteId: siteRow.id, date: '2026-11-13' },
+      occurredAt: '2026-11-13T10:00:00.000Z',
+      baseVersion: 1,
+      retryCount: 0,
+      status: 'PENDING'
+    };
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([queued] as any);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
+    vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    mockedApi.post.mockResolvedValueOnce([{
+      clientUuid: queued.id,
+      serverId: 'server-shift',
+      status: 'SYNCED',
+      serverVersion: 1
+    }]);
+
+    await useSecurityStore.getState().restoreSession();
+    await vi.waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith('/sync/push', expect.objectContaining({
+      mutations: [expect.objectContaining({ clientUuid: queued.id })]
+    })));
+
+    expect(useSecurityStore.getState().currentUserId).toBe('restored-user');
+    expect(offlineVault.getPendingOutbox).toHaveBeenCalledWith('tenant-frankfurt', 'restored-user');
+    expect(offlineVault.markSynced).toHaveBeenCalledWith(queued.id);
+  });
+
+  test('replays only exact current-user ownership in a same-tenant outbox and quarantines unknown owners', async () => {
+    const ownerA = {
+      id: 'owner-a-mutation', tenantId: 'tenant-frankfurt', userId: 'user-a',
+      entityType: 'shift', action: 'CREATE', payload: { date: '2026-11-13' },
+      occurredAt: '2026-11-13T10:00:00.000Z', baseVersion: 1, retryCount: 0, status: 'PENDING'
+    };
+    const ownerB = {
+      ...ownerA, id: 'owner-b-mutation', userId: 'user-b', entityType: 'handover'
+    };
+    const unknownOwner = {
+      ...ownerA, id: 'unknown-owner-mutation', userId: undefined, entityType: 'task'
+    };
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([ownerA, ownerB, unknownOwner] as any);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([{ ...ownerB, status: 'SYNCED' }] as any);
+    vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    mockedApi.post.mockResolvedValueOnce([{
+      clientUuid: ownerB.id,
+      serverId: 'server-shift-b',
+      status: 'SYNCED',
+      serverVersion: 1
+    }]);
+    useSecurityStore.setState({
+      isOnline: true,
+      currentTenantId: 'tenant-frankfurt',
+      currentUserId: 'user-b',
+      isAuthenticated: true,
+      authUser: {
+        id: 'user-b', email: '', fullName: '', role: '',
+        tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['shifts:manage']
+      }
+    });
+
+    const result = await useSecurityStore.getState().triggerManualSync();
+
+    expect(result).toMatchObject({ success: 1, failed: 0, conflicts: 0 });
+    expect(offlineVault.getPendingOutbox).toHaveBeenCalledWith('tenant-frankfurt', 'user-b');
+    expect(mockedApi.post).toHaveBeenCalledWith('/handovers/sync', expect.objectContaining({
+      mutations: [expect.objectContaining({ clientUuid: ownerB.id })]
+    }));
+    expect(JSON.stringify(mockedApi.post.mock.calls)).not.toContain(ownerA.id);
+    expect(JSON.stringify(mockedApi.post.mock.calls)).not.toContain(unknownOwner.id);
+    expect(useSecurityStore.getState().syncQueue.map(item => item.userId)).toEqual(['user-b']);
+  });
+
+  test('reopens the IndexedDB outbox and replays the persisted mutation with the same ID', async () => {
+    const originalIndexedDB = globalThis.indexedDB;
+    Object.defineProperty(globalThis, 'indexedDB', {
+      configurable: true,
+      value: new IDBFactory()
+    });
+    offlineVault.close();
+    try {
+      const mutation = {
+        id: 'persisted-mutation-id',
+        tenantId: 'tenant-frankfurt',
+        userId: 'user-regression',
+        entityType: 'task' as const,
+        action: 'CREATE' as const,
+        payload: { title: 'Persisted offline task' },
+        occurredAt: '2026-11-13T10:00:00.000Z',
+        baseVersion: 1
+      };
+      await offlineVault.enqueueMutation(mutation);
+      offlineVault.close();
+      mockedApi.post.mockResolvedValueOnce([{
+        clientUuid: mutation.id,
+        status: 'SYNCED',
+        serverVersion: 1
+      }]);
+      useSecurityStore.setState({
+        isOnline: true,
+        isAuthenticated: true,
+        currentTenantId: mutation.tenantId,
+        currentUserId: mutation.userId,
+        authUser: {
+          id: mutation.userId, email: '', fullName: '', role: '',
+          tenantId: mutation.tenantId, tenantName: '', permissions: ['tasks:manage']
+        }
+      });
+
+      const result = await useSecurityStore.getState().triggerManualSync();
+
+      expect(result.success).toBe(1);
+      expect(mockedApi.post).toHaveBeenCalledWith('/sync/push', expect.objectContaining({
+        mutations: [expect.objectContaining({ clientUuid: mutation.id, payload: mutation.payload })]
+      }));
+      expect(await offlineVault.getOutbox(mutation.tenantId, undefined, mutation.userId)).toHaveLength(0);
+    } finally {
+      offlineVault.close();
+      Object.defineProperty(globalThis, 'indexedDB', {
+        configurable: true,
+        value: originalIndexedDB
+      });
+    }
+  });
+
+  test('keeps denied mutations visible with the server error and allows retry', async () => {
+    const mutation = {
+      id: 'denied-mutation',
+      tenantId: 'tenant-frankfurt',
+      userId: 'user-regression',
+      entityType: 'task',
+      action: 'CREATE',
+      payload: { title: 'Denied task' },
+      occurredAt: '2026-11-13T10:00:00.000Z',
+      baseVersion: 1,
+      retryCount: 0,
+      status: 'PENDING'
+    };
+    const updateStatus = vi.spyOn(offlineVault, 'updateMutationStatus').mockResolvedValue(undefined);
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([mutation] as any);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([{
+      ...mutation, status: 'FAILED', errorMessage: 'HTTP 403: Fehlende Berechtigung'
+    }] as any);
+    mockedApi.post.mockRejectedValueOnce(new ApiError(403, 'Fehlende Berechtigung'));
+    useSecurityStore.setState({
+      isOnline: true,
+      isAuthenticated: true,
+      currentTenantId: mutation.tenantId,
+      currentUserId: mutation.userId,
+      authUser: {
+        id: mutation.userId, email: '', fullName: '', role: '',
+        tenantId: mutation.tenantId, tenantName: '', permissions: []
+      }
+    });
+
+    const result = await useSecurityStore.getState().triggerManualSync();
+
+    expect(result).toMatchObject({ success: 0, failed: 1, conflicts: 0 });
+    expect(updateStatus).toHaveBeenCalledWith(mutation.id, 'FAILED', {
+      errorMessage: 'HTTP 403: Fehlende Berechtigung'
+    });
+    expect(useSecurityStore.getState().syncQueue).toEqual([
+      expect.objectContaining({ id: mutation.id, status: 'failed', errorMessage: 'HTTP 403: Fehlende Berechtigung' })
+    ]);
+  });
+
+  test('does not discard a mutation for an unrelated or unmatched server receipt', async () => {
+    const mutation = {
+      id: 'expected-mutation',
+      tenantId: 'tenant-frankfurt',
+      userId: 'user-regression',
+      entityType: 'task',
+      action: 'CREATE',
+      payload: { title: 'Expected task' },
+      occurredAt: '2026-11-13T10:00:00.000Z',
+      baseVersion: 1,
+      retryCount: 0,
+      status: 'PENDING'
+    };
+    const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([mutation] as any);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([mutation] as any);
+    mockedApi.post.mockResolvedValueOnce([{
+      clientUuid: 'unrelated-mutation',
+      status: 'SYNCED',
+      serverVersion: 1
+    }]);
+    useSecurityStore.setState({
+      isOnline: true,
+      isAuthenticated: true,
+      currentTenantId: mutation.tenantId,
+      currentUserId: mutation.userId,
+      authUser: {
+        id: mutation.userId, email: '', fullName: '', role: '',
+        tenantId: mutation.tenantId, tenantName: '', permissions: ['tasks:manage']
+      }
+    });
+
+    const result = await useSecurityStore.getState().triggerManualSync();
+
+    expect(result.success).toBe(0);
+    expect(markSynced).not.toHaveBeenCalled();
+    expect(useSecurityStore.getState().syncQueue).toEqual([
+      expect.objectContaining({ id: mutation.id, status: 'pending' })
+    ]);
+  });
+
+  test('does not apply a sync receipt after the active identity changes in flight', async () => {
+    const mutation = {
+      id: 'switch-in-flight-mutation',
+      tenantId: 'tenant-frankfurt',
+      userId: 'user-a',
+      entityType: 'task',
+      action: 'CREATE',
+      payload: { title: 'User A task' },
+      occurredAt: '2026-11-13T10:00:00.000Z',
+      baseVersion: 1,
+      retryCount: 0,
+      status: 'PENDING'
+    };
+    let resolvePost!: (receipt: unknown) => void;
+    const post = vi.spyOn(mockedApi, 'post').mockReturnValueOnce(
+      new Promise(resolve => { resolvePost = resolve; })
+    );
+    const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([mutation] as any);
+    useSecurityStore.setState({
+      isOnline: true,
+      isAuthenticated: true,
+      currentTenantId: mutation.tenantId,
+      currentUserId: mutation.userId,
+      authUser: {
+        id: mutation.userId, email: '', fullName: '', role: '',
+        tenantId: mutation.tenantId, tenantName: '', permissions: ['tasks:manage']
+      }
+    });
+
+    const sync = useSecurityStore.getState().triggerManualSync();
+    await vi.waitFor(() => expect(post).toHaveBeenCalledOnce());
+    useSecurityStore.setState({
+      currentUserId: 'user-b',
+      authUser: {
+        id: 'user-b', email: '', fullName: '', role: '',
+        tenantId: mutation.tenantId, tenantName: '', permissions: []
+      },
+      syncQueue: []
+    });
+    resolvePost([{ clientUuid: mutation.id, status: 'SYNCED', serverVersion: 1 }]);
+    await sync;
+
+    expect(markSynced).not.toHaveBeenCalled();
+    expect(useSecurityStore.getState().syncQueue).toHaveLength(0);
+  });
+
+  test('logout removes tenant data from memory', async () => {
+    useSecurityStore.setState({
+      authUser: {
+        id: 'user-regression', email: '', fullName: '', role: '',
+        tenantId: 'tenant-frankfurt', tenantName: '', permissions: []
+      },
+      isAuthenticated: true,
+      clients: [{ id: 'private-client' }] as any,
+      tasks: [{ id: 'private-task' }] as any,
+      patrolScans: [{ id: 'private-scan' }] as any,
+      syncQueue: [{ id: 'private-mutation' }] as any
+    });
+
+    await useSecurityStore.getState().logout();
+
+    const state = useSecurityStore.getState();
+    expect(state.isAuthenticated).toBe(false);
+    expect(state.currentUserId).toBe('');
+    expect(state.clients).toHaveLength(0);
+    expect(state.tasks).toHaveLength(0);
+    expect(state.patrolScans).toHaveLength(0);
+    expect(state.syncQueue).toHaveLength(0);
+  });
+
+  test('failed session restoration removes tenant data from memory', async () => {
+    mockedApi.get.mockRejectedValueOnce(new Error('Unauthorized'));
+    useSecurityStore.setState({
+      authUser: {
+        id: 'user-regression', email: '', fullName: '', role: '',
+        tenantId: 'tenant-frankfurt', tenantName: '', permissions: []
+      },
+      isAuthenticated: true,
+      clients: [{ id: 'private-client' }] as any,
+      tasks: [{ id: 'private-task' }] as any,
+      syncQueue: [{ id: 'private-mutation' }] as any
+    });
+
+    await useSecurityStore.getState().restoreSession();
+
+    const state = useSecurityStore.getState();
+    expect(state.isAuthenticated).toBe(false);
+    expect(state.currentUserId).toBe('');
+    expect(state.clients).toHaveLength(0);
+    expect(state.tasks).toHaveLength(0);
+    expect(state.syncQueue).toHaveLength(0);
   });
 
   test('loadTenantData überspringt /sops ohne sop:read oder sop:manage', async () => {
@@ -440,9 +753,13 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
   test('Mitarbeiteränderungen bleiben bis zur bestätigten Outbox-Synchronisierung lokal erhalten', async () => {
     const enqueue = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
     const readPending = vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([]);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
     const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined as any);
     vi.spyOn(offlineVault, 'getDeviceId').mockReturnValue('employee-device');
-    useSecurityStore.setState({ isOnline: false, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-offline' });
+    useSecurityStore.setState({
+      isOnline: false, isAuthenticated: true, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-offline',
+      authUser: { id: 'user-offline', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['employees:manage'] }
+    });
 
     await useSecurityStore.getState().addEmployee({
       personnelNumber: 'MA-OFFLINE-1',
@@ -465,6 +782,7 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     const queuedMutation = {
       id: queued.id,
       tenantId: queued.tenantId,
+      userId: queued.userId,
       entityType: queued.entityType,
       action: queued.action,
       payload: queued.payload,
@@ -489,12 +807,15 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
   test('Mitarbeiter- und Qualifikations-Updates behalten IDs, Revisionen und NULL-Werte in der Outbox', async () => {
     const enqueue = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
     const readPending = vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([]);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
     const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined as any);
     vi.spyOn(offlineVault, 'getDeviceId').mockReturnValue('employee-device');
     useSecurityStore.setState({
       isOnline: false,
+      isAuthenticated: true,
       currentTenantId: 'tenant-frankfurt',
       currentUserId: 'user-offline',
+      authUser: { id: 'user-offline', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['employees:manage'] },
       employees: [{
         id: employeeRow.id, tenantId: 'tenant-frankfurt', revisionVersion: 4, synced: true,
         firstName: 'Erika', lastName: 'Muster', personnelNumber: 'MA-API-1', email: 'erika@test.de',
@@ -523,7 +844,7 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(enqueue).toHaveBeenCalledTimes(2);
 
     const asOutbox = (item: (typeof queued)[number]) => ({
-      id: item.id, tenantId: item.tenantId, entityType: item.entityType, action: item.action,
+      id: item.id, tenantId: item.tenantId, userId: item.userId, entityType: item.entityType, action: item.action,
       payload: item.payload, occurredAt: item.createdAt, baseVersion: item.baseVersion ?? 1,
       retryCount: 0, status: 'PENDING'
     });
@@ -721,11 +1042,16 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
 
   test('Standortänderungen werden offline mit Basisrevision in der Outbox gesichert und an Site-Sync gesendet', async () => {
     const mutationWrite = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
-    useSecurityStore.setState({ isOnline: false, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-regression', sites: [{
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
+    useSecurityStore.setState({
+      isOnline: false, isAuthenticated: true, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-regression',
+      authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sites:manage'] },
+      sites: [{
       id: siteRow.id, tenantId: 'tenant-frankfurt', clientId: customerRow.id, clientName: customerRow.company_name,
       siteCode: siteRow.site_code, name: siteRow.name, address: siteRow.address, securityLevel: 'Mittel',
       siteManagerId: '', siteManagerName: '', requiredGuardsDay: 1, requiredGuardsNight: 1, checkpoints: [], alarmSystem: '', instructionsCount: 0, accessRules: '', activeAlarms: 0, revisionVersion: 7
-    }] });
+      }]
+    });
 
     await useSecurityStore.getState().updateSite(siteRow.id, { name: 'Lokal geändert' });
     expect(mutationWrite).toHaveBeenCalledWith(expect.objectContaining({ entityType: 'site', action: 'UPDATE', baseVersion: 7, payload: expect.objectContaining({ name: 'Lokal geändert' }) }));

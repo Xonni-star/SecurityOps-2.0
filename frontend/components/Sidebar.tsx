@@ -57,6 +57,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
   const canAccessPatrol = Boolean(authUser?.permissions.some(permission =>
     ['patrol:read', 'patrol:create', 'patrol:manage'].includes(permission)
   ));
+  const canAccessUserAdmin = Boolean(authUser?.permissions.some(permission =>
+    ['users:read', 'users:manage', 'roles:read', 'roles:manage'].includes(permission)
+  ));
 
   const menuSections = [
     {
@@ -97,6 +100,12 @@ export const Sidebar: React.FC<SidebarProps> = ({ onCloseMobileMenu }) => {
         { id: 'e2e_acceptance', label: 'E2E-Abnahme & Release 1.0', icon: Award, visible: canAccessAdmin },
         { id: 'security_audit', label: 'Sicherheits-Audit & DSGVO', icon: ShieldCheck, visible: canAccessAdmin },
         { id: 'architecture', label: 'Backend & DB Blueprint', icon: Code2, visible: canAccessAdmin }
+      ]
+    },
+    {
+      title: 'SYSTEMVERWALTUNG',
+      items: [
+        { id: 'user_admin', label: 'Benutzer & Berechtigungen', icon: ShieldCheck, visible: canAccessUserAdmin }
       ]
     }
   ];

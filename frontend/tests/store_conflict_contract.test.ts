@@ -8,10 +8,14 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
 
   beforeEach(() => {
     useSecurityStore.setState({
+      currentTenantId: 'tenant-frankfurt',
+      currentUserId: 'user-conflict-test',
+      authUser: null,
       syncQueue: [
         {
           id: queueId,
           tenantId: 'tenant-frankfurt',
+          userId: 'user-conflict-test',
           entityType: 'task',
           action: 'UPDATE',
           payload: { id: 'task-123', status: 'In Bearbeitung', title: 'Testaufgabe' },
@@ -134,5 +138,53 @@ describe('SecurityOps 2.0 - Frontend Store Konfliktauflösung & API-Vertragstest
 
     const state = useSecurityStore.getState();
     expect(state.syncQueue.find((q) => q.id === queueId)).toBeDefined();
+  });
+
+  test('refuses to resolve a conflict owned by another same-tenant user', async () => {
+    const post = vi.spyOn(apiClient, 'post');
+    useSecurityStore.setState({
+      authUser: {
+        id: 'different-user', email: '', fullName: '', role: '',
+        tenantId: 'tenant-frankfurt', tenantName: '', permissions: []
+      }
+    });
+
+    await expect(
+      useSecurityStore.getState().resolveConflict(queueId, 'USE_LOCAL')
+    ).rejects.toThrow('Konflikt gehört nicht zur aktuellen Mandanten- und Benutzeridentität');
+    expect(post).not.toHaveBeenCalled();
+    expect(useSecurityStore.getState().syncQueue.find((q) => q.id === queueId)).toBeDefined();
+  });
+
+  test('does not apply a confirmed server snapshot to a different identity after an in-flight resolution', async () => {
+    let resolvePost!: (response: unknown) => void;
+    vi.spyOn(apiClient, 'post').mockReturnValueOnce(
+      new Promise(resolve => { resolvePost = resolve; })
+    );
+    const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    const resolve = useSecurityStore.getState().resolveConflict(queueId, 'USE_SERVER');
+    await vi.waitFor(() => expect(apiClient.post).toHaveBeenCalledOnce());
+    useSecurityStore.setState({
+      currentUserId: 'different-user',
+      authUser: {
+        id: 'different-user', email: '', fullName: '', role: '',
+        tenantId: 'tenant-frankfurt', tenantName: '', permissions: []
+      },
+      syncQueue: [],
+      tasks: [{ id: 'task-123', status: 'Other user state' }] as any
+    });
+    resolvePost({
+      applied: true,
+      clientUuid: queueId,
+      entityType: 'task',
+      strategy: 'USE_SERVER',
+      serverState: { id: 'task-123', status: 'Server response from prior identity' }
+    });
+
+    await resolve;
+
+    expect(markSynced).toHaveBeenCalledWith(queueId);
+    expect(useSecurityStore.getState().tasks[0].status).toBe('Other user state');
+    expect(useSecurityStore.getState().syncQueue).toHaveLength(0);
   });
 });

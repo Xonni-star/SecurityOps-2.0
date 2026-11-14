@@ -246,6 +246,7 @@ function offlineOutboxToQueueItem(item: OutboxMutation): OfflineQueueItem {
   return {
     id: item.id,
     tenantId: item.tenantId,
+    userId: item.userId,
     entityType: item.entityType as OfflineQueueItem['entityType'],
     action: item.action,
     payload: offlineQueuePreviewPayload(item.entityType as OfflineQueueItem['entityType'], item.payload),
@@ -716,6 +717,37 @@ interface SecurityOpsStore {
 type StoreSetter = (partial: Partial<SecurityOpsStore> | ((state: SecurityOpsStore) => Partial<SecurityOpsStore>)) => void;
 type StoreGetter = () => SecurityOpsStore;
 
+function emptyTenantData(): Partial<SecurityOpsStore> {
+  return {
+    clients: [],
+    sites: [],
+    employees: [],
+    shifts: [],
+    guardBook: [],
+    sops: [],
+    alarmTypes: [],
+    alarmSites: [],
+    emergencyPlans: [],
+    alarmIncidents: [],
+    pendingAlarmMutations: [],
+    keys: [],
+    tasks: [],
+    documents: [],
+    syncQueue: [],
+    pendingSOPAcknowledgements: [],
+    patrolScans: [],
+    shiftHandovers: [],
+    auditLogs: [],
+    activeSessions: [],
+    notificationDeliveries: [],
+    alarmIncidentFilterQuery: '',
+    alarmIncidentNextCursor: null,
+    hasMoreAlarmIncidents: false,
+    isLoadingMoreAlarmIncidents: false,
+    notifications: []
+  };
+}
+
 function storedAlarmMutationToState(mutation: StoredAlarmMutation): AlarmMutation {
   return {
     clientMutationId: mutation.clientMutationId,
@@ -890,16 +922,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       set({
         authUser: user,
         currentTenantId: user.tenantId,
+        currentUserId: user.id,
         isAuthenticated: true,
         isAuthenticating: false,
-        pendingSOPAcknowledgements: [],
-        sops: [],
-        alarmTypes: [],
-        alarmSites: [],
-        emergencyPlans: [],
-        alarmIncidents: [],
-        alarmIncidentFilterQuery: '',
-        pendingAlarmMutations: []
+        ...emptyTenantData()
       });
       await get().loadTenantData();
     } catch (error: any) {
@@ -908,6 +934,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         authUser: null,
         isAuthenticated: false,
         isAuthenticating: false,
+        currentUserId: '',
+        isLoadingData: false,
+        ...emptyTenantData(),
         authError: error?.message || 'Anmeldung fehlgeschlagen.'
       });
       throw error;
@@ -925,15 +954,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       authUser: null,
       isAuthenticated: false,
       authError: null,
-      documents: [],
-      pendingSOPAcknowledgements: [],
-      sops: [],
-      alarmTypes: [],
-      alarmSites: [],
-      emergencyPlans: [],
-      alarmIncidents: [],
-      alarmIncidentFilterQuery: '',
-      pendingAlarmMutations: []
+      currentUserId: '',
+      isLoadingData: false,
+      dataLoadError: null,
+      ...emptyTenantData()
     });
   },
 
@@ -952,6 +976,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         },
         isAuthenticated: true,
         currentTenantId: me.tenantId ?? me.tenant_id ?? '',
+        currentUserId: me.sub ?? me.id ?? '',
+        syncQueue: [],
         pendingSOPAcknowledgements: [],
         sops: [],
         alarmTypes: [],
@@ -966,9 +992,12 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     } catch {
       apiClient.setCsrfToken(null);
       set({
-        authUser: null, isAuthenticated: false, documents: [], pendingSOPAcknowledgements: [], sops: [],
-        alarmTypes: [], alarmSites: [], emergencyPlans: [], alarmIncidents: [], alarmIncidentFilterQuery: '',
-        pendingAlarmMutations: []
+        authUser: null,
+        isAuthenticated: false,
+        currentUserId: '',
+        isLoadingData: false,
+        dataLoadError: null,
+        ...emptyTenantData()
       });
     }
   },
@@ -1278,6 +1307,14 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     if (dataLoadError) {
       get().addNotification('Daten teilweise nicht geladen', dataLoadError, 'alert');
     }
+    if (
+      get().isAuthenticated &&
+      get().authUser?.id === requestIdentity.userId &&
+      get().isOnline &&
+      isCurrentSOPIdentity(requestIdentity.tenantId, requestIdentity.userId)
+    ) {
+      void get().triggerManualSync();
+    }
   },
 
   loadAlarmIncidents: async (filters) => {
@@ -1350,6 +1387,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     apiClient.setTenantId(tenantId);
     set({
       currentTenantId: tenantId, pendingSOPAcknowledgements: [], sops: [], alarmTypes: [],
+      syncQueue: [],
       alarmSites: [],
       emergencyPlans: [], alarmIncidents: [], alarmIncidentFilterQuery: '',
       alarmIncidentNextCursor: null, hasMoreAlarmIncidents: false,
@@ -1378,7 +1416,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       name = 'Dr. Michael von Berg (Geschäftsführung)';
       uId = 'admin-1';
     }
-    set({ currentUserRole: role, currentUserName: name, currentUserId: uId });
+    set({ currentUserRole: role, currentUserName: name, currentUserId: uId, syncQueue: [] });
   },
 
   activeTab: 'dashboard',
@@ -1467,9 +1505,11 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   syncQueue: [],
 
   enqueueOfflineAction: async (item) => {
+    const userId = currentSOPIdentity(get()).userId;
     const queueEntry: OfflineQueueItem = {
       ...item,
       id: item.id ?? `queue-${crypto.randomUUID()}`,
+      userId,
       createdAt: new Date().toLocaleTimeString(),
       retryCount: 0,
       status: 'pending'
@@ -1479,7 +1519,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       await offlineVault.enqueueMutation({
         id: queueEntry.id,
         tenantId: queueEntry.tenantId,
-        userId: get().currentUserId,
+        userId,
         entityType: queueEntry.entityType as any,
         action: queueEntry.action,
         payload: queueEntry.payload,
@@ -1505,7 +1545,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
   },
 
   triggerManualSync: async () => {
-    const { isOnline, currentTenantId, syncQueue } = get();
+    const { isOnline, currentTenantId, syncQueue, isAuthenticated, authUser } = get();
+    const currentUserId = currentSOPIdentity(get()).userId;
+    const isCurrentSyncIdentity = () => isCurrentSOPIdentity(currentTenantId, currentUserId);
+
+    if (!isAuthenticated || !authUser?.id || authUser.id !== currentUserId || !currentUserId) {
+      return { success: 0, failed: 0, conflicts: 0 };
+    }
 
     if (!isOnline) {
       return { success: 0, failed: syncQueue.filter((q) => q.status === 'pending').length, conflicts: 0 };
@@ -1522,13 +1568,16 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     let successCount = 0;
     let failedCount = 0;
     let conflictCount = 0;
+    let inFlightItems: OutboxMutation[] = [];
 
     try {
-      const pendingItems = (await offlineVault.getPendingOutbox(currentTenantId))
-        .filter(mutation => mutation.entityType !== 'shift' || mutation.userId === get().currentUserId);
+      const pendingItems = (await offlineVault.getPendingOutbox(currentTenantId, currentUserId))
+        .filter(mutation => mutation.tenantId === currentTenantId && mutation.userId === currentUserId);
+      if (!isCurrentSyncIdentity()) return { success: 0, failed: 0, conflicts: 0 };
 
       if (pendingItems.length === 0) {
-        const allItems = await offlineVault.getOutbox(currentTenantId);
+        const allItems = await offlineVault.getOutbox(currentTenantId, undefined, currentUserId);
+        if (!isCurrentSyncIdentity()) return { success: 0, failed: 0, conflicts: 0 };
         set({
           syncQueue: allItems.map(offlineOutboxToQueueItem),
           isSyncing: false,
@@ -1560,6 +1609,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           pendingItems.filter((p) => p.entityType === 'employee')
         ]) {
           if (!items.length) continue;
+          if (!isCurrentSyncIdentity()) return { success: successCount, failed: failedCount, conflicts: conflictCount };
+          inFlightItems = items;
           const path = items[0].entityType === 'patrol' ? '/patrol/sync'
             : items[0].entityType === 'handover' ? '/handovers/sync'
             : items[0].entityType === 'client' ? '/customers/sync'
@@ -1568,10 +1619,15 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
                   : '/sync/push';
           const orderedItems = ['site', 'employee'].includes(items[0].entityType) ? [...items].sort((a, b) => a.occurredAt.localeCompare(b.occurredAt)) : items;
           const serverResponse: any = await apiClient.post(path, makeSyncPayload(orderedItems));
+          if (!isCurrentSyncIdentity()) return { success: successCount, failed: failedCount, conflicts: conflictCount };
           const receipts = Array.isArray(serverResponse) ? serverResponse : serverResponse?.data;
-          if (!Array.isArray(receipts)) continue;
+          if (!Array.isArray(receipts)) {
+            inFlightItems = [];
+            continue;
+          }
           for (const receipt of receipts) {
             const mutation = orderedItems.find(item => item.id === receipt.clientUuid);
+            if (!mutation) continue;
             if (receipt.status === 'SYNCED') {
               if (mutation?.entityType === 'patrol') {
                 if (mutation.payload?.recordType === 'round_start' && mutation.payload.roundId) {
@@ -1580,7 +1636,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
                   await offlineVault.deletePatrolRound(currentTenantId, mutation.userId, mutation.payload.roundId);
                 }
               }
-              if (mutation?.entityType === 'shift') {
+              if (mutation?.entityType === 'shift' && isCurrentSyncIdentity()) {
                 set(state => ({
                   shifts: reconcileShiftMutation(state.shifts, mutation, receipt)
                 }));
@@ -1591,7 +1647,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
             else if (receipt.status === 'CONFLICT') {
               conflictCount++;
               await offlineVault.updateMutationStatus(receipt.clientUuid, 'CONFLICT', { conflictDetails: receipt.conflictData });
-              if (mutation?.entityType === 'shift') {
+              if (mutation?.entityType === 'shift' && isCurrentSyncIdentity()) {
                 set(state => ({
                   shifts: reconcileShiftMutation(state.shifts, mutation, receipt)
                 }));
@@ -1600,27 +1656,46 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
             else {
               failedCount++;
               await offlineVault.updateMutationStatus(receipt.clientUuid, 'FAILED', { errorMessage: receipt.message || 'Server hat Mutation abgewiesen' });
-              if (mutation?.entityType === 'shift') {
+              if (mutation?.entityType === 'shift' && isCurrentSyncIdentity()) {
                 set(state => ({
                   shifts: reconcileShiftMutation(state.shifts, mutation, receipt)
                 }));
               }
             }
           }
+          inFlightItems = [];
         }
       } catch (networkErr) {
-        console.warn('[SYNC PUSH NETWORK FAILED] Outbox bleibt unversehrt:', networkErr);
-        for (const item of pendingItems) {
+        const failedItems = inFlightItems.length ? inFlightItems : pendingItems;
+        const message = networkErr instanceof ApiError
+          ? networkErr.isNetworkError
+            ? `Netzwerkfehler: ${networkErr.message}`
+            : `HTTP ${networkErr.status}: ${networkErr.message}`
+          : errorText(networkErr);
+        console.warn('[SYNC PUSH FAILED] Outbox bleibt erhalten:', networkErr);
+        for (const item of failedItems) {
           await offlineVault.updateMutationStatus(item.id, 'FAILED', {
-            errorMessage: 'Netzwerkfehler während Übertragung'
+            errorMessage: message
           });
         }
-        set({ isSyncing: false });
+        const remainingOutbox = await offlineVault.getOutbox(currentTenantId, undefined, currentUserId);
+        if (isCurrentSyncIdentity()) {
+          set({
+            syncQueue: remainingOutbox.map(offlineOutboxToQueueItem),
+            isSyncing: false
+          });
+          get().addNotification(
+            'Synchronisierung fehlgeschlagen',
+            `${failedItems.length} Mutation(en) bleiben in der Outbox. ${message}`,
+            'alert'
+          );
+        }
         isSyncRunningMutex = false;
-        return { success: 0, failed: pendingItems.length, conflicts: 0 };
+        return { success: successCount, failed: failedCount + failedItems.length, conflicts: conflictCount };
       }
 
-      const remainingOutbox = await offlineVault.getOutbox(currentTenantId);
+      const remainingOutbox = await offlineVault.getOutbox(currentTenantId, undefined, currentUserId);
+      if (!isCurrentSyncIdentity()) return { success: successCount, failed: failedCount, conflicts: conflictCount };
       set({
         syncQueue: remainingOutbox.map(offlineOutboxToQueueItem),
         isSyncing: false,
@@ -1666,6 +1741,10 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     if (!item) {
       throw new Error(`Konflikt mit ID ${queueId} nicht in der lokalen Warteschlange gefunden.`);
     }
+    const identity = currentSOPIdentity(get());
+    if (item.tenantId !== identity.tenantId || item.userId !== identity.userId) {
+      throw new Error('Konflikt gehört nicht zur aktuellen Mandanten- und Benutzeridentität.');
+    }
 
     try {
       const response = await apiClient.post<ConflictResolutionResult>('/sync/conflicts/resolve', {
@@ -1681,6 +1760,8 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       }
 
       const serverState = response.serverState;
+      await offlineVault.markSynced(queueId);
+      if (!isCurrentSOPIdentity(identity.tenantId, identity.userId)) return;
 
       // Vollständige Übernahme aller Datenfelder in den lokalen Store
       if (item.entityType === 'task') {
@@ -1753,9 +1834,6 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           )
         }));
       }
-
-      // Erst nach erfolgreicher Validierung und State-Aktualisierung aus der lokalen Outbox löschen!
-      await offlineVault.markSynced(queueId);
 
       set((state) => ({
         syncQueue: state.syncQueue.filter((q) => q.id !== queueId)

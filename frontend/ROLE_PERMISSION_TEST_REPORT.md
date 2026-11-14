@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Phase 13: Rollen- & Berechtigungs-Prüfbericht
 
+> **Historischer Snapshot:** Die Rollenmatrix und BESTANDEN-Angaben stammen aus einem früheren Stand. Sie sind nicht die aktuelle Berechtigungsmatrix; aktuelle Benutzer-/Rollen-API und Grenzen stehen in [USER_ADMINISTRATION_API.md](./USER_ADMINISTRATION_API.md).
+
 ## 1. Getestete Rollen
 1. **Systemadministrator**: Volle Plattformberechtigungen, System-Audit und Deployment-Monitoring.
 2. **Geschäftsführung**: Unternehmenscontrolling, Freigabe von Verträgen und Dienstplänen.

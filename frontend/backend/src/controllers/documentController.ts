@@ -97,7 +97,7 @@ async function assertTenantFolder(db: PoolClient, tenantId: string, folderId: st
 async function assertTenantUser(db: PoolClient, tenantId: string, userId: string | null): Promise<void> {
   if (!userId) return;
   const result = await db.query(
-    'SELECT 1 FROM user_roles WHERE user_id=$1 AND tenant_id=$2',
+    'SELECT 1 FROM tenant_memberships WHERE user_id=$1 AND tenant_id=$2 AND is_active=true AND is_locked=false',
     [userId, tenantId]
   );
   if (!result.rows.length) throw httpError(400, 'Verantwortlicher gehört nicht zu diesem Mandanten.');

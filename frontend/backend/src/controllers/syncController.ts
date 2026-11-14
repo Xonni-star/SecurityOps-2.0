@@ -117,7 +117,7 @@ export function hasMutationPermission(
     (entityType === 'handover' && permissions.includes('handover:create'));
 }
 
-function hasPatrolMutationPermission(recordType: unknown, permissions: string[]): boolean {
+function getPatrolMutationPermissions(recordType: unknown): string[] {
   const specificPermission = recordType === 'round_start'
     ? 'patrol:round:start'
     : recordType === 'round_complete'
@@ -125,7 +125,91 @@ function hasPatrolMutationPermission(recordType: unknown, permissions: string[])
       : recordType === 'exception'
         ? 'patrol:exception:create'
         : 'patrol:round:perform';
-  return permissions.includes(specificPermission) || permissions.includes('patrol:create');
+  return [specificPermission, 'patrol:create'];
+}
+
+function getMutationPermissionCodes(
+  entityType: z.infer<typeof syncMutationItemSchema>['entityType'],
+  payload: Record<string, unknown>
+): string[] {
+  if (entityType === 'patrol') return getPatrolMutationPermissions(payload.recordType);
+  const permissionByEntity = {
+    guardbook: 'logbook:create',
+    shift: 'shifts:manage',
+    task: 'tasks:manage',
+    key: 'keys:manage',
+    handover: 'handovers:create'
+  } as const;
+  return entityType === 'handover'
+    ? [permissionByEntity.handover, 'handover:create']
+    : [permissionByEntity[entityType]];
+}
+
+function payloadForServerId(
+  entityType: string,
+  payload: Record<string, unknown>,
+  serverId: unknown
+): Record<string, unknown> | null {
+  if (typeof serverId !== 'string' || !z.string().uuid().safeParse(serverId).success) return null;
+  if (entityType === 'guardbook') return { ...payload, entryId: payload.entryId ?? serverId };
+  if (entityType === 'patrol') return { ...payload, roundId: payload.roundId ?? serverId };
+  if (['shift', 'task', 'key', 'handover'].includes(entityType)) return { ...payload, id: payload.id ?? serverId };
+  return null;
+}
+
+export async function getMutationSiteIds(
+  client: { query: (text: string, values?: unknown[]) => Promise<{ rows: Array<{ site_id?: string | null }> }> },
+  tenantId: string,
+  entityType: z.infer<typeof syncMutationItemSchema>['entityType'],
+  action: z.infer<typeof syncMutationItemSchema>['action'],
+  payload: Record<string, unknown>
+): Promise<string[]> {
+  const siteIds = new Set<string>();
+  const requestedSiteId = payload.siteId;
+  if (typeof requestedSiteId === 'string') siteIds.add(requestedSiteId);
+
+  const id = entityType === 'guardbook'
+    ? payload.entryId || payload.id
+    : entityType === 'patrol'
+      ? payload.roundId
+      : payload.id;
+  let lookup: [string, unknown] | null = null;
+  if (typeof id === 'string' && z.string().uuid().safeParse(id).success) {
+    if (entityType === 'shift') lookup = ['SELECT site_id FROM shifts WHERE tenant_id=$1 AND id=$2', id];
+    else if (entityType === 'key') lookup = ['SELECT site_id FROM keys WHERE tenant_id=$1 AND id=$2', id];
+    else if (entityType === 'guardbook' && action === 'UPDATE') {
+      lookup = ['SELECT site_id FROM guardbook_entries WHERE tenant_id=$1 AND id=$2', id];
+    } else if (entityType === 'handover') lookup = ['SELECT site_id FROM handovers WHERE tenant_id=$1 AND id=$2', id];
+    else if (entityType === 'patrol') lookup = ['SELECT site_id FROM patrol_rounds WHERE tenant_id=$1 AND id=$2', id];
+  }
+
+  if (lookup && typeof lookup[1] === 'string') {
+    const result = await client.query(lookup[0], [tenantId, lookup[1]]);
+    if (typeof result.rows[0]?.site_id === 'string') siteIds.add(result.rows[0].site_id);
+  }
+  return [...siteIds];
+}
+
+export function hasPermissionForSites(
+  user: NonNullable<Request['user']>,
+  permissionCodes: string[],
+  siteIds: string[]
+): boolean {
+  return getPermissionCodeForSites(user, permissionCodes, siteIds) !== undefined;
+}
+
+export function getPermissionCodeForSites(
+  user: NonNullable<Request['user']>,
+  permissionCodes: string[],
+  siteIds: string[]
+): string | undefined {
+  const tenantGrant = permissionCodes.find(code => user.permissions.includes(code));
+  if (tenantGrant) return tenantGrant;
+  return siteIds.length > 0
+    ? permissionCodes.find(code => siteIds.every(siteId =>
+      user.sitePermissions?.some(grant => grant.code === code && grant.siteId === siteId)
+    ))
+    : undefined;
 }
 
 /**
@@ -148,10 +232,10 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
 
     await withTenantTransaction(tenantId, async (client) => {
       for (const mut of body.mutations) {
-        const hasPermission = mut.entityType === 'patrol'
-          ? hasPatrolMutationPermission(mut.payload.recordType, req.user!.permissions)
-          : hasMutationPermission(mut.entityType, req.user!.permissions);
-        if (!hasPermission) {
+        await client.query("SELECT set_config('app.current_permission','',true)");
+        const permissionCodes = getMutationPermissionCodes(mut.entityType, mut.payload);
+        const siteIds = new Set(await getMutationSiteIds(client, tenantId, mut.entityType, mut.action, mut.payload));
+        if (!getPermissionCodeForSites(req.user!, permissionCodes, [...siteIds])) {
           results.push({
             clientUuid: mut.clientUuid,
             serverId: 'none',
@@ -161,8 +245,6 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           });
           continue;
         }
-
-        const payloadHash = computePayloadHash(mut.payload);
 
         // Transaction Advisory Lock zur Verhinderung paralleler Race Conditions
         const lockKey = `${tenantId}:push:${mut.clientUuid}`;
@@ -175,6 +257,33 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
            WHERE tenant_id = $1 AND client_mutation_id = $2`,
           [tenantId, mut.clientUuid]
         );
+        const existingReceipt = receiptRes.rows[0];
+        if (existingReceipt) {
+          const previousEntity = z.enum(['guardbook', 'shift', 'task', 'key', 'patrol', 'handover'])
+            .safeParse(existingReceipt.entity_type);
+          const previousPayload = previousEntity.success
+            ? payloadForServerId(previousEntity.data, {}, existingReceipt.server_id)
+            : null;
+          if (previousEntity.success && previousPayload) {
+            for (const siteId of await getMutationSiteIds(
+              client, tenantId, previousEntity.data, 'UPDATE', previousPayload
+            )) siteIds.add(siteId);
+          }
+        }
+        const activePermissionCode = getPermissionCodeForSites(req.user!, permissionCodes, [...siteIds]);
+        if (!activePermissionCode) {
+          results.push({
+            clientUuid: mut.clientUuid,
+            serverId: 'none',
+            status: 'REJECTED',
+            serverVersion: mut.baseVersion,
+            message: 'Mutation abgewiesen: fehlende Berechtigung für diesen Vorgang.'
+          });
+          continue;
+        }
+        await client.query("SELECT set_config('app.current_permission',$1,true)", [activePermissionCode]);
+
+        const payloadHash = computePayloadHash(mut.payload);
 
         if (receiptRes.rows.length > 0) {
           const receipt = receiptRes.rows[0];
@@ -184,7 +293,8 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
             receipt.action !== mut.action ||
             receipt.payload_hash !== payloadHash
           ) {
-            const serverPayload = mut.entityType === 'handover' && /^[0-9a-f-]{36}$/i.test(receipt.server_id)
+            const serverPayload = receipt.entity_type === 'handover' && mut.entityType === 'handover' &&
+              /^[0-9a-f-]{36}$/i.test(receipt.server_id)
               ? (await client.query(
                 `SELECT id,site_id,area,shift_id,occurred_at,general_text,incidents,important_notes,
                         safety_information,status,revision_version
@@ -1029,6 +1139,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         // ATOMARE PERSISTIERUNG IN sync_idempotency_receipts
         // ----------------------------------------------------------------------
         if (!itemResult) throw new Error(`Sync-Mutation ${mut.clientUuid} wurde nicht verarbeitet.`);
+        await client.query("SELECT set_config('app.current_permission','',true)");
         await client.query(
           `INSERT INTO sync_idempotency_receipts (tenant_id, client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -1048,6 +1159,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
             JSON.stringify(itemResult)
           ]
         );
+        await client.query("SELECT set_config('app.current_permission',$1,true)", [activePermissionCode]);
 
         results.push(itemResult);
       }
@@ -1106,22 +1218,6 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     const userEmail = req.user!.email;
     const userId = req.user!.userId;
     const body = conflictResolveSchema.parse(req.body);
-    const permissionByEntity = {
-      guardbook: 'logbook:create',
-      shift: 'shifts:manage',
-      task: 'tasks:manage',
-      key: 'keys:manage'
-    } as const;
-    const canResolve = body.entityType === 'patrol'
-      ? body.strategy === 'RECORD_AS_EXCEPTION'
-        ? req.user!.permissions.includes('patrol:exception:create') || req.user!.permissions.includes('patrol:manage')
-        : hasPatrolMutationPermission(body.localPayload?.recordType, req.user!.permissions)
-      : req.user!.permissions.includes(permissionByEntity[body.entityType]);
-    if (!canResolve) {
-      res.status(403).json({ success: false, message: 'Zugriff verweigert: fehlende Berechtigung für diese Konfliktauflösung.' });
-      return;
-    }
-
     const payloadHash = computePayloadHash({
       clientUuid: body.clientUuid,
       entityType: body.entityType,
@@ -1137,13 +1233,41 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       const lockKey = `${tenantId}:conflict_resolve:${body.clientUuid}`;
       await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
 
+      const localPayload = body.localPayload ?? {};
+      const permissionCodes = body.entityType === 'patrol' && body.strategy === 'RECORD_AS_EXCEPTION'
+        ? ['patrol:exception:create', 'patrol:manage']
+        : getMutationPermissionCodes(body.entityType, localPayload);
+      const siteIds = new Set<string>();
+      for (const siteId of await getMutationSiteIds(client, tenantId, body.entityType, 'UPDATE', localPayload)) {
+        siteIds.add(siteId);
+      }
+      const originalReceipt = await client.query(
+        `SELECT server_id FROM sync_idempotency_receipts
+          WHERE tenant_id=$1 AND client_mutation_id=$2 AND entity_type=$3`,
+        [tenantId, body.clientUuid, body.entityType]
+      );
+      const serverId = originalReceipt.rows[0]?.server_id;
+      const serverPayload = payloadForServerId(body.entityType, localPayload, serverId);
+      if (serverPayload) {
+        for (const siteId of await getMutationSiteIds(client, tenantId, body.entityType, 'UPDATE', serverPayload)) {
+          siteIds.add(siteId);
+        }
+      }
+      const activePermissionCode = getPermissionCodeForSites(req.user!, permissionCodes, [...siteIds]);
+      if (!activePermissionCode) {
+        throw Object.assign(new Error('Zugriff verweigert: fehlende Berechtigung für diese Konfliktauflösung.'), { statusCode: 403 });
+      }
+      await client.query("SELECT set_config('app.current_permission',$1,true)", [activePermissionCode]);
+
       // 2. Idempotenzprüfung in der DEDIZIERTEN Konflikt-Quittungstabelle
+      await client.query("SELECT set_config('app.current_permission','',true)");
       const receiptRes = await client.query(
         `SELECT client_mutation_id, entity_type, strategy, payload_hash, server_id, server_version, response_json
          FROM sync_conflict_resolution_receipts
          WHERE tenant_id = $1 AND client_mutation_id = $2`,
         [tenantId, body.clientUuid]
       );
+      await client.query("SELECT set_config('app.current_permission',$1,true)", [activePermissionCode]);
 
       if (receiptRes.rows.length > 0) {
         const receipt = receiptRes.rows[0];
@@ -1162,12 +1286,14 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       let actualServerData: any = null;
 
       if (body.entityType === 'patrol') {
+        await client.query("SELECT set_config('app.current_permission','',true)");
         const conflictReceipt = await client.query(
           `SELECT client_mutation_id FROM sync_idempotency_receipts
             WHERE tenant_id=$1 AND client_mutation_id=$2
               AND entity_type='patrol' AND status='CONFLICT'`,
           [tenantId, body.clientUuid]
         );
+        await client.query("SELECT set_config('app.current_permission',$1,true)", [activePermissionCode]);
         if (!conflictReceipt.rows.length) {
           throw new ConflictError('Für diese Mutation liegt kein offener Kontrollgangskonflikt vor.');
         }
@@ -1556,6 +1682,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       };
 
       // 5. Quittung atomar in der DEDIZIERTEN Konflikt-Tabelle speichern
+      await client.query("SELECT set_config('app.current_permission','',true)");
       await client.query(
         `INSERT INTO sync_conflict_resolution_receipts (tenant_id, client_mutation_id, entity_type, strategy, payload_hash, server_id, server_version, response_json)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
@@ -1571,6 +1698,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           JSON.stringify(conflictResponseData)
         ]
       );
+      await client.query("SELECT set_config('app.current_permission',$1,true)", [activePermissionCode]);
     });
 
     if (conflictResponseData?.applied === false) {

@@ -1,9 +1,10 @@
-import { rateLimit } from 'express-rate-limit';
+import { rateLimit, Store } from 'express-rate-limit';
 
-export function createApiRateLimiter(limit: number, skipTests = true) {
+export function createApiRateLimiter(limit: number, skipTests = true, store?: Store) {
   return rateLimit({
     windowMs: 60 * 1000,
     limit,
+    store,
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     skip: () => skipTests && process.env.NODE_ENV === 'test',
