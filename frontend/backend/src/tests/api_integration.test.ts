@@ -4,7 +4,8 @@ import crypto from 'crypto';
 import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
 import { authHeaders, insertTenantMembership } from './testUtils';
-import { removeDocumentBlob } from '../services/documentFiles';
+import { InMemoryDocumentObjectStore, readDocumentBlob, removeDocumentBlob, setDocumentObjectStore } from '../services/documentFiles';
+import { setDocumentScanner, DocumentScannerUnavailableError } from '../services/documentScanner';
 import { claimDueAlarmEscalationJobs } from '../services/alarmEscalationWorker';
 
 const SEED_PASSWORD = 'SecOpsVault2025SecurePassword!';
@@ -47,6 +48,17 @@ let createdAlarmEscalationStepId: string | undefined;
 const createdAlarmIncidentIds: string[] = [];
 const keyNumber = `API-KEY-${Date.now()}`;
 
+class ApiIntegrationDocumentObjectStore extends InMemoryDocumentObjectStore {
+  failDeletes = false;
+
+  async delete(key: string): Promise<void> {
+    if (this.failDeletes) throw new Error('test object store unavailable');
+    await super.delete(key);
+  }
+}
+
+const apiIntegrationObjectStore = new ApiIntegrationDocumentObjectStore();
+
 async function login(email: string): Promise<string> {
   const response = await request(app)
     .post('/api/v1/auth/login')
@@ -61,6 +73,8 @@ async function login(email: string): Promise<string> {
 }
 
 beforeAll(async () => {
+  setDocumentObjectStore(apiIntegrationObjectStore);
+  setDocumentScanner({ scan: async () => 'clean' });
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = $1)', [
     BAVARIA_USER_EMAIL
   ]);
@@ -321,6 +335,7 @@ afterAll(async () => {
       await cleanup.query('DELETE FROM document_audit_events WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
       await cleanup.query('DELETE FROM document_tag_assignments WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
       await cleanup.query('DELETE FROM document_relationships WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
+      await cleanup.query('DELETE FROM document_storage_deletion_outbox WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
       await cleanup.query('UPDATE document_versions SET restored_from_version=NULL WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
       await cleanup.query('DELETE FROM document_versions WHERE tenant_id=$1 AND document_id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
       await cleanup.query('DELETE FROM documents WHERE tenant_id=$1 AND id=$2', ['11111111-1111-1111-1111-111111111111', createdDmsDocumentId]);
@@ -915,7 +930,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(list.body.data).toEqual(expect.arrayContaining([expect.objectContaining({ title })]));
   });
 
-  test('DMS-Upload, Download, Versionierung, Archiv, Audit und Mandantentrennung funktionieren serverseitig', async () => {
+  test('DMS successful scan releases an upload; download, versioning, archive, audit and tenant isolation work server-side', async () => {
     const token = await login(SEED_USER_EMAIL);
     const categories = await request(app).get('/api/v1/documents/categories').set(authHeaders(token));
     expect(categories.status).toBe(200);
@@ -938,7 +953,14 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(upload.status).toBe(201);
     createdDmsDocumentId = upload.body.data.id;
     expect(upload.body.data.size_bytes).toBe(firstBytes.length);
-    expect(upload.body.data.scan_status).toBe('not_scanned');
+    expect(upload.body.data.scan_status).toBe('clean');
+    expect(upload.body.data.file_released).toBe(true);
+    const storedScan = await migrationPool.query(
+      'SELECT scan_status, released_at FROM document_versions WHERE tenant_id=$1 AND document_id=$2 AND version_number=1',
+      [TENANT_FFM_ID, createdDmsDocumentId]
+    );
+    expect(storedScan.rows[0].scan_status).toBe('clean');
+    expect(storedScan.rows[0].released_at).toBeInstanceOf(Date);
 
     const invalidUpload = await request(app)
       .post('/api/v1/documents')
@@ -1012,7 +1034,157 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(audit.body.data.map((item: any) => item.action)).toEqual(
       expect.arrayContaining(['created', 'uploaded', 'downloaded', 'version_created', 'version_restored', 'archived', 'restored'])
     );
-  });
+
+    setDocumentScanner({
+      scan: async () => { throw new DocumentScannerUnavailableError('test scanner unavailable'); }
+    });
+    const quarantinedVersion = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions`)
+      .set(authHeaders(token))
+      .set('Content-Type', 'application/octet-stream')
+      .set('X-File-Name', encodeURIComponent('integration-contract-quarantined.pdf'))
+      .send(Buffer.from('%PDF-1.7\nscanner unavailable\n'));
+    expect(quarantinedVersion.status).toBe(202);
+    expect(quarantinedVersion.body.data.scan_status).toBe('unavailable');
+    expect(quarantinedVersion.body.data.released).toBe(false);
+    const blockedDownload = await request(app)
+      .get(`/api/v1/documents/${createdDmsDocumentId}/download`)
+      .set(authHeaders(token));
+    expect(blockedDownload.status).toBe(423);
+
+    const restrictedRescan = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions/4/rescan`)
+      .set(authHeaders(restrictedToken))
+      .send({});
+    const foreignRescan = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions/4/rescan`)
+      .set(authHeaders(bavariaToken))
+      .send({});
+    expect(restrictedRescan.status).toBe(403);
+    expect(foreignRescan.status).toBe(404);
+
+    const unavailableRescan = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions/4/rescan`)
+      .set(authHeaders(token))
+      .send({});
+    expect(unavailableRescan.status).toBe(202);
+    expect(unavailableRescan.body.data).toMatchObject({
+      version_number: 4,
+      scan_status: 'unavailable',
+      released: false
+    });
+    const blockedAfterUnavailableRescan = await request(app)
+      .get(`/api/v1/documents/${createdDmsDocumentId}/download`)
+      .set(authHeaders(token));
+    expect(blockedAfterUnavailableRescan.status).toBe(423);
+
+    setDocumentScanner({ scan: async () => 'clean' });
+    const successfulRescan = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions/4/rescan`)
+      .set(authHeaders(token))
+      .send({});
+    expect(successfulRescan.status).toBe(200);
+    expect(successfulRescan.body.data).toMatchObject({
+      version_number: 4,
+      scan_status: 'clean',
+      released: true
+    });
+    const rescannedVersion = await migrationPool.query(
+      `SELECT scan_status,released_at FROM document_versions
+        WHERE tenant_id=$1 AND document_id=$2 AND version_number=4`,
+      [TENANT_FFM_ID, createdDmsDocumentId]
+    );
+    expect(rescannedVersion.rows[0].scan_status).toBe('clean');
+    expect(rescannedVersion.rows[0].released_at).toBeInstanceOf(Date);
+    const rescanAudit = await request(app)
+      .get(`/api/v1/documents/${createdDmsDocumentId}/audit`)
+      .set(authHeaders(token));
+    expect(rescanAudit.body.data.map((item: any) => item.action)).toEqual(
+      expect.arrayContaining(['scan_retry_started', 'scan_unavailable', 'scan_clean'])
+    );
+
+    const deleteArchive = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/archive`)
+      .set(authHeaders(token))
+      .send({});
+    expect(deleteArchive.status).toBe(200);
+
+    apiIntegrationObjectStore.failDeletes = true;
+    const failedStorageDelete = await request(app)
+      .delete(`/api/v1/documents/${createdDmsDocumentId}/files`)
+      .set(authHeaders(token));
+    expect(failedStorageDelete.status).toBe(202);
+    expect(failedStorageDelete.body.data.deletionPending).toBe(true);
+    const pendingVersions = await migrationPool.query(
+      `SELECT released_at,storage_deletion_pending_at,storage_deleted_at
+         FROM document_versions WHERE tenant_id=$1 AND document_id=$2`,
+      [TENANT_FFM_ID, createdDmsDocumentId]
+    );
+    expect(pendingVersions.rows.every((row: any) => row.released_at === null)).toBe(true);
+    expect(pendingVersions.rows.every((row: any) => row.storage_deletion_pending_at !== null)).toBe(true);
+    const blockedPendingDeleteDownload = await request(app)
+      .get(`/api/v1/documents/${createdDmsDocumentId}/download`)
+      .set(authHeaders(token));
+    expect(blockedPendingDeleteDownload.status).toBe(423);
+
+    apiIntegrationObjectStore.failDeletes = false;
+    await migrationPool.query(`
+      CREATE OR REPLACE FUNCTION test_fail_dms_storage_delete_completion()
+      RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        RAISE EXCEPTION 'injected DMS completion failure';
+      END;
+      $$;
+      CREATE TRIGGER test_fail_dms_storage_delete_completion
+      BEFORE UPDATE OF storage_deleted_at ON document_versions
+      FOR EACH ROW WHEN (NEW.storage_deleted_at IS NOT NULL)
+      EXECUTE FUNCTION test_fail_dms_storage_delete_completion();
+    `);
+    try {
+      const failedDatabaseCompletion = await request(app)
+        .delete(`/api/v1/documents/${createdDmsDocumentId}/files`)
+        .set(authHeaders(token));
+      expect(failedDatabaseCompletion.status).toBe(500);
+      const blockedAfterCompletionFailure = await request(app)
+        .get(`/api/v1/documents/${createdDmsDocumentId}/download`)
+        .set(authHeaders(token));
+      expect(blockedAfterCompletionFailure.status).toBe(423);
+      const stillBlockedRows = await migrationPool.query(
+        `SELECT released_at,storage_deleted_at FROM document_versions
+          WHERE tenant_id=$1 AND document_id=$2`,
+        [TENANT_FFM_ID, createdDmsDocumentId]
+      );
+      expect(stillBlockedRows.rows.every((row: any) => row.released_at === null)).toBe(true);
+    } finally {
+      await migrationPool.query('DROP TRIGGER IF EXISTS test_fail_dms_storage_delete_completion ON document_versions');
+      await migrationPool.query('DROP FUNCTION IF EXISTS test_fail_dms_storage_delete_completion()');
+    }
+
+    const retriedStorageDelete = await request(app)
+      .delete(`/api/v1/documents/${createdDmsDocumentId}/files`)
+      .set(authHeaders(token));
+    expect(retriedStorageDelete.status).toBe(200);
+    expect(retriedStorageDelete.body.data.deletionPending).toBe(false);
+    const deletedVersions = await migrationPool.query(
+      `SELECT released_at,storage_deleted_at,storage_deletion_pending_at
+         FROM document_versions WHERE tenant_id=$1 AND document_id=$2`,
+      [TENANT_FFM_ID, createdDmsDocumentId]
+    );
+    expect(deletedVersions.rows.every((row: any) =>
+      row.released_at === null && row.storage_deleted_at !== null && row.storage_deletion_pending_at === null
+    )).toBe(true);
+    const deletionAudit = await request(app)
+      .get(`/api/v1/documents/${createdDmsDocumentId}/audit`)
+      .set(authHeaders(token));
+    expect(deletionAudit.body.data.map((item: any) => item.action)).toEqual(
+      expect.arrayContaining([
+        'file_deletion_requested',
+        'file_deletion_attempted',
+        'file_deletion_failed',
+        'file_storage_deleted'
+      ])
+    );
+  }, 30000);
 
   test('SOP-Workflow veröffentlicht nur geprüfte Versionen und verlangt Kenntnisnahme je Version', async () => {
     const authorToken = await login(SOP_AUTHOR_EMAIL);

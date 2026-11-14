@@ -12,7 +12,7 @@ export const SITE_SCOPED_PERMISSION_CODES = new Set([
   'employees:read', 'employees:update', 'employees:archive',
   'employees:restore', 'qualifications:manage', 'employees:absence:manage',
   'employees:absence:approve',
-  'documents:read', 'documents:update', 'documents:download',
+  'documents:read', 'documents:create', 'documents:update', 'documents:download',
   'documents:archive', 'documents:restore', 'documents:approve',
   'sop:read', 'sop:create', 'sop:update', 'sop:manage', 'sop:submit', 'sop:review',
   'sop:approve', 'sop:publish', 'sop:archive', 'sop:acknowledge', 'sop:assign',

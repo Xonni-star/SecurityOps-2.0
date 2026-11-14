@@ -1,4 +1,12 @@
-import { detectDocumentContent, sanitizeOriginalFilename } from '../services/documentFiles';
+import {
+  detectDocumentContent,
+  InMemoryDocumentObjectStore,
+  persistDocumentBlob,
+  readDocumentBlob,
+  removeDocumentBlob,
+  sanitizeOriginalFilename,
+  setDocumentObjectStore
+} from '../services/documentFiles';
 
 function crc32(bytes: Buffer): number {
   let crc = 0xffffffff;
@@ -51,6 +59,18 @@ function zip(entries: Array<[string, string]>): Buffer {
 }
 
 describe('DMS file validation', () => {
+  test('stores objects under generated quarantine keys and supports retrieval and deletion with an injected fake', async () => {
+    const fakeStore = new InMemoryDocumentObjectStore();
+    setDocumentObjectStore(fakeStore);
+    const bytes = Buffer.from('%PDF-1.7\n');
+    const key = await persistDocumentBlob(bytes, 'application/pdf');
+
+    expect(key).toMatch(/^quarantine\/[0-9a-f-]{36}$/i);
+    await expect(readDocumentBlob(key)).resolves.toEqual(bytes);
+    await removeDocumentBlob(key);
+    await expect(readDocumentBlob(key)).rejects.toThrow('DMS object not found.');
+  });
+
   test('validates PDF, image and UTF-8 text signatures instead of trusting extensions', () => {
     expect(detectDocumentContent(Buffer.from('%PDF-1.7\n'), 'contract.pdf').contentType).toBe('application/pdf');
     expect(detectDocumentContent(

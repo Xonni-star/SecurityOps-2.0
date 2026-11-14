@@ -427,7 +427,8 @@ export interface ManagedDocument {
   uploadedAt: string;
   version: string;
   status: string;
-  scanStatus: 'clean' | 'infected' | 'not_scanned';
+  scanStatus: 'pending' | 'clean' | 'infected' | 'unavailable' | 'error' | 'not_scanned';
+  fileReleased: boolean;
   contentType: string;
   folderId?: string;
   folderName?: string;

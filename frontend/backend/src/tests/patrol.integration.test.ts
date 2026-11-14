@@ -410,7 +410,9 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
     .set('Content-Type', 'application/octet-stream')
     .set('X-File-Name', encodeURIComponent(`patrol-${suffix}.txt`))
     .send(Buffer.from('Patrol attachment integration test'));
-  expect(upload.status).toBe(201);
+  expect(upload.status).toBe(202);
+  expect(upload.body.data.scan_status).not.toBe('clean');
+  expect(upload.body.data.file_released).toBe(false);
   documentId = upload.body.data.id;
   const attached = await request(app)
     .post(`/api/v1/patrol/rounds/${roundId}/attachments`)

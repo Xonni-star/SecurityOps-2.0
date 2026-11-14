@@ -54,9 +54,9 @@ Offline-Mutationen werden zuerst in der bestehenden IndexedDB gespeichert und da
 
 ## Betrieb
 
-Die Standard-Dateigröße beträgt 10 MiB und ist über `DMS_MAX_FILE_SIZE_BYTES` bis maximal 100 MiB konfigurierbar. In Docker wird das persistente Volume `secops_documents` außerhalb des statischen Frontends eingebunden. Der Containerbenutzer `node` erhält ein privates Verzeichnis mit Modus `0700`. Der tägliche verschlüsselte Backup-Dienst sichert DB-Dump und Datei-Volume gemeinsam.
+Die Standard-Dateigröße beträgt 10 MiB und ist über `DMS_MAX_FILE_SIZE_BYTES` bis maximal 100 MiB konfigurierbar. Binärdateien liegen in einem privaten S3-kompatiblen Bucket mit generierten Objektschlüsseln unter `quarantine/`; direkte öffentliche Downloads sind nicht vorgesehen. Migration 035 verwaltet Prüfstatus, Freigabezeitpunkt und Dateilöschung. Die ClamAV-Schnittstelle unterscheidet saubere, infizierte, nicht verfügbare und fehlgeschlagene Prüfungen. Bei verpflichtender Prüfung bleibt jede nicht erfolgreich geprüfte Datei gesperrt. Produktion benötigt einen HTTPS-S3-Endpunkt und einen erreichbaren ClamAV-Dienst; lokales MinIO/ClamAV steht in `deploy/docker-compose.minio.yml`.
 
-Es ist kein Virenscanner in der vorhandenen Deployment-Architektur enthalten. Die Scanner-Schnittstelle meldet deshalb `not_scanned`; Uploads werden nicht fälschlich als virengeprüft gekennzeichnet.
+Der tägliche verschlüsselte Backup-Dienst sichert PostgreSQL-Metadaten. Objektspeicher-Backups, Versionierung und Retention werden separat beim gewählten S3-kompatiblen Anbieter konfiguriert. DMS-Dateizugriff und Änderungen sind online erforderlich.
 
 ## DMS-Beziehungen
 

@@ -47,9 +47,9 @@ Migration `033_tenant_user_role_administration.sql` ergänzt `tenant_memberships
 
 Kategorien, Ordner und Dokumente haben zusammengesetzte Schlüssel/Fremdschlüssel mit `tenant_id`. Beziehungen zu `clients`, `sites`, `employees`, `shifts` und `guardbook_entries` nutzen ebenfalls zusammengesetzte Tenant-FKs. Die Datenbank verhindert so fremdmandantige Zuordnungen unabhängig von Frontend-IDs. Dokumentversionen sind immutable; für eine Wiederherstellung wird eine neue Versionsnummer erstellt, die auf denselben unveränderlichen Blob-Schlüssel verweisen darf.
 
-`document_audit_events` enthält Actor, Dokument, Mandant, Aktion, JSON-Details und Zeitstempel. `secops_app_user` darf Auditdaten nur lesen und einfügen. Zusätzlich weist ein Trigger `UPDATE` und `DELETE` zurück. Dokumente werden archiviert, nicht physisch gelöscht.
+`document_audit_events` enthält Actor, Dokument, Mandant, Aktion, JSON-Details und Zeitstempel. `secops_app_user` darf Auditdaten nur lesen und einfügen. Zusätzlich weist ein Trigger `UPDATE` und `DELETE` zurück. Dokumentmetadaten und Audit werden aufbewahrt; für bereits archivierte Dokumente können die Binärobjekte endgültig gelöscht werden.
 
-Datei-Blobs werden getrennt von PostgreSQL unter einem zufälligen UUID-Schlüssel im privaten `DMS_STORAGE_PATH` abgelegt. Das Originaldateiname ist nur Metadatum. Das persistente Docker-Volume heißt `secops_documents`; Datei-Backups müssen zusammen mit dem Datenbankdump wiederhergestellt werden.
+Migration 035 erweitert `document_versions` um `released_at`, `scanned_at`, Scannerfehler und `storage_deleted_at`; der Schlüssel verweist auf ein S3-kompatibles Objekt unter dem privaten `quarantine/`-Präfix. Das Originaldateiname ist nur Metadatum. Eine Datenbankprüfung verhindert `Freigegeben`/`Veröffentlicht`, solange die aktuelle Version nicht freigegeben ist. PostgreSQL-Backups enthalten keine Dateiobjekte; diese müssen beim S3-Anbieter unabhängig gesichert/wiederhergestellt werden. Vorhandene Versionen werden bei Migration als ungeprüft markiert und nicht automatisch aus einem früheren lokalen Dateisystem kopiert.
 
 ## Alarm- und Notfallmanagement (Migration 016)
 

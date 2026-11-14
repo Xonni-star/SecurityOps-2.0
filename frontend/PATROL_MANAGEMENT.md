@@ -95,7 +95,7 @@ Der Server leitet Mitarbeiteridentität aus `employees.account_user_id` und akti
 Die vollständige Spezifikation wurde geprüft. Die nachfolgenden Grenzen sind nicht als implementiert oder verifiziert dargestellt:
 
 - Keine echte Hardware-/Browser-E2E-Prüfung von Kamera, NFC, Geolocation-Berechtigungsverweigerung, Netzunterbrechung und Prozessabbruch auf iOS/Android-Geräten.
-- Keine Fotoaufnahme oder Offline-Pufferung/Upload von Binärdateien. Online kann ein bereits vorhandenes, für das Objekt freigegebenes DMS-Dokument verknüpft werden; der bestehende DMS-Virenscanner meldet `not_scanned`, nicht sicherheitsgeprüft.
+- Keine Fotoaufnahme oder Offline-Pufferung/Upload von Binärdateien. Online kann ein bereits vorhandenes, für das Objekt freigegebenes DMS-Dokument verknüpft werden; Dateizugriff folgt dem DMS-Scanstatus und bleibt bei Quarantäne gesperrt.
 - Kein Patrol-spezifischer Alarmprovider, keine externe Push-/E-Mail-/Leitstellenzustellung und keine behauptete Benachrichtigungszustellung. Verpasste/abgebrochene Vorkommen werden als persistente hoch priorisierte Abweichung und Vorkommensstatus in der App sichtbar.
 - Echtbetrieb, Produktionseinsatz und Bereitschaft wurden nicht geprüft oder freigegeben.
 

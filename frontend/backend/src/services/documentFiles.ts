@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
-import { promises as fs } from 'fs';
 import path from 'path';
 import { inflateRawSync } from 'zlib';
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { env } from '../config/env';
 
 const officeExtensions = new Set(['.docx', '.xlsx', '.pptx']);
@@ -163,41 +163,99 @@ export function detectDocumentContent(bytes: Buffer, filename: string): { conten
   return { contentType, extension };
 }
 
-function storagePath(storageKey: string): string {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(storageKey)) {
+function assertStorageKey(storageKey: string): void {
+  if (!/^(?:quarantine\/)?[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(storageKey)) {
     throw new Error('Ungültiger interner DMS-Speicherschlüssel.');
   }
-  return path.join(path.resolve(env.DMS_STORAGE_PATH), `${storageKey}.blob`);
 }
 
-export async function persistDocumentBlob(bytes: Buffer): Promise<string> {
-  const key = randomUUID();
-  const root = path.resolve(env.DMS_STORAGE_PATH);
-  await fs.mkdir(root, { recursive: true, mode: 0o700 });
-  const temporaryPath = path.join(root, `.${key}.tmp`);
-  const finalPath = storagePath(key);
-  try {
-    await fs.writeFile(temporaryPath, bytes, { flag: 'wx', mode: 0o600 });
-    await fs.rename(temporaryPath, finalPath);
-    return key;
-  } catch (error) {
-    try {
-      await fs.unlink(temporaryPath);
-    } catch (cleanupError) {
-      if ((cleanupError as NodeJS.ErrnoException).code !== 'ENOENT') {
-        console.error('[DMS] Failed to remove incomplete upload temporary file.');
-      }
+export interface DocumentObjectStore {
+  put(key: string, bytes: Buffer, contentType: string): Promise<void>;
+  get(key: string): Promise<Buffer>;
+  delete(key: string): Promise<void>;
+}
+
+class S3DocumentObjectStore implements DocumentObjectStore {
+  private readonly client = new S3Client({
+    endpoint: env.DMS_S3_ENDPOINT,
+    region: env.DMS_S3_REGION,
+    forcePathStyle: env.DMS_S3_FORCE_PATH_STYLE,
+    credentials: {
+      accessKeyId: env.DMS_S3_ACCESS_KEY,
+      secretAccessKey: env.DMS_S3_SECRET_KEY
     }
-    throw error;
+  });
+
+  async put(key: string, bytes: Buffer, contentType: string): Promise<void> {
+    await this.client.send(new PutObjectCommand({
+      Bucket: env.DMS_S3_BUCKET,
+      Key: key,
+      Body: bytes,
+      ContentLength: bytes.length,
+      ContentType: contentType
+    }));
   }
+
+  async get(key: string): Promise<Buffer> {
+    const response = await this.client.send(new GetObjectCommand({ Bucket: env.DMS_S3_BUCKET, Key: key }));
+    if (!response.Body) throw new Error('DMS object store returned an empty body.');
+    const chunks: Buffer[] = [];
+    let length = 0;
+    for await (const chunk of response.Body as AsyncIterable<Uint8Array>) {
+      const buffer = Buffer.from(chunk);
+      length += buffer.length;
+      if (length > env.DMS_MAX_FILE_SIZE_BYTES) throw new Error('Stored DMS object exceeds the configured size limit.');
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks, length);
+  }
+
+  async delete(key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: env.DMS_S3_BUCKET, Key: key }));
+  }
+}
+
+export class InMemoryDocumentObjectStore implements DocumentObjectStore {
+  private readonly objects = new Map<string, Buffer>();
+
+  async put(key: string, bytes: Buffer): Promise<void> {
+    this.objects.set(key, Buffer.from(bytes));
+  }
+
+  async get(key: string): Promise<Buffer> {
+    const bytes = this.objects.get(key);
+    if (!bytes) throw new Error('DMS object not found.');
+    return Buffer.from(bytes);
+  }
+
+  async delete(key: string): Promise<void> {
+    this.objects.delete(key);
+  }
+}
+
+let objectStore: DocumentObjectStore = env.NODE_ENV === 'test'
+  ? new InMemoryDocumentObjectStore()
+  : new S3DocumentObjectStore();
+
+export function setDocumentObjectStore(store: DocumentObjectStore): void {
+  objectStore = store;
+}
+
+export async function persistDocumentBlob(bytes: Buffer, contentType: string): Promise<string> {
+  const key = `quarantine/${randomUUID()}`;
+  assertStorageKey(key);
+  await objectStore.put(key, bytes, contentType);
+  return key;
 }
 
 export async function readDocumentBlob(storageKey: string): Promise<Buffer> {
-  return fs.readFile(storagePath(storageKey));
+  assertStorageKey(storageKey);
+  return objectStore.get(storageKey);
 }
 
 export async function removeDocumentBlob(storageKey: string): Promise<void> {
-  await fs.unlink(storagePath(storageKey));
+  assertStorageKey(storageKey);
+  await objectStore.delete(storageKey);
 }
 
 export function maxDocumentUploadBytes(): number {

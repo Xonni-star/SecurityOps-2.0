@@ -1,6 +1,6 @@
 # SecurityOps 2.0 – Produktionsdeployment
 
-**Architektur:** Caddy (TLS, statisches Frontend) → TypeScript/Express-Backend → PostgreSQL 16  
+**Architektur:** Caddy (TLS, statisches Frontend) → TypeScript/Express-Backend → PostgreSQL 16 + privater externer S3-kompatibler Objektspeicher + ClamAV
 **Migrationspfad:** `migrate` (secops_admin) → `db-init` (Passwort für `secops_app_user`) → `backend` (ausschließlich App-Rolle)
 
 ---
@@ -40,7 +40,18 @@ Werte in `.env` setzen:
 | `SECOPS_PROXY_IPV4` | Feste interne IPv4-Adresse von Caddy (Default `172.30.0.2`) |
 | `TRUST_PROXY` | Ausschließlich die Caddy-Adresse als CIDR, standardmäßig `172.30.0.2/32` |
 | `BACKUP_ENCRYPTION_KEY` | Schlüssel für verschlüsselte Backups |
+| `DMS_S3_ENDPOINT` | HTTPS-Endpunkt des S3-kompatiblen Objektspeichers |
+| `DMS_S3_REGION` | S3-Region |
+| `DMS_S3_BUCKET` | Privater DMS-Bucket |
+| `DMS_S3_ACCESS_KEY`, `DMS_S3_SECRET_KEY` | Dedizierte Least-Privilege-Zugangsdaten; niemals committen |
+| `DMS_S3_FORCE_PATH_STYLE` | Path-Style-URLs für kompatible Anbieter (Default `false`) |
+| `DMS_SCAN_REQUIRED` | Malware-Prüfung verpflichtend (Default `true`) |
+| `DMS_SCANNER_PROVIDER` | Produktionswert `clamav` |
+| `DMS_CLAMAV_HOST`, `DMS_CLAMAV_PORT` | Vom Backend erreichbarer ClamAV-Dienst |
+| `DMS_CLAMAV_TIMEOUT_MS` | Scanner-Timeout (Default 30 Sekunden) |
 | `DMS_MAX_FILE_SIZE_BYTES` | Maximale Uploadgröße je Datei (Default 10 MiB, Obergrenze 100 MiB) |
+
+Production Compose runs no ClamAV container; ClamAV must be operated separately and reachable from the backend. Required host/provider settings configure a client but do not verify scanner availability during startup. The first successful scan is the only evidence that a file was scanned; unavailable/error results remain quarantined and blocked. ClamAV's `zINSTREAM` TCP protocol does not authenticate or encrypt connections, so restrict it to a private, isolated network and permit access only from the backend. Local development uses the ClamAV service in `docker-compose.minio.yml`.
 
 Express vertraut nur den in `TRUST_PROXY` ausdrücklich angegebenen Proxy-IP-Adressen/CIDRs; die Voreinstellung vertraut keinem Proxy. Im Production-Compose-Netz ist nur Caddy öffentlich, der Backend-Port wird nicht veröffentlicht, Caddy hat die feste interne Adresse `172.30.0.2`, und die Caddy-Konfiguration überschreibt `X-Forwarded-For` mit der tatsächlichen Verbindungsadresse. Bei geänderten Netzwerkwerten müssen `SECOPS_PROXY_IPV4` und `TRUST_PROXY` übereinstimmen; `TRUST_PROXY` darf nicht pauschal das gesamte Docker-Subnetz oder `*` freigeben. Dadurch basiert die Rate-Limit-IP auf dem Client hinter genau diesem vertrauenswürdigen Proxy, während nicht vertrauenswürdige `X-Forwarded-For`-Header ignoriert werden.
 
@@ -70,10 +81,12 @@ Startreihenfolge (durch Compose-Bedingungen erzwungen):
 2. `migrate` führt alle Migrationen mit `secops_admin` aus.
 3. `db-init` setzt das Passwort für `secops_app_user`.
 4. `backend` startet und prüft die App-Rolle (kein Superuser, kein BYPASSRLS).
-   Ein einmaliger `dms-storage-init`-Dienst bereitet davor das private Volume vor.
+   Fehlende S3- oder Pflichtscanner-Konfiguration stoppt den Produktivstart.
 5. `proxy` startet, sobald das Backend healthy ist.
 
-Der DMS-Dateispeicher liegt im separaten Docker-Volume `secops_documents`, außerhalb des statischen Frontend-Verzeichnisses. Der Backend-Prozess greift als unprivilegierter Benutzer auf ein Verzeichnis mit Modus `0700` zu. Für lokale Deployments auf VM/Hostebene müssen Datenträger- und Volume-Verschlüsselung separat aktiviert werden.
+Neue DMS-Dateien werden mit generierten Schlüsseln in einem privaten S3-kompatiblen Bucket abgelegt. Ohne erfolgreiche Pflichtprüfung bleiben sie in Quarantäne und können weder heruntergeladen noch als freigegeben/veröffentlicht markiert werden. Bestehende Dateien aus älteren dateisystembasierten Installationen werden nicht automatisch in S3 kopiert und nach Migration 035 nicht mehr als geprüft/freigegeben behandelt; vor dem Upgrade müssen sie separat migriert und erneut geprüft oder erneut hochgeladen werden.
+
+Lokale Entwicklung: `cp .env.minio.example .env.minio`, lokale Werte setzen und `docker compose --env-file .env.minio -f docker-compose.minio.yml up -d` ausführen. Die Dienste binden nur an `127.0.0.1`. Die in `.env.minio` stehenden `DMS_*`-Werte werden zusätzlich dem lokalen Backend-Prozess übergeben. Diese Werte sind ausschließlich für lokale Entwicklung und nicht für Produktion gedacht.
 
 Status:
 
@@ -140,7 +153,7 @@ Neue Migrationen laufen beim Start über `migrate`. Vorher ein Backup erstellen.
 
 ## 8. Backup und Wiederherstellung
 
-Backups laufen automatisch alle 24 Stunden (`backup`-Dienst). Ein Backup enthält den PostgreSQL-Dump **und** das private DMS-Dateivolume im selben mit AES-256-CBC/PBKDF2 verschlüsselten Archiv (`secops_backups`, 30 Tage Retention). Restore spielt beide Bestandteile zurück; bei Archiven aus der Zeit vor dem DMS erscheint eine Warnung, falls kein Dateivolume enthalten ist.
+Backups laufen automatisch alle 24 Stunden (`backup`-Dienst). Das verschlüsselte Archiv enthält den PostgreSQL-Dump (`secops_backups`, 30 Tage Retention). DMS-Objekte liegen außerhalb von Compose; für sie müssen Versionierung, Replikation/Backup und Retention beim gewählten S3-kompatiblen Anbieter separat aktiviert und getestet werden. Ein Datenbank-Restore stellt keine Objekte wieder her.
 
 Manuell:
 
@@ -148,7 +161,7 @@ Manuell:
 docker compose -f docker-compose.production.yml exec -T backup \
   sh -c 'pg_dump -h db -U secops_admin -d securityops_v2 -F c -f /var/backups/manual.dump'
 
-Der obige Einzelbefehl erzeugt nur einen Datenbankdump. Für eine vollständige DMS-Wiederherstellung das verschlüsselte Archiv des `backup`-Dienstes verwenden; DB und Dateien müssen gemeinsam zurückgespielt werden.
+Der obige Einzelbefehl erzeugt nur einen Datenbankdump. DMS-Objekte müssen unabhängig über den konfigurierten S3-Anbieter wiederhergestellt werden.
 ```
 
 Wiederherstellung:
