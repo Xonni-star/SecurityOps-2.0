@@ -516,7 +516,6 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
       'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
       ['UTC', testTenantA, siteAId]
     ));
-
     try {
       const profile = await request(app).post('/api/v1/planning/rule-profiles')
         .set(authHeaders(testTokenA)).send({
@@ -732,6 +731,132 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
         'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
         [previousZone.rows[0].time_zone, testTenantA, siteAId]
       ));
+    }
+  });
+
+  test('Configured monthly work limit splits local calendar months and apportions breaks once', async () => {
+    const previousZone = await withTenantTransaction(testTenantA, tx => tx.query(
+      'SELECT time_zone FROM sites WHERE tenant_id=$1 AND id=$2',
+      [testTenantA, siteAId]
+    ));
+    const previousQualifications = await migrationPool.query(
+      `SELECT id, expiry_date::text AS expiry_date
+         FROM employee_qualifications
+        WHERE tenant_id=$1 AND employee_id=$2 AND qualification_type='Sachkunde'`,
+      [testTenantA, guardAId]
+    );
+    try {
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        ['UTC', testTenantA, siteAId]
+      ));
+      await migrationPool.query(
+        `UPDATE employee_qualifications SET expiry_date='2029-01-01'
+          WHERE tenant_id=$1 AND employee_id=$2 AND qualification_type='Sachkunde'`,
+        [testTenantA, guardAId]
+      );
+
+      const profile = await request(app).post('/api/v1/planning/rule-profiles')
+        .set(authHeaders(testTokenA)).send({
+          name: `Monthly limit ${Date.now()}`,
+          scope: { siteId: siteAId },
+          effectiveFrom: '2027-11-01',
+          effectiveUntil: '2028-04-30',
+          sourceName: 'Test-configured-monthly-limit',
+          sourceReference: 'fixture:monthly-limit',
+          rules: [{
+            code: 'maximum_monthly_minutes',
+            value: 60,
+            source: 'fixture:monthly-limit',
+            severity: 'blocking'
+          }]
+        });
+      expect(profile.status).toBe(201);
+      const versionId = profile.body.data.version.id as string;
+      const approved = await request(app)
+        .post(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}/versions/${versionId}/approve`)
+        .set(authHeaders(planningApproverToken)).send({});
+      expect(approved.status).toBe(200);
+      const activated = await request(app).patch(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}`)
+        .set(authHeaders(testTokenA)).send({ active: true });
+      expect(activated.status).toBe(200);
+
+      const createAndAssign = async (
+        date: string,
+        startTime: string,
+        endTime: string,
+        breakMinutes = 0
+      ) => {
+        const created = await request(app).post('/api/v1/planning/shifts')
+          .set(authHeaders(testTokenA)).send({
+            siteId: siteAId, date, startTime, endTime, breakMinutes,
+            requiredQualification: 'Sachkunde'
+          });
+        expect(created.status).toBe(201);
+        return request(app)
+          .post(`/api/v1/planning/shifts/${created.body.data.shift.id}/assignments`)
+          .set(authHeaders(testTokenA)).send({
+            employeeId: guardAId,
+            expectedVersion: created.body.data.shift.revision_version
+          });
+      };
+
+      const exactlyAtLimit = await createAndAssign('2027-11-02', '08:00', '09:00');
+      expect(exactlyAtLimit.status).toBe(200);
+
+      const overLimit = await createAndAssign('2027-11-03', '08:00', '08:01');
+      expect(overLimit.status).toBe(409);
+      expect(overLimit.body.data.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'MAXIMUM_MONTHLY_WORK',
+          severity: 'blocking',
+          sourceName: 'fixture:monthly-limit',
+          details: expect.objectContaining({
+            profileVersionId: versionId,
+            localMonthStart: '2027-11-01',
+            existingMinutes: 60,
+            candidateMinutes: 1,
+            monthlyWorkMinutes: 61,
+            maximumMonthlyMinutes: 60
+          })
+        })
+      ]));
+
+      const crossingMonth = await createAndAssign('2027-12-31', '23:00', '01:00', 60);
+      expect(crossingMonth.status).toBe(200);
+      const afterCrossingMonth = await createAndAssign('2028-01-02', '08:00', '08:31');
+      expect(afterCrossingMonth.status).toBe(409);
+      expect(afterCrossingMonth.body.data.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'MAXIMUM_MONTHLY_WORK',
+          details: expect.objectContaining({
+            localMonthStart: '2028-01-01',
+            existingMinutes: 30,
+            candidateMinutes: 31,
+            monthlyWorkMinutes: 61
+          })
+        })
+      ]));
+
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        ['Europe/Berlin', testTenantA, siteAId]
+      ));
+      const marchShift = await createAndAssign('2028-03-31', '22:00', '23:00');
+      expect(marchShift.status).toBe(200);
+      const aprilLocalShift = await createAndAssign('2028-04-01', '00:30', '01:30');
+      expect(aprilLocalShift.status).toBe(200);
+    } finally {
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        [previousZone.rows[0].time_zone, testTenantA, siteAId]
+      ));
+      for (const qualification of previousQualifications.rows) {
+        await migrationPool.query(
+          'UPDATE employee_qualifications SET expiry_date=$1::date WHERE tenant_id=$2 AND id=$3',
+          [qualification.expiry_date, testTenantA, qualification.id]
+        );
+      }
     }
   });
 
