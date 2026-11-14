@@ -4,7 +4,9 @@
 
 set -u -o pipefail
 
-BACKUP_DIR="/var/backups"
+BACKUP_DIR="${BACKUP_DIR:-/var/backups}"
+BACKUP_HOST="${BACKUP_HOST:-db}"
+BACKUP_ONCE="${BACKUP_ONCE:-false}"
 RETENTION_DAYS=30
 
 mkdir -p "$BACKUP_DIR"
@@ -16,7 +18,8 @@ while true; do
 
     echo "[BACKUP $(date)] Starte PostgreSQL pg_dump..."
 
-    if pg_dump -h db -U "$POSTGRES_USER" -d "$POSTGRES_DB" -F c -b -f "$DB_DUMP"; then
+    BACKUP_STATUS=0
+    if pg_dump -h "$BACKUP_HOST" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -F c -b -f "$DB_DUMP"; then
         if tar -czf - -C "$BACKUP_DIR" "$(basename "$DB_DUMP")" | \
             openssl enc -aes-256-cbc -salt -pbkdf2 \
               -pass env:BACKUP_ENCRYPTION_KEY -out "$ENC_ARCHIVE"; then
@@ -26,13 +29,19 @@ while true; do
             rm -f "$ENC_ARCHIVE"
             rm -f "$DB_DUMP"
             echo "[BACKUP $(date)] FEHLER: Verschlüsselung fehlgeschlagen."
+            BACKUP_STATUS=1
         fi
     else
         rm -f "$DB_DUMP"
         echo "[BACKUP $(date)] FEHLER: pg_dump fehlgeschlagen."
+        BACKUP_STATUS=1
     fi
 
     find "$BACKUP_DIR" -type f -name "secops_backup_*.enc" -mtime +"$RETENTION_DAYS" -exec rm -f {} \;
+
+    if [ "$BACKUP_ONCE" = "true" ]; then
+        exit "$BACKUP_STATUS"
+    fi
 
     sleep 86400
 done

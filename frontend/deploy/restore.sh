@@ -9,18 +9,54 @@ fi
 
 BACKUP_ARCHIVE="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESTORE_ENV_FILE="${RESTORE_ENV_FILE:-$SCRIPT_DIR/.env}"
 
-if [ ! -f "$SCRIPT_DIR/.env" ]; then
-    echo "Fehler: $SCRIPT_DIR/.env fehlt."
+if [ ! -f "$RESTORE_ENV_FILE" ]; then
+    echo "Fehler: $RESTORE_ENV_FILE fehlt."
     exit 1
 fi
 
 # shellcheck disable=SC1090
-source "$SCRIPT_DIR/.env"
+set -a
+source "$RESTORE_ENV_FILE"
+set +a
 
 if [ ! -f "$BACKUP_ARCHIVE" ]; then
     echo "Fehler: Backup-Archiv '$BACKUP_ARCHIVE' existiert nicht."
     exit 1
+fi
+
+RESTORE_COMPOSE_FILES="${RESTORE_COMPOSE_FILES:-$SCRIPT_DIR/docker-compose.production.yml}"
+COMPOSE_ARGS=()
+if [ -n "${RESTORE_COMPOSE_PROJECT:-}" ]; then
+    COMPOSE_ARGS+=(--project-name "$RESTORE_COMPOSE_PROJECT")
+fi
+COMPOSE_FILE_COUNT=0
+while IFS= read -r compose_file; do
+    [ -n "$compose_file" ] || continue
+    if [ ! -f "$compose_file" ]; then
+        echo "Fehler: Compose-Datei '$compose_file' existiert nicht."
+        exit 1
+    fi
+    COMPOSE_ARGS+=(-f "$compose_file")
+    COMPOSE_FILE_COUNT=$((COMPOSE_FILE_COUNT + 1))
+done <<< "$RESTORE_COMPOSE_FILES"
+if [ "$COMPOSE_FILE_COUNT" -eq 0 ]; then
+    echo "Fehler: Keine Docker-Compose-Datei für den Restore angegeben."
+    exit 1
+fi
+
+RESTORE_DB_SERVICE="${RESTORE_DB_SERVICE:-db}"
+RESTORE_DB_USER="${RESTORE_DB_USER:-secops_admin}"
+if [ "${RESTORE_QUIESCE_SERVICES+x}" = x ]; then
+    read -r -a QUIESCE_SERVICES <<< "$RESTORE_QUIESCE_SERVICES"
+else
+    QUIESCE_SERVICES=(backend)
+fi
+if [ "${RESTORE_RESUME_SERVICES+x}" = x ]; then
+    read -r -a RESUME_SERVICES <<< "$RESTORE_RESUME_SERVICES"
+else
+    RESUME_SERVICES=(backend proxy)
 fi
 
 TEMP_RESTORE_DIR=$(mktemp -d)
@@ -38,13 +74,18 @@ if [ -z "$DB_DUMP_FILE" ]; then
     exit 1
 fi
 
-echo "[RESTORE] Stoppe den Backend-Schreibzugriff..."
-docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" stop backend
+if [ "${#QUIESCE_SERVICES[@]}" -gt 0 ]; then
+    echo "[RESTORE] Stoppe Schreibzugriffe: ${QUIESCE_SERVICES[*]}..."
+    docker compose "${COMPOSE_ARGS[@]}" stop "${QUIESCE_SERVICES[@]}"
+fi
 
 echo "[RESTORE] Spiele PostgreSQL-Dump ein (${POSTGRES_DB})..."
-docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" exec -T db \
-  pg_restore -U secops_admin -d "$POSTGRES_DB" --clean --if-exists < "$DB_DUMP_FILE"
+docker compose "${COMPOSE_ARGS[@]}" exec -T "$RESTORE_DB_SERVICE" \
+  pg_restore -U "$RESTORE_DB_USER" -d "$POSTGRES_DB" --clean --if-exists < "$DB_DUMP_FILE"
 
-echo "[RESTORE] Starte Backend und Proxy..."
-docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" up -d backend proxy
-echo "[RESTORE] Datenbankwiederherstellung abgeschlossen. DMS-Objekte müssen über den S3-Anbieter wiederhergestellt werden."
+if [ "${#RESUME_SERVICES[@]}" -gt 0 ]; then
+    echo "[RESTORE] Starte Dienste: ${RESUME_SERVICES[*]}..."
+    docker compose "${COMPOSE_ARGS[@]}" up -d "${RESUME_SERVICES[@]}"
+fi
+
+echo "[RESTORE] Datenbankwiederherstellung abgeschlossen. DMS-Objekte müssen separat über den S3-Anbieter wiederhergestellt werden."
