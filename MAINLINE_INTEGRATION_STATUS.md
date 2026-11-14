@@ -1,39 +1,53 @@
 # Mainline integration and validation status
 
 **Status checked:** 2026-11-14
-**Main:** `ed7f5f053849dc8e97b8ab79dfe2073f2974f73e`
+
+**Main:** `7ee8ce62d7c706cdd400304f256ce8e7c6426a05`
+
 **Project status:** In development; not approved for production.
 
-This report distinguishes code present on `main`, automated CI, isolated local checks, and production/provider evidence. Passing tests or image builds do not establish deployment, operational acceptance, legal compliance, or production-provider behavior.
+This report distinguishes implementation in merged code, automated CI, isolated tests, and production/provider acceptance. Passing tests or release-artifact builds do not establish deployment, operational acceptance, legal compliance, or production-provider behavior.
 
-## Mainline and CI
+## Pull requests and current main CI
 
-PRs [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25) through [#29](https://github.com/Xonni-star/SecurityOps-2.0/pull/29) are merged. Main CI run [43600456464](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43600456464), for the current main commit, passed all four jobs: root checks, frontend tests/build, backend PostgreSQL/migration/build/Jest, and production Docker configuration/image builds.
+PRs [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25) through [#34](https://github.com/Xonni-star/SecurityOps-2.0/pull/34) are merged. There are no open pull requests. The verified merge commits for PRs #25–#34 are:
 
-The following PRs remain **open and unmerged**. Their passing CI is evidence for the PR revisions only, not for features already present on `main`.
-
-| PR | State and verified evidence |
+| PR | Merged commit |
 |---|---|
-| [#30](https://github.com/Xonni-star/SecurityOps-2.0/pull/30) — restore-test secret isolation | Open; all four standard CI jobs passed. The isolated MinIO and SeaweedFS restore checks passed with the documented image overrides, including database/object snapshot checks, hash/metadata checks, and disposable-resource cleanup. |
-| [#31](https://github.com/Xonni-star/SecurityOps-2.0/pull/31) — ClamAV adapter CI | Open; all five jobs passed, including a real ClamAV 1.4.3 INSTREAM adapter check that recognized clean content and benign EICAR. It tests the scanner adapter protocol, not the complete DMS upload flow or production ClamAV availability. |
-| [#32](https://github.com/Xonni-star/SecurityOps-2.0/pull/32) — persisted offline retry backoff | Open; all four standard CI jobs passed. Local frontend tests (111) and production build passed. |
-| [#33](https://github.com/Xonni-star/SecurityOps-2.0/pull/33) — configurable daily work limit | Open at head `7ec3fb694bbc2e741c69d19ea8a05c311b284c41`; all four standard CI jobs passed. Local builds, 26 roster tests, and two focused PostgreSQL 16 DST integration tests passed: Berlin spring-forward 00:00–04:00 counted as 180 elapsed minutes and was accepted at the limit; fall-back 00:00–04:00 counted as 300 minutes and was rejected. The test restores the site's IANA time zone in `finally`. |
+| #25 | `3337d8c` |
+| #26 | `5c8fed8` |
+| #27 | `d3291f0` |
+| #28 | `8948dc3` |
+| #29 | `ed7f5f0` |
+| #30 | `639f3a1` |
+| #31 | `a16e5df` |
+| #32 | `1bf310b` |
+| #33 | `fe8c7c1` |
+| #34 | `7ee8ce6` |
 
-For PR #33, a fresh-PostgreSQL-16 comparison against the same `main` baseline found the same 21 failing assertions in `sync_and_roles.test.ts` on both revisions (feature: 21 failed/10 passed; baseline: 21 failed/9 passed). The new daily-limit test passes. These failures are present on the baseline and are not evidence of a regression introduced by PR #33.
+Main CI run [43604825009](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43604825009) passed all five jobs on the verified main commit: root checks, frontend tests/build, backend PostgreSQL/migration/build/Jest, ClamAV DMS INSTREAM adapter integration, and production Docker configuration/image builds. The latest release-artifacts run [43605173522](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43605173522) also succeeded, building the release package from CI artifacts. This is artifact generation, not a production deployment.
+
+The merged changes include:
+
+- PRs #29–#30: isolated backup/restore validation and credential/mount isolation.
+- PR #31: ClamAV INSTREAM adapter integration coverage in CI.
+- PR #32: persisted, bounded retry backoff for eligible generic offline-outbox failures.
+- PR #33: optional configurable daily work limit and focused PostgreSQL DST-boundary tests.
+- PR #34: documentation snapshot; its former PR/main/CI status has been superseded by the current status above.
 
 ## Restore and malware-scanning evidence
 
-PR #29 (merged) introduced isolated backup/restore validation; PR #30 (open) hardens its credential/mount isolation. The checks exercise PostgreSQL test metadata and S3-compatible MinIO/SeaweedFS object snapshots, with hash and metadata comparisons and disposable-resource cleanup. They are **not** a full SecurityOps installation, full migrated-schema restore, or production/external-provider restore.
+The isolated MinIO and SeaweedFS checks associated with PRs #29–#30 passed with documented image overrides. They exercise selected test database metadata and S3-compatible object snapshots, hash/metadata comparisons, credential and mount isolation, and disposable-resource cleanup. They are **not** a full SecurityOps installation, full migrated-schema restore, or production/external-provider restore.
 
-The ClamAV runtime smoke in the restore-test work recognized benign EICAR using `clamdscan --stream`; that is separate from PR #31's CI test of the application's `ClamAvDocumentScanner` INSTREAM adapter. Neither proves production scanner availability or a complete DMS upload-to-release workflow.
+The ClamAV adapter check exercises the application INSTREAM protocol against clean content and benign EICAR. It is not a full DMS upload-to-release acceptance test and does not establish that a production scanner is configured or reachable. A separate isolated `clamdscan --stream` smoke check also recognized benign EICAR; that result is limited to the test runtime.
 
 ## Evidence categories and limits
 
 | Evidence type | What is established | What is not established |
 |---|---|---|
-| Implementation | Merged code is on the listed main commit; open PR code remains isolated from `main`. | End-user acceptance or production readiness. |
-| Automated CI | The identified jobs passed on the exact main or PR revisions described above. | Behavior outside those jobs, deployed configuration, or real production traffic. |
-| Isolated local tests | Focused PostgreSQL, frontend, scanner, and test-only object-store checks passed as listed. | Full-stack installation or a real customer/provider environment. |
-| Production/provider acceptance | None established by this report. | Browser/device acceptance, legal/domain review, production rollout, external-provider availability, and production restore remain outstanding. |
+| Implementation | PRs #25–#34 are merged into the listed mainline; the current main contains their changes. | End-user acceptance or production readiness. |
+| Automated CI | The identified five-job CI run passed on the exact current main commit; the latest release-artifacts job succeeded. | Deployed configuration, production traffic, or successful operation in a customer environment. |
+| Isolated tests | Restore/object-store checks, ClamAV adapter checks, and focused planning/offline tests exercise their stated test scopes. | Full production installation or restore, external-provider acceptance, or all-device/browser behavior. |
+| Production/provider acceptance | None established by this report. | Production rollout and restore, external-provider acceptance, browser/device acceptance, and legal/domain review remain outstanding. |
 
-The backend development dependency tree still has a LOW `deepmerge@4.3.1` advisory. It is an upstream dependency blocker with no safe patched version identified; it is not a production dependency finding.
+No full production installation or restore, external-provider acceptance, legal review, or browser/device acceptance has been established. The backend development dependency tree's last recorded audit identified a LOW `deepmerge@4.3.1` advisory in Jest/`ts-jest` development dependencies; the production-only audit found no production findings at that snapshot. This is not a production dependency finding.
