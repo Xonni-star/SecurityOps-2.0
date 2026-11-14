@@ -3,6 +3,11 @@ import argon2 from 'argon2';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
+import {
+  deliverPasswordResetEmail,
+  getPasswordResetDeliveryProvider,
+  PasswordResetDeliveryError
+} from '../services/passwordResetDelivery';
 
 const uuid = z.string().uuid();
 const strongPassword = z.string().min(12).max(256);
@@ -168,6 +173,15 @@ export async function createUser(req: Request, res: Response, next: NextFunction
   try {
     const tenantId = actor(req).tenantId;
     const body = userFields.extend({ roleId: uuid, siteIds: z.array(uuid).max(100).default([]) }).strict().parse(req.body);
+    const deliveryProvider = getPasswordResetDeliveryProvider();
+    if (!deliveryProvider) {
+      res.status(503).json({
+        success: false,
+        code: 'PASSWORD_RESET_EMAIL_NOT_CONFIGURED',
+        message: 'Benutzer können nicht angelegt werden: Es ist kein E-Mail-Anbieter für Passwort-Resets konfiguriert.'
+      });
+      return;
+    }
     const result = await withTenantTransaction(tenantId, async db => {
       const role = await db.query('SELECT id,name FROM tenant_roles WHERE id=$1 AND tenant_id=$2', [body.roleId,tenantId]);
       if (!role.rows.length) return { kind:'role-missing' as const };
@@ -200,11 +214,26 @@ export async function createUser(req: Request, res: Response, next: NextFunction
       }
       const reset = await createResetToken(db,tenantId,userId,actor(req).userId);
       await audit(db,req,'USER_CREATED',`user:${userId}`,{ email: body.email.toLowerCase(),roleId:body.roleId,siteIds:body.siteIds });
-      return { kind:'created' as const,user:inserted.rows[0],resetToken:reset.token,resetExpiresAt:reset.expiresAt };
+      await deliverPasswordResetEmail(deliveryProvider, {
+        recipientEmail: inserted.rows[0].email,
+        recipientName: `${body.firstName} ${body.lastName}`,
+        tenantId,
+        token: reset.token,
+        expiresAt: reset.expiresAt
+      });
+      return { kind:'created' as const,user:inserted.rows[0],resetExpiresAt:reset.expiresAt };
     });
     if (result.kind === 'role-missing') { res.status(400).json({success:false,message:'Rolle nicht gefunden.'}); return; }
-    res.status(201).json({success:true,data:{user:result.user,resetToken:result.resetToken,resetExpiresAt:result.resetExpiresAt}});
+    res.status(201).json({success:true,data:{user:result.user,resetEmailSent:true,resetExpiresAt:result.resetExpiresAt}});
   } catch (error) {
+    if (error instanceof PasswordResetDeliveryError) {
+      res.status(503).json({
+        success: false,
+        code: 'PASSWORD_RESET_EMAIL_DELIVERY_FAILED',
+        message: 'Der Benutzer wurde nicht angelegt, weil die Passwort-Reset-E-Mail nicht zugestellt werden konnte.'
+      });
+      return;
+    }
     if ((error as { code?: string })?.code === '23505') { res.status(409).json({success:false,message:'Diese E-Mail-Adresse ist bereits registriert.'}); return; }
     if (sendError(res,error)) return;
     next(error);
@@ -427,18 +456,48 @@ async function createResetToken(
 export async function preparePasswordReset(req:Request,res:Response,next:NextFunction):Promise<void>{
   try{
     const tenantId=actor(req).tenantId,userId=uuid.parse(req.params.id);
+    const deliveryProvider=getPasswordResetDeliveryProvider();
+    if(!deliveryProvider){
+      res.status(503).json({
+        success:false,
+        code:'PASSWORD_RESET_EMAIL_NOT_CONFIGURED',
+        message:'Passwort-Reset kann nicht versendet werden: Es ist kein E-Mail-Anbieter konfiguriert.'
+      });
+      return;
+    }
     const result=await withTenantTransaction(tenantId,async db=>{
-      const target=await db.query('SELECT u.is_superadmin FROM tenant_memberships tm JOIN users u ON u.id=tm.user_id WHERE tm.tenant_id=$1 AND tm.user_id=$2',[tenantId,userId]);
+      const target=await db.query(
+        'SELECT u.email,tm.first_name,tm.last_name,u.is_superadmin FROM tenant_memberships tm JOIN users u ON u.id=tm.user_id WHERE tm.tenant_id=$1 AND tm.user_id=$2',
+        [tenantId,userId]
+      );
       if(!target.rows.length)return null;
       if(target.rows[0].is_superadmin&&!actor(req).isSuperAdmin)throw Object.assign(new Error('Systemadministratorkonten dürfen nur durch einen Systemadministrator geändert werden.'),{status:403});
       const token=await createResetToken(db,tenantId,userId,actor(req).userId);
       await db.query('UPDATE user_sessions SET revoked=true WHERE tenant_id=$1 AND user_id=$2 AND revoked=false',[tenantId,userId]);
-      await audit(db,req,'PASSWORD_RESET_PREPARED',`user:${userId}`,{expiresAt:token.expiresAt,delivery:'manual-out-of-band'});
-      return token;
+      await audit(db,req,'PASSWORD_RESET_PREPARED',`user:${userId}`,{expiresAt:token.expiresAt,delivery:'email'});
+      await deliverPasswordResetEmail(deliveryProvider,{
+        recipientEmail:target.rows[0].email,
+        recipientName:`${target.rows[0].first_name} ${target.rows[0].last_name}`,
+        tenantId,
+        token:token.token,
+        expiresAt:token.expiresAt
+      });
+      return {expiresAt:token.expiresAt};
     });
     if(!result){res.status(404).json({success:false,message:'Benutzer nicht gefunden.'});return;}
-    res.json({success:true,data:{resetToken:result.token,expiresAt:result.expiresAt,delivery:'manual-out-of-band'}});
-  }catch(error){if(sendError(res,error))return;next(error);}
+    res.json({success:true,data:{expiresAt:result.expiresAt,delivery:'email'}});
+  }catch(error){
+    if(error instanceof PasswordResetDeliveryError){
+      res.status(503).json({
+        success:false,
+        code:'PASSWORD_RESET_EMAIL_DELIVERY_FAILED',
+        message:'Die Passwort-Reset-E-Mail konnte nicht zugestellt werden; der Reset wurde nicht abgeschlossen.'
+      });
+      return;
+    }
+    if(sendError(res,error))return;
+    next(error);
+  }
 }
 
 export async function changeOwnPassword(req:Request,res:Response,next:NextFunction):Promise<void>{

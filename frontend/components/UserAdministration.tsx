@@ -44,7 +44,6 @@ export const UserAdministration: React.FC<{ authUser: AuthUser }> = ({ authUser 
   const [userFormOpen, setUserFormOpen] = useState(false);
   const [userForm, setUserForm] = useState({ email: '', firstName: '', lastName: '', phone: '', roleId: '', siteIds: [] as string[] });
   const [roleAssignment, setRoleAssignment] = useState({ roleId: '', siteId: '' });
-  const [resetToken, setResetToken] = useState('');
   const [roleFormOpen, setRoleFormOpen] = useState(false);
   const [editingRole, setEditingRole] = useState<ManagedRole | null>(null);
   const [roleForm, setRoleForm] = useState({ name: '', description: '', grants: {} as Record<string, RoleGrantEditor> });
@@ -109,25 +108,14 @@ export const UserAdministration: React.FC<{ authUser: AuthUser }> = ({ authUser 
     }
   };
 
-  const copyResetToken = async () => {
-    try {
-      if (!navigator.clipboard) throw new Error('Zwischenablage ist nicht verfügbar.');
-      await navigator.clipboard.writeText(resetToken);
-      setResetToken('');
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Token konnte nicht kopiert werden.');
-    }
-  };
-
   const runUserAction = async (user: ManagedUser, action: string, confirmation: string) => {
     if (!window.confirm(confirmation)) return;
     setSaving(true);
     setError('');
     setNotice('');
     try {
-      const data = await apiClient.post<{ resetToken?: string }>(`/admin/users/${user.id}/${action}`, {});
-      if (data.resetToken) setResetToken(data.resetToken);
-      setNotice(action === 'password-reset' ? 'Einmaliger Token erstellt. Übermitteln Sie ihn ausschließlich über einen sicheren, separaten Kanal.' : 'Benutzerkonto aktualisiert.');
+      await apiClient.post(`/admin/users/${user.id}/${action}`, {});
+      setNotice(action === 'password-reset' ? 'Die Passwort-Reset-E-Mail wurde zugestellt.' : 'Benutzerkonto aktualisiert.');
       await reload();
       if (selectedUser?.id === user.id) await inspectUser(user);
     } catch (reason) {
@@ -143,12 +131,11 @@ export const UserAdministration: React.FC<{ authUser: AuthUser }> = ({ authUser 
     setError('');
     setNotice('');
     try {
-      const created = await apiClient.post<{ resetToken: string }>('/admin/users', {
+      await apiClient.post('/admin/users', {
         email: userForm.email, firstName: userForm.firstName, lastName: userForm.lastName,
         phone: userForm.phone || null, roleId: userForm.roleId, siteIds: userForm.siteIds
       });
-      setResetToken(created.resetToken);
-      setNotice('Benutzer angelegt. Der einmalige Passwort-Token wird nur jetzt angezeigt; es wird keine E-Mail versendet.');
+      setNotice('Benutzer angelegt. Die Passwort-Reset-E-Mail wurde zugestellt.');
       setUserFormOpen(false);
       setUserForm({ email: '', firstName: '', lastName: '', phone: '', roleId: '', siteIds: [] });
       await reload();
@@ -303,12 +290,6 @@ export const UserAdministration: React.FC<{ authUser: AuthUser }> = ({ authUser 
 
       {error && <div role="alert" className="flex items-center gap-2 rounded-lg border border-rose-700/70 bg-rose-950/40 p-3 text-sm text-rose-200"><AlertTriangle className="h-4 w-4 shrink-0" />{error}</div>}
       {notice && <div role="status" className="rounded-lg border border-emerald-700/70 bg-emerald-950/30 p-3 text-sm text-emerald-200">{notice}</div>}
-      {resetToken && <div className="rounded-lg border border-amber-700/70 bg-amber-950/30 p-3">
-        <div className="flex items-center gap-2 text-sm font-semibold text-amber-200"><KeyRound className="h-4 w-4" />Einmaliger Passwort-Token (30 Minuten)</div>
-        <code className="mt-2 block break-all rounded bg-slate-950 p-2 text-xs text-slate-100">{resetToken}</code>
-        <button className={`${button} mt-2`} onClick={() => void copyResetToken()}>Token kopieren und ausblenden</button>
-        <p className="mt-2 text-xs text-amber-100/80">SecurityOps versendet keine E-Mail. Teilen Sie den Token nicht über diesen Bildschirm hinaus; sichere manuelle Zustellung ist erforderlich.</p>
-      </div>}
 
       <div className="flex gap-2 border-b border-slate-800">
         <button className={`px-4 py-2 text-sm ${tab === 'users' ? 'border-b-2 border-blue-500 text-white' : 'text-slate-400'}`} onClick={() => setTab('users')}>Benutzer</button>
