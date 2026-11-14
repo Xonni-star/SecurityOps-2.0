@@ -202,7 +202,7 @@ export const IllustratedUserGuide: React.FC = () => {
         {
           stepNumber: 3,
           title: 'Automatische Synchronisation bei Reconnect',
-          description: 'Sobald Empfang besteht, überträgt das Push-Protokoll alle Einträge idempotent an die PostgreSQL-Datenbank.',
+          description: 'Sobald Empfang besteht, überträgt das Push-Protokoll alle Einträge idempotent an die PostgreSQL-Datenbank. Vorübergehende Netzwerk- und Serverfehler werden mit gespeichertem exponentiellem Backoff erneut versucht; dauerhafte Fehler bleiben sichtbar.',
           calloutTarget: 'Sync-Warteschlange'
         },
         {

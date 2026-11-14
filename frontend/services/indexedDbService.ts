@@ -4,6 +4,9 @@
 
 const DB_NAME = 'SecurityOps2_OfflineVault';
 const DB_VERSION = 7;
+const MAX_AUTOMATIC_RETRIES = 5;
+const RETRY_BASE_DELAY_MS = 1000;
+const RETRY_MAX_DELAY_MS = 30000;
 
 function patrolMutationOrder(mutation: OutboxMutation): number {
   if (mutation.entityType !== 'patrol') return 0;
@@ -23,6 +26,8 @@ export interface OutboxMutation {
   occurredAt: string;
   baseVersion: number;
   retryCount: number;
+  retryable?: boolean;
+  nextAttemptAt?: string;
   lastAttemptAt?: string;
   status: 'PENDING' | 'IN_TRANSIT' | 'SYNCED' | 'CONFLICT' | 'FAILED';
   errorMessage?: string;
@@ -277,9 +282,14 @@ export class IndexedDbService {
     });
   }
 
-  async getPendingOutbox(tenantId: string, userId: string): Promise<OutboxMutation[]> {
+  async getPendingOutbox(
+    tenantId: string,
+    userId: string,
+    options: { includeFailed?: boolean } = {}
+  ): Promise<OutboxMutation[]> {
     if (!userId) return [];
     const db = await this.init();
+    const now = Date.now();
 
     return new Promise((resolve, reject) => {
       const tx = db.transaction('outbox', 'readonly');
@@ -291,7 +301,11 @@ export class IndexedDbService {
         // Never replay mutations without an exact tenant and user owner.
         resolve(records
           .filter((r) => r.tenantId === tenantId && r.userId === userId &&
-            (r.status === 'PENDING' || r.status === 'FAILED'))
+            (r.status === 'PENDING' || (r.status === 'FAILED' && (
+              options.includeFailed ||
+              (r.retryable === true && Number.isFinite(Date.parse(r.nextAttemptAt || '')) &&
+                Date.parse(r.nextAttemptAt || '') <= now)
+            ))))
           .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || patrolMutationOrder(a) - patrolMutationOrder(b)));
       };
 
@@ -327,7 +341,11 @@ export class IndexedDbService {
   async updateMutationStatus(
     id: string,
     status: OutboxMutation['status'],
-    details?: { errorMessage?: string; conflictDetails?: OutboxMutation['conflictDetails'] }
+    details?: {
+      errorMessage?: string;
+      conflictDetails?: OutboxMutation['conflictDetails'];
+      retryable?: boolean;
+    }
   ): Promise<void> {
     const db = await this.init();
 
@@ -348,7 +366,20 @@ export class IndexedDbService {
         }
         record.status = status;
         record.lastAttemptAt = new Date().toISOString();
-        if (status === 'FAILED') record.retryCount += 1;
+        if (status === 'FAILED') {
+          record.retryCount += 1;
+          const canRetry = details?.retryable === true && record.retryCount <= MAX_AUTOMATIC_RETRIES;
+          record.retryable = canRetry;
+          record.nextAttemptAt = canRetry
+            ? new Date(Date.now() + Math.min(
+                RETRY_BASE_DELAY_MS * (2 ** (record.retryCount - 1)),
+                RETRY_MAX_DELAY_MS
+              )).toISOString()
+            : undefined;
+        } else {
+          record.retryable = false;
+          record.nextAttemptAt = undefined;
+        }
         if (details?.errorMessage) record.errorMessage = details.errorMessage;
         if (details?.conflictDetails) record.conflictDetails = details.conflictDetails;
 

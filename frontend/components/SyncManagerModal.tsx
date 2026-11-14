@@ -90,7 +90,7 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
   const handleRunSync = async () => {
     setIsSyncing(true);
     await new Promise((r) => setTimeout(r, 650));
-    await triggerManualSync();
+    await triggerManualSync({ retryFailed: true });
     setIsSyncing(false);
   };
 
