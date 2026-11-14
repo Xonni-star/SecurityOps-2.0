@@ -3,7 +3,7 @@ import argon2 from 'argon2';
 import crypto from 'crypto';
 import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
-import { authHeaders } from './testUtils';
+import { authHeaders, insertTenantMembership } from './testUtils';
 import { removeDocumentBlob } from '../services/documentFiles';
 import { claimDueAlarmEscalationJobs } from '../services/alarmEscalationWorker';
 
@@ -82,6 +82,7 @@ beforeAll(async () => {
      RETURNING id`,
     [BAVARIA_USER_EMAIL, passwordHash]
   );
+  await insertTenantMembership(TENANT_BAVARIA_ID, userResult.rows[0].id);
 
   const roleResult = await migrationPool.query(
     `SELECT id FROM roles WHERE name = 'Einsatzleitung' LIMIT 1`
@@ -101,6 +102,7 @@ beforeAll(async () => {
     `INSERT INTO users (email,password_hash,first_name,last_name,phone) VALUES ($1,$2,'API','Restricted','+49 30 001') RETURNING id`,
     [SITE_RESTRICTED_USER_EMAIL, passwordHash]
   );
+  await insertTenantMembership(TENANT_FFM_ID, restrictedUser.rows[0].id);
   const restrictedRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter' LIMIT 1");
   if (!restrictedRole.rows.length) throw new Error('Seed-Rolle Wachdienstmitarbeiter fehlt.');
   await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING', [restrictedUser.rows[0].id, restrictedRole.rows[0].id, '11111111-1111-1111-1111-111111111111']);
@@ -139,6 +141,7 @@ beforeAll(async () => {
      VALUES ($1,$2,'DMS','Restricted','+49 30 002') RETURNING id`,
     [DMS_RESTRICTED_USER_EMAIL, passwordHash]
   );
+  await insertTenantMembership(TENANT_FFM_ID, dmsRestricted.rows[0].id);
   const dmsRole = await migrationPool.query(
     `INSERT INTO roles (name,description) VALUES ($1,'DMS permission boundary test') RETURNING id`,
     [DMS_RESTRICTED_ROLE]
@@ -179,6 +182,9 @@ beforeAll(async () => {
      VALUES ($1,$2,'SOP','Employee','+49 30 102') RETURNING id`,
     [SOP_EMPLOYEE_EMAIL,passwordHash]
   );
+  for (const userId of [sopAuthor.rows[0].id, sopReviewer.rows[0].id, sopApprover.rows[0].id, sopEmployee.rows[0].id]) {
+    await insertTenantMembership(TENANT_FFM_ID, userId);
+  }
   await migrationPool.query(
     `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES
       ($1,$2,$4),($3,$5,$4),($6,$5,$4),($7,$8,$4)`,

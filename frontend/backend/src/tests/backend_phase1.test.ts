@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import request from 'supertest';
 import { app } from '../app';
 import { pool, migrationPool, withTenantTransaction, withSystemTransaction } from '../config/database';
-import { cleanupTestData, authHeaders } from './testUtils';
+import { cleanupTestData, authHeaders, insertTenantMembership } from './testUtils';
 import { env } from '../config/env';
 
 describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Tests', () => {
@@ -62,7 +62,8 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     `, [`test.user.${Date.now()}@secops.local`, passHash]);
     testUserAId = userRes.rows[0].id;
 
-    await pool.query(`
+    await insertTenantMembership(testTenantA, testUserAId);
+    await migrationPool.query(`
       INSERT INTO user_roles (user_id, role_id, tenant_id) VALUES ($1, $2, $3);
     `, [testUserAId, testRoleEinsatzId, testTenantA]);
 
@@ -74,7 +75,9 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     testUserMultiTenantId = multiUserRes.rows[0].id;
 
     // Weist Benutzer A beiden Mandanten (A und B) zu:
-    await pool.query(`
+    await insertTenantMembership(testTenantA, testUserMultiTenantId);
+    await insertTenantMembership(testTenantB, testUserMultiTenantId);
+    await migrationPool.query(`
       INSERT INTO user_roles (user_id, role_id, tenant_id) VALUES 
         ($1, $2, $3),
         ($1, $2, $4);
@@ -98,21 +101,21 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
     // 6. Gültigen, widerrufenen und abgelaufenen Token anlegen
     testValidTokenA = crypto.randomBytes(32).toString('base64url');
     const validHash = crypto.createHash('sha256').update(testValidTokenA).digest('hex');
-    await pool.query(`
+    await migrationPool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
     `, [testUserAId, testTenantA, validHash]);
 
     testRevokedTokenA = crypto.randomBytes(32).toString('base64url');
     const revokedHash = crypto.createHash('sha256').update(testRevokedTokenA).digest('hex');
-    await pool.query(`
+    await migrationPool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', true);
     `, [testUserAId, testTenantA, revokedHash]);
 
     testExpiredTokenA = crypto.randomBytes(32).toString('base64url');
     const expiredHash = crypto.createHash('sha256').update(testExpiredTokenA).digest('hex');
-    await pool.query(`
+    await migrationPool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() - interval '10 minutes', false);
     `, [testUserAId, testTenantA, expiredHash]);
@@ -370,10 +373,11 @@ describe('SecurityOps 2.0 - Schritt 3 Vollständige Sicherheitsprüfung & RLS Te
       "INSERT INTO users (email,password_hash,first_name,last_name) VALUES ($1,'unused','No','Permissions') RETURNING id",
       [`admin.no-permissions.${Date.now()}@secops.local`]
     )).rows[0].id;
-    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [testAdminUserId, testRoleAdminId, testTenantA]);
+    await insertTenantMembership(testTenantA, testAdminUserId);
+    await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [testAdminUserId, testRoleAdminId, testTenantA]);
     const adminToken = crypto.randomBytes(32).toString('base64url');
     const hash = crypto.createHash('sha256').update(adminToken).digest('hex');
-    await pool.query(`
+    await migrationPool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
     `, [testAdminUserId, testTenantA, hash]);

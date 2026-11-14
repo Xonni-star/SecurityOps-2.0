@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Phase 13: End-to-End Testbericht (Szenarien 1–10)
 
+> **Historischer Snapshot:** Die hier aufgeführten Tests wurden nicht für den aktuellen Stack erneut ausgeführt und sind kein Beleg für heutige Browser-/Geräte-E2E-Abnahme oder Produktionsreife.
+
 ## 1. Abnahmeergebnisse der realen Arbeitsabläufe
 
 | Test | Szenario | Ausführung | Status | Verifikationsergebnis |

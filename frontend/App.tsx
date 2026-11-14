@@ -27,6 +27,7 @@ import { SyncManagerModal } from './components/SyncManagerModal';
 import { ModuleManager } from './components/ModuleManager';
 import { GlobalSearchModal } from './components/GlobalSearchModal';
 import { NotificationCenterModal } from './components/NotificationCenterModal';
+import { UserAdministration } from './components/UserAdministration';
 import { LoginScreen } from './components/LoginScreen';
 import { X, AlertTriangle, RotateCcw } from 'lucide-react';
 
@@ -89,6 +90,7 @@ export default function App(): React.ReactNode {
   const {
     activeTab,
     theme,
+    authUser,
     setActiveTab,
     isAuthenticated,
     restoreSession,
@@ -180,6 +182,8 @@ export default function App(): React.ReactNode {
         return <SecurityAuditCenter />;
       case 'architecture':
         return <ArchitectureCenter />;
+      case 'user_admin':
+        return authUser ? <UserAdministration authUser={authUser} /> : <Dashboard />;
       default:
         return <Dashboard />;
     }

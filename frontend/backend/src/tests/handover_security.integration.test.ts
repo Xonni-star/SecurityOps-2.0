@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
 import { computePayloadHash } from '../services/syncHash';
-import { authHeaders } from './testUtils';
+import { authHeaders, insertTenantMembership } from './testUtils';
 
 jest.setTimeout(60000);
 
@@ -143,6 +143,7 @@ beforeAll(async () => {
       [emails[key], passwordHash]
     );
     userIds[key] = user.rows[0].id;
+    await insertTenantMembership(tenantId, userIds[key]);
     const customRoleId = roleNames[key] === roleName
       ? confirmerRoleId
       : roleNames[key] === hybridRoleName

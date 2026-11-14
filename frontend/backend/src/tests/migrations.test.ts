@@ -112,11 +112,11 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
     expect(result.baselined).toEqual([]);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
     expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
     expect(await tableExists(db, 'sync_conflict_resolution_receipts')).toBe(true);
     expect(await tableExists(db, 'documents')).toBe(true);
@@ -126,6 +126,11 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(await tableExists(db, 'emergency_management_events')).toBe(true);
     expect(await tableExists(db, 'planning_notifications')).toBe(true);
     expect(await tableExists(db, 'shift_actual_time_revisions')).toBe(true);
+    expect(await tableExists(db, 'tenant_memberships')).toBe(true);
+    expect(await tableExists(db, 'tenant_roles')).toBe(true);
+    expect(await tableExists(db, 'tenant_role_permissions')).toBe(true);
+    expect(await tableExists(db, 'tenant_user_roles')).toBe(true);
+    expect(await tableExists(db, 'user_password_reset_tokens')).toBe(true);
     for (const table of [
       'patrol_checkpoints', 'patrol_routes', 'patrol_route_versions',
       'patrol_route_version_checkpoints', 'patrol_route_version_assignments',
@@ -560,6 +565,218 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     }
   });
 
+  test('Benutzer-, Rollen- und Sitzungsdaten erzwingen Tenant-RLS und Tenant-FKs', async () => {
+    const db = await createTestDatabase();
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: makeMigrationsDir(), logger: noopLogger });
+    const tenantA=randomUUID(),tenantB=randomUUID(),userA=randomUUID(),userB=randomUUID();
+    const roleA=randomUUID(),roleB=randomUUID(),legacyRole=randomUUID();
+    const hashA='a'.repeat(64),hashB='b'.repeat(64),hashC='c'.repeat(64);
+    await queryInDatabase(db,
+      `INSERT INTO tenants (id,name,subdomain,tax_number,bwr_register_id)
+       VALUES ($1,'Tenant A',$2,'A-123','A-REG'),($3,'Tenant B',$4,'B-123','B-REG')`,
+      [tenantA,`${tenantA}.test`,tenantB,`${tenantB}.test`]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO users (id,email,password_hash,first_name,last_name)
+       VALUES ($1,$2,'test-hash','Tenant','A'),($3,$4,'test-hash','Tenant','B')`,
+      [userA,`${userA}@example.test`,userB,`${userB}@example.test`]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO tenant_memberships (tenant_id,user_id,first_name,last_name)
+       VALUES ($1,$2,'Tenant','A'),($3,$2,'Tenant','A'),($3,$4,'Tenant','B')`,
+      [tenantA,userA,tenantB,userB]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO tenant_roles (id,tenant_id,name) VALUES ($1,$2,'Role A'),($3,$4,'Role B')`,
+      [roleA,tenantA,roleB,tenantB]
+    );
+    await queryInDatabase(db,
+      'INSERT INTO roles (id,name) VALUES ($1,$2)',
+      [legacyRole,`Legacy ${randomUUID()}`]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3),($4,$2,$5)`,
+      [userA,legacyRole,tenantA,userB,tenantB]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO tenant_user_roles (tenant_id,user_id,role_id) VALUES ($1,$2,$3),($4,$5,$6)`,
+      [tenantA,userA,roleA,tenantB,userB,roleB]
+    );
+    await expect(queryInDatabase(db,
+      `INSERT INTO tenant_user_roles (tenant_id,user_id,role_id) VALUES ($1,$2,$3)`,
+      [tenantA,userA,roleB]
+    )).rejects.toMatchObject({code:'23503'});
+    await queryInDatabase(db,
+      `INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at)
+       VALUES ($1,$2,$3,CURRENT_TIMESTAMP+INTERVAL '1 hour'),
+              ($4,$5,$6,CURRENT_TIMESTAMP+INTERVAL '1 hour'),
+              ($1,$5,$7,CURRENT_TIMESTAMP+INTERVAL '1 hour')`,
+      [userA,tenantA,hashA,userB,tenantB,hashB,hashC]
+    );
+    await expect(queryInDatabase(db,
+      `INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at)
+       VALUES ($1,$2,$3,CURRENT_TIMESTAMP+INTERVAL '1 hour')`,
+      [userB,tenantA,'d'.repeat(64)]
+    )).rejects.toMatchObject({code:'23503'});
+
+    const appClient=new Client({connectionString:withDatabaseName(db,env.DATABASE_URL)});
+    await appClient.connect();
+    try{
+      await appClient.query('BEGIN');
+      expect((await appClient.query('SELECT tenant_id FROM user_sessions')).rows).toEqual([]);
+      expect((await appClient.query('SELECT tenant_id,user_id FROM tenant_memberships')).rows).toEqual([]);
+      expect((await appClient.query('SELECT tenant_id,user_id FROM user_roles')).rows).toEqual([]);
+      await appClient.query("SELECT set_config('app.session_lookup_hash',$1,true)",[hashA]);
+      expect((await appClient.query('SELECT tenant_id FROM user_sessions')).rows).toEqual([{tenant_id:tenantA}]);
+      await appClient.query("SELECT set_config('app.current_tenant',$1,true)",[tenantA]);
+      expect((await appClient.query('SELECT tenant_id FROM user_sessions')).rows).toEqual([{tenant_id:tenantA}]);
+      expect((await appClient.query('SELECT tenant_id,user_id FROM tenant_memberships')).rows).toEqual([{tenant_id:tenantA,user_id:userA}]);
+      expect((await appClient.query('SELECT tenant_id,user_id FROM user_roles')).rows).toEqual([{tenant_id:tenantA,user_id:userA}]);
+      expect((await appClient.query('SELECT tenant_id,user_id,role_id FROM tenant_user_roles')).rows).toEqual([{tenant_id:tenantA,user_id:userA,role_id:roleA}]);
+      await appClient.query('SAVEPOINT cross_tenant_membership');
+      await expect(appClient.query(
+        `INSERT INTO tenant_memberships (tenant_id,user_id,first_name,last_name)
+         VALUES ($1,$2,'Tenant','B')`,
+        [tenantB,userB]
+      )).rejects.toMatchObject({code:'42501'});
+      await appClient.query('ROLLBACK TO SAVEPOINT cross_tenant_membership');
+      await appClient.query("SELECT set_config('app.current_user_id',$1,true)",[userA]);
+      const revoked = await appClient.query(
+        'UPDATE user_sessions SET revoked=true WHERE user_id=$1 AND revoked=false',
+        [userA]
+      );
+      expect(revoked.rowCount).toBe(2);
+      await appClient.query("SELECT set_config('app.current_tenant',$1,true)",[tenantB]);
+      expect((await appClient.query('SELECT user_id,revoked FROM user_sessions WHERE tenant_id=$1 ORDER BY user_id',[tenantB])).rows).toEqual([
+        {user_id:userA,revoked:true},
+        {user_id:userB,revoked:false}
+      ].sort((a,b)=>a.user_id.localeCompare(b.user_id)));
+      const visibleMemberships = (await appClient.query('SELECT tenant_id,user_id FROM tenant_memberships ORDER BY tenant_id,user_id')).rows;
+      expect(visibleMemberships).toEqual([
+        {tenant_id:tenantA,user_id:userA},
+        {tenant_id:tenantB,user_id:userA},
+        {tenant_id:tenantB,user_id:userB}
+      ].sort((a,b)=>a.tenant_id.localeCompare(b.tenant_id)||a.user_id.localeCompare(b.user_id)));
+      expect((await appClient.query('SELECT tenant_id,user_id FROM user_roles ORDER BY tenant_id,user_id')).rows).toEqual([
+        {tenant_id:tenantA,user_id:userA},
+        {tenant_id:tenantB,user_id:userB}
+      ].sort((a,b)=>a.tenant_id.localeCompare(b.tenant_id)||a.user_id.localeCompare(b.user_id)));
+      await appClient.query('ROLLBACK');
+    } finally { await appClient.end(); }
+
+    const flags=await queryInDatabase<{relrowsecurity:boolean;relforcerowsecurity:boolean;relname:string}>(db,
+      `SELECT relname,relrowsecurity,relforcerowsecurity FROM pg_class WHERE relname=ANY($1::text[])`,
+      [['user_roles','user_sessions','tenant_memberships','tenant_roles','tenant_role_permissions','tenant_user_roles','user_password_reset_tokens']]
+    );
+    expect(flags).toHaveLength(7);
+    expect(flags.every(row=>row.relrowsecurity&&row.relforcerowsecurity)).toBe(true);
+  });
+
+  test('Legacy-Rollenzuordnungen werden tenant-eigen migriert und nicht als globale Grants fortgeführt', async () => {
+    const db = await createTestDatabase();
+    const beforeAdministration = makeMigrationsDir({}, ['033_tenant_user_role_administration.sql']);
+    await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: beforeAdministration,
+      logger: noopLogger
+    });
+
+    const tenantId = randomUUID();
+    const userId = randomUUID();
+    const roleId = randomUUID();
+    const permissionId = randomUUID();
+    const systemUserId = randomUUID();
+    const systemRoleId = randomUUID();
+    const delegatePermissionId = randomUUID();
+    await queryInDatabase(db,
+      `INSERT INTO tenants (id,name,subdomain,tax_number,bwr_register_id)
+       VALUES ($1,'Legacy tenant',$2,'LEGACY-1','LEGACY-REG')`,
+      [tenantId,`${tenantId}.test`]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO users (id,email,password_hash,first_name,last_name)
+       VALUES ($1,$2,'test-hash','Legacy','User'),($3,$4,'test-hash','System','Administrator')`,
+      [userId,`${userId}@example.test`,systemUserId,`${systemUserId}@example.test`]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO roles (id,name,description) VALUES ($1,'Legacy tenant role','Legacy description')`,
+      [roleId]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO permissions (id,code,module,description)
+       VALUES ($1,'legacy:tenant:read','legacy','Legacy permission')`,
+      [permissionId]
+    );
+    await queryInDatabase(db,
+      'INSERT INTO role_permissions (role_id,permission_id) VALUES ($1,$2)',
+      [roleId,permissionId]
+    );
+    await queryInDatabase(db,
+      'INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)',
+      [userId,roleId,tenantId]
+    );
+    await queryInDatabase(db,
+      `UPDATE users SET is_superadmin=true WHERE id=$1`,
+      [systemUserId]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO roles (id,name,description) VALUES ($1,'Systemadministrator','Explicit system boundary')`,
+      [systemRoleId]
+    );
+    await queryInDatabase(db,
+      `INSERT INTO permissions (id,code,module,description)
+       VALUES ($1,'roles:delegate_admin','roles','Explicit system delegation')`,
+      [delegatePermissionId]
+    );
+    await queryInDatabase(db,
+      'INSERT INTO role_permissions (role_id,permission_id) VALUES ($1,$2)',
+      [systemRoleId,delegatePermissionId]
+    );
+    await queryInDatabase(db,
+      'INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)',
+      [systemUserId,systemRoleId,tenantId]
+    );
+
+    await runMigrations({
+      connectionString: withDatabaseName(db),
+      migrationsDir: makeMigrationsDir(),
+      logger: noopLogger
+    });
+
+    const migrated = await queryInDatabase(db,
+      `SELECT tm.user_id,tr.name,p.code,tur.site_id,trp.data_scope
+         FROM tenant_memberships tm
+         JOIN tenant_user_roles tur ON tur.tenant_id=tm.tenant_id AND tur.user_id=tm.user_id
+         JOIN tenant_roles tr ON tr.tenant_id=tur.tenant_id AND tr.id=tur.role_id
+         JOIN tenant_role_permissions trp ON trp.tenant_id=tr.tenant_id AND trp.role_id=tr.id
+         JOIN permissions p ON p.id=trp.permission_id
+        WHERE tm.tenant_id=$1 AND tm.user_id=$2`,
+      [tenantId,userId]
+    );
+    expect(migrated).toEqual([{
+      user_id:userId,
+      name:'Legacy tenant role',
+      code:'legacy:tenant:read',
+      site_id:null,
+      data_scope:'TENANT'
+    }]);
+    expect(await queryInDatabase(db,
+      'SELECT 1 FROM user_roles WHERE tenant_id=$1 AND user_id=$2',
+      [tenantId,userId]
+    )).toEqual([]);
+    expect(await queryInDatabase(db,
+      'SELECT 1 FROM user_roles WHERE tenant_id=$1 AND user_id=$2',
+      [tenantId,systemUserId]
+    )).toEqual([{ '?column?': 1 }]);
+    expect(await queryInDatabase(db,
+      `SELECT 1 FROM tenant_user_roles tur
+        JOIN tenant_role_permissions trp ON trp.tenant_id=tur.tenant_id AND trp.role_id=tur.role_id
+        JOIN permissions p ON p.id=trp.permission_id
+       WHERE tur.tenant_id=$1 AND tur.user_id=$2 AND p.code='roles:delegate_admin'`,
+      [tenantId,systemUserId]
+    )).toEqual([]);
+  });
+
   test('Mitarbeiter-Kontozuordnungen sind tenantgebunden und pro Konto eindeutig', async () => {
     const db = await createTestDatabase();
     await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: makeMigrationsDir(), logger: noopLogger });
@@ -584,6 +801,11 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
         `INSERT INTO users (id,email,password_hash,first_name,last_name)
          VALUES ($1,$2,'test-hash','Account','A'),($3,$4,'test-hash','Account','B')`,
         [userA,`${userA}@example.test`,userB,`${userB}@example.test`]
+      );
+      await admin.query(
+        `INSERT INTO tenant_memberships (tenant_id,user_id,first_name,last_name)
+         VALUES ($1,$2,'Account','A'),($3,$4,'Account','B')`,
+        [tenantA,userA,tenantB,userB]
       );
       await admin.query(
         'INSERT INTO roles (id,name,description) VALUES ($1,$2,$3)',
@@ -843,7 +1065,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(second.applied).toEqual([]);
     expect(second.baselined).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
 
     const after = await historyRows(db);
     expect(after).toEqual(before);
@@ -958,7 +1180,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(await tableExists(db, 'migration_marker_006')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
   });
 
   test('4. Fehlerhafte Migration wird nicht registriert und zurückgerollt', async () => {
@@ -1014,7 +1236,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
   test('7. Bestehende Datenbank mit 001–005 wird als Baseline übernommen', async () => {
     const db = await createTestDatabase();
-    const dir = makeMigrationsDir({}, ['030_service_planning.sql', '031_planning_cover_actuals.sql', '032_planning_approvals_templates_notifications.sql']);
+    const dir = makeMigrationsDir({}, ['030_service_planning.sql', '031_planning_cover_actuals.sql', '032_planning_approvals_templates_notifications.sql', '033_tenant_user_role_administration.sql']);
     const alarmMigrationPath = path.join(dir,'015_alarm_emergency_management.sql');
     const alarmMigration = fs.readFileSync(alarmMigrationPath,'utf8');
     fs.unlinkSync(alarmMigrationPath);
@@ -1166,7 +1388,8 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       '029_document_relationship_delete_permission.sql',
       '030_service_planning.sql',
       '031_planning_cover_actuals.sql',
-      '032_planning_approvals_templates_notifications.sql'
+      '032_planning_approvals_templates_notifications.sql',
+      '033_tenant_user_role_administration.sql'
     ]);
     fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
     fs.rmSync(path.join(dir, '012_document_management.sql'), { force: true });
@@ -1368,9 +1591,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
     expect(result.baselined).toEqual([]);
-    expect((await historyRows(db))).toHaveLength(30);
+    expect((await historyRows(db))).toHaveLength(31);
   });
 
   test('26. Fremde Tabelle verhindert die Einstufung als leere Datenbank', async () => {
@@ -1769,7 +1992,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1777,7 +2000,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032', '033']);
   });
 
   test('47. Fremdes Objekt bei Migration oberhalb 004 wird erkannt', async () => {
@@ -1790,7 +2013,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(31);
+    expect(await historyRows(db)).toHaveLength(32);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {

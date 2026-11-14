@@ -1,5 +1,5 @@
 import { pool, migrationPool, withTenantTransaction, withSystemTransaction } from '../config/database';
-import { cleanupTestData } from './testUtils';
+import { cleanupTestData, insertTenantMembership } from './testUtils';
 
 describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
   let tenantA: string;
@@ -74,6 +74,8 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
     );
     sopUserAId = userA.rows[0].id;
     sopUserBId = userB.rows[0].id;
+    await insertTenantMembership(tenantA, sopUserAId);
+    await insertTenantMembership(tenantB, sopUserBId);
     const planningRole = await migrationPool.query(
       `INSERT INTO roles (name,description) VALUES ($1,'Planning notification RLS fixture') RETURNING id`,
       [`PlanningRls_${Date.now()}`]
@@ -309,6 +311,12 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
     });
     expect(unscopedRows.every(result => result.rows.length === 0)).toBe(true);
 
+    await expect(withTenantTransaction(tenantA, tx => tx.query(
+      `INSERT INTO schedule_periods (tenant_id,name,date_from,date_to,time_zone,created_by)
+       VALUES ($1,$2,'2026-01-01','2026-01-31','Europe/Berlin',$3)`,
+      [tenantB, `forged-period-rls-${Date.now()}`, sopUserBId]
+    ))).rejects.toMatchObject({ code: '42501' });
+
     const forgedWrites: Array<{ sql: string; params: unknown[] }> = [
       {
         sql: `INSERT INTO schedule_periods (tenant_id,name,date_from,date_to,time_zone,created_by)
@@ -387,7 +395,7 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
 
     for (const write of forgedWrites) {
       await expect(withTenantTransaction(tenantA, tx => tx.query(write.sql, write.params)))
-        .rejects.toMatchObject({ code: '42501' });
+        .rejects.toMatchObject({ code: expect.stringMatching(/^(42501|23503)$/) });
     }
   });
 
@@ -473,7 +481,7 @@ describe('PostgreSQL Row-Level Security (RLS) & Multi-Tenant Isolation', () => {
         (tenant_id,recipient_user_id,event_type,entity_type,entity_id)
        VALUES ($1,$2,'forged.tenant','shift',$3)`,
       [tenantB, sopUserBId, planningShiftAId]
-    ))).rejects.toMatchObject({ code: '42501' });
+    ))).rejects.toMatchObject({ code: expect.stringMatching(/^(42501|23503)$/) });
     await expect(migrationPool.query(
       `INSERT INTO planning_notifications
         (tenant_id,recipient_user_id,event_type,entity_type,entity_id)

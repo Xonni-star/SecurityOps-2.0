@@ -20,6 +20,7 @@ import * as handoverController from './controllers/handoverController';
 import * as alarmWorkflowController from './controllers/alarmWorkflowController';
 import * as patrolController from './controllers/patrolController';
 import * as planningController from './controllers/planningController';
+import * as userAdministrationController from './controllers/userAdministrationController';
 
 export const app = express();
 configureTrustedProxies(app, env.TRUST_PROXY);
@@ -87,6 +88,25 @@ app.get('/api/v1/health', async (req, res) => {
 app.post('/api/v1/auth/login', authController.login);
 app.post('/api/v1/auth/logout', authenticateJwt, authController.logout);
 app.get('/api/v1/auth/me', authenticateJwt, authController.getMe);
+app.post('/api/v1/auth/password-reset/complete', userAdministrationController.completePasswordReset);
+app.post('/api/v1/auth/password', authenticateJwt, userAdministrationController.changeOwnPassword);
+
+// Mandantenbezogene Benutzer- und Rollenadministration. Der Mandant wird ausschließlich
+// aus der authentifizierten Sitzung abgeleitet; Request-Tenant-IDs werden nicht akzeptiert.
+app.get('/api/v1/admin/users', authenticateJwt, requirePermission('users:read'), userAdministrationController.listUsers);
+app.post('/api/v1/admin/users', authenticateJwt, requirePermission('users:manage'), userAdministrationController.createUser);
+app.get('/api/v1/admin/users/:id', authenticateJwt, requirePermission('users:read'), userAdministrationController.getUser);
+app.patch('/api/v1/admin/users/:id', authenticateJwt, requirePermission('users:manage'), userAdministrationController.updateUser);
+app.post('/api/v1/admin/users/:id/status/:action', authenticateJwt, requirePermission('users:manage'), userAdministrationController.setUserStatus);
+app.post('/api/v1/admin/users/:id/password-reset', authenticateJwt, requirePermission('users:manage'), userAdministrationController.preparePasswordReset);
+app.get('/api/v1/admin/users/:id/audit', authenticateJwt, requirePermission('users:read'), userAdministrationController.listUserAudit);
+app.post('/api/v1/admin/users/:id/roles', authenticateJwt, requirePermission('users:manage'), userAdministrationController.assignRole);
+app.delete('/api/v1/admin/users/:id/roles/:assignmentId', authenticateJwt, requirePermission('users:manage'), userAdministrationController.removeRole);
+app.get('/api/v1/admin/roles', authenticateJwt, requirePermission('roles:read'), userAdministrationController.listRoles);
+app.get('/api/v1/admin/permissions', authenticateJwt, requirePermission('roles:read'), userAdministrationController.listPermissions);
+app.get('/api/v1/admin/sites', authenticateJwt, requirePermission('users:read'), userAdministrationController.listAdminSites);
+app.post('/api/v1/admin/roles', authenticateJwt, requirePermission('roles:manage'), userAdministrationController.createRole);
+app.patch('/api/v1/admin/roles/:id', authenticateJwt, requirePermission('roles:manage'), userAdministrationController.updateRole);
 
 // Fachrouten (Alle mit RLS und granularer Berechtigungsprüfung geschützt)
 app.get('/api/v1/customers', authenticateJwt, requirePermission('customers:read'), clientController.listClients);

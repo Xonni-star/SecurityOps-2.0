@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Phase 13: Modulübergreifender Integrationsbericht
 
+> **Historischer Snapshot:** Die aufgeführten Verbindungen und BESTANDEN-Angaben sind nicht auf alle heutigen Module übertragbar und belegen keine vollständige Integration oder Produktionsabnahme. Maßgeblich ist die [zentrale Statusübersicht](../README.md).
+
 ## 1. Verifizierte Modulverbindungen
 
 1. **Kunden ➔ Verträge ➔ Schutzobjekte**:

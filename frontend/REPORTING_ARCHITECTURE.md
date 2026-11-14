@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Phase 9: Berichtswesen, Controlling & Management-Dashboard
 
+> **Historische Spezifikation:** Die beschriebenen Kennzahlen, Exporte und Compliance-Indizes sind nicht als implementierte oder rechtlich geprüfte Funktionen zu verstehen. Aktuelle Modulverfügbarkeit siehe [zentrale Statusübersicht](../README.md).
+
 ## 1. Architektur des Berichtswesens
 Das Berichtswesen in SecurityOps 2.0 berechnet alle Kennzahlen reproduzierbar aus echten Datenbanktabellen (`shifts`, `logbook_entries`, `employees`, `objects`, `customers`, `keys`).
 

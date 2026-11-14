@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Schritt 3: Sicherheitsaudit & Vollständiger Härtungsbericht
 
+> **Historischer Snapshot:** Dieses Audit beschreibt einen früheren Entwicklungsstand und ersetzt keine aktuelle Sicherheitsprüfung. Die damaligen Befunde und Testergebnisse sind nicht auf den aktuellen Code übertragbar. Aktuelle Änderungen und Prüfgrenzen zur Benutzer-/Rechteverwaltung stehen in [NEXT_DEVELOPMENT_REPORT.md](../docs/development/NEXT_DEVELOPMENT_REPORT.md).
+
 ## 1. Beseitigte Sicherheitslücken (Schritt 3 Abschluss)
 
 | Lücken-ID | Schweregrad | Bereich | Befund vor Behebung | Technische Behebung im Quellcode & DDL |

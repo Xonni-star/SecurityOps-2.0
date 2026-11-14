@@ -1,34 +1,28 @@
-# SecurityOps 2.0 - Phase 12: Produktions- & Deploymentarchitektur
+# SecurityOps 2.0 - Deploymentarchitektur
 
-## 1. Topologie & Netzwerktrennung
-SecurityOps 2.0 erzwingt eine strikte physische Netzwerktrennung:
-- **`secops_public` (Internet)**: Ausschließlich Caddy Reverse Proxy lauscht auf Port 80 (HTTP-Redirect) und Port 443 (HTTPS TLS 1.3).
-- **`secops_internal` (Isoliert)**: PostgreSQL 16+ und Redis laufen in einem internen Docker-Bridge-Netzwerk ohne Host-Portweiterleitung. Zugriff ist nur authentifizierten Containern gestattet.
+> **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.** Beschrieben wird die vorhandene Docker-Konfiguration in `frontend/deploy/`, nicht eine unabhängig verifizierte Produktionsumgebung.
 
-```
-Internet (Port 443) 
-   │
-   ▼
-┌────────────────────────────────────────────────────────┐
-│ Caddy Reverse Proxy (TLS 1.3, CSP, HSTS, Rate Limit)   │
-└────────────┬─────────────────────────────┬─────────────┘
-             │ /api/*                      │ Static Files
-             ▼                             ▼
-   ┌───────────────────────┐      ┌───────────────────────┐
-   │ FastAPI Backend (8000)│      │ React 18+ PWA Shell   │
-   └───────────┬───────────┘      └───────────────────────┘
-               │ (Internal Only)
-     ┌─────────┴─────────┐
-     ▼                   ▼
-┌──────────────┐   ┌──────────────┐
-│PostgreSQL 16 │   │ Redis Queue  │
-│(RLS Policies)│   │ + Celery     │
-└──────────────┘   └──────────────┘
+## Aktuelle Container-Topologie
+
+Die Produktions-Compose-Datei definiert Caddy als öffentliche TLS-/Reverse-Proxy- und Static-File-Schicht. Caddy bedient das gebaute React/Vite-Frontend und leitet `/api/*` an die TypeScript/Express-API weiter. PostgreSQL 16 und die API veröffentlichen keine Host-Ports und befinden sich im internen Docker-Netzwerk.
+
+```text
+Internet
+   |
+   v
+Caddy (Ports 80/443; TLS, statische React/Vite-Dateien)
+   | /api/*
+   v
+Express / TypeScript API (intern, Port 8000)
+   |
+   v
+PostgreSQL 16 (intern)
 ```
 
----
+Ein einmaliger `migrate`-Container führt Datenbankmigrationen mit `secops_admin` aus. Danach initialisiert `db-init` das Passwort für die Least-Privilege-Rolle `secops_app_user`; der Backend-Container nutzt diese Rolle. Ein weiterer Initialisierungscontainer bereitet das private DMS-Volume vor. Konfiguration: [`deploy/docker-compose.production.yml`](./deploy/docker-compose.production.yml), [`deploy/Caddyfile`](./deploy/Caddyfile).
 
-## 2. Horizontale Skalierungsstrategie (Multi-Server)
-1. **Frontend / CDN**: Statische PWA-Dateien können ohne Zustandsbindung auf Edge-CDNs ausgelagert werden.
-2. **Stateless API Backend**: FastAPI-Container können über Docker Swarm oder Kubernetes horizontal skaliert werden (`workers: 4`).
-3. **Zentrales PostgreSQL-Cluster**: Master/Replica mit Streaming-Replication (Hot Standby) für RPO < 5 Min.
+Ein Backup-Container ist in Compose konfiguriert. Er erstellt im 24-Stunden-Intervall einen AES-256-CBC/PBKDF2-verschlüsselten PostgreSQL-Dump inklusive DMS-Dateivolume und löscht Archive nach 30 Tagen. Das beschreibt die Konfiguration, nicht den Nachweis erfolgreicher Sicherungs- oder Wiederherstellungsläufe. Das Restore-Runbook liegt unter [`deploy/restore.sh`](./deploy/restore.sh); Wiederherstellungen müssen in einer isolierten Umgebung geübt werden.
+
+## Nicht implementierte bzw. nicht nachgewiesene Skalierung
+
+Redis, FastAPI, Celery und Kubernetes gehören nicht zur aktuellen Compose-Topologie. Es gibt keine belegte horizontale Multi-Server-Skalierung, CDN-Auslagerung oder garantierte RPO-Angabe. Die interne Docker-Netzwerkgrenze und konfigurierten Container-Ressourcen sind keine Ersatzmaßnahme für Betriebshärtung, Monitoring, Disaster-Recovery-Tests oder Sicherheitsabnahme.
