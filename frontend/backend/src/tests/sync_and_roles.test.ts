@@ -1118,6 +1118,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
        VALUES ($1,$2,'VACATION','2027-01-20','2027-01-21','APPROVED')`,
       [testTenantA, guardAId]
     ));
+    await withTenantTransaction(testTenantA, tx => tx.query(
+      `UPDATE sites SET time_zone='Pacific/Auckland' WHERE tenant_id=$1 AND id=$2`,
+      [testTenantA, siteAId]
+    ));
     const workHours = await request(app).get('/api/v1/planning/reports/work-hours?from=2027-01-11&to=2027-01-11')
       .set(authHeaders(testTokenA));
     expect(workHours.status).toBe(200);
@@ -1131,6 +1135,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
         planned_night_shifts: 1, actual_night_shifts: 1
       })
     ]));
+    await withTenantTransaction(testTenantA, tx => tx.query(
+      `UPDATE sites SET time_zone='UTC' WHERE tenant_id=$1 AND id=$2`,
+      [testTenantA, siteAId]
+    ));
     await withTenantTransaction(testTenantA, tx => tx.query(
       'UPDATE employees SET first_name=$1,last_name=$2 WHERE tenant_id=$3 AND id=$4',
       [' \t=1+1', '@SUM(1,1)', testTenantA, guardAId]
