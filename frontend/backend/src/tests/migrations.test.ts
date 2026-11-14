@@ -112,11 +112,11 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
     expect(result.baselined).toEqual([]);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
     expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
     expect(await tableExists(db, 'sync_conflict_resolution_receipts')).toBe(true);
     expect(await tableExists(db, 'documents')).toBe(true);
@@ -124,6 +124,8 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(await tableExists(db, 'emergency_plans')).toBe(true);
     expect(await tableExists(db, 'alarm_incidents')).toBe(true);
     expect(await tableExists(db, 'emergency_management_events')).toBe(true);
+    expect(await tableExists(db, 'planning_notifications')).toBe(true);
+    expect(await tableExists(db, 'shift_actual_time_revisions')).toBe(true);
     for (const table of [
       'patrol_checkpoints', 'patrol_routes', 'patrol_route_versions',
       'patrol_route_version_checkpoints', 'patrol_route_version_assignments',
@@ -148,6 +150,35 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     );
     expect(patrolSecurity).toHaveLength(16);
     expect(patrolSecurity.every((row) => row.row_security && row.force_row_security)).toBe(true);
+    const planningExtensionSecurity = await queryInDatabase<{ relname: string; row_security: boolean; force_row_security: boolean }>(
+      db,
+      `SELECT c.relname,c.relrowsecurity AS row_security,c.relforcerowsecurity AS force_row_security
+         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relname=ANY($1::text[]) ORDER BY c.relname`,
+      [['planning_notifications', 'shift_actual_time_revisions']]
+    );
+    expect(planningExtensionSecurity).toEqual([
+      { relname: 'planning_notifications', row_security: true, force_row_security: true },
+      { relname: 'shift_actual_time_revisions', row_security: true, force_row_security: true }
+    ]);
+    const planningExtensionPrivileges = await queryInDatabase<{
+      revision_select: boolean; revision_insert: boolean;
+      notification_select: boolean; notification_insert: boolean;
+      notification_read_update: boolean; notification_details_update: boolean;
+    }>(
+      db,
+      `SELECT has_table_privilege('secops_app_user','public.shift_actual_time_revisions','SELECT') AS revision_select,
+              has_table_privilege('secops_app_user','public.shift_actual_time_revisions','INSERT') AS revision_insert,
+              has_table_privilege('secops_app_user','public.planning_notifications','SELECT') AS notification_select,
+              has_table_privilege('secops_app_user','public.planning_notifications','INSERT') AS notification_insert,
+              has_column_privilege('secops_app_user','public.planning_notifications','read_at','UPDATE') AS notification_read_update,
+              has_column_privilege('secops_app_user','public.planning_notifications','details','UPDATE') AS notification_details_update`
+    );
+    expect(planningExtensionPrivileges).toEqual([{
+      revision_select: true, revision_insert: false,
+      notification_select: true, notification_insert: true,
+      notification_read_update: true, notification_details_update: false
+    }]);
     const patrolPrivileges = await queryInDatabase<{ scan_update: boolean; scan_delete: boolean; version_update: boolean; event_delete: boolean; assignment_update: boolean; assignment_delete: boolean }>(
       db,
       `SELECT has_table_privilege('secops_app_user','public.patrol_scans','UPDATE') AS scan_update,
@@ -727,6 +758,76 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     }
   });
 
+  test('031 backfills populated shifts and scopes the end-date constraint to shifts', async () => {
+    const db = await createTestDatabase();
+    const dir = makeMigrationsDir(
+      { '010_unrelated_shift_constraint.sql': 'CREATE TABLE unrelated_constraint (id integer CONSTRAINT shifts_end_date_order CHECK (id >= 0));\n' },
+      ['031_planning_cover_actuals.sql', '032_planning_approvals_templates_notifications.sql']
+    );
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+    const tenantId = (await queryInDatabase<{ id: string }>(
+      db,
+      `INSERT INTO tenants (name,subdomain,tax_number,bwr_register_id)
+       VALUES ('Pre-031 tenant',$1,'PRE031-TAX','PRE031-BWR') RETURNING id`,
+      [`pre031-${Date.now()}`]
+    ))[0].id;
+    const clientId = (await queryInDatabase<{ id: string }>(
+      db,
+      `INSERT INTO clients
+        (tenant_id,client_number,company_name,contact_person,email,phone,address,contract_start,contract_end)
+       VALUES ($1,$2,'Pre-031 client','Contact','pre031@example.test','030','Address','2020-01-01','2030-01-01')
+       RETURNING id`,
+      [tenantId, `PRE031-${Date.now()}`]
+    ))[0].id;
+    const siteId = (await queryInDatabase<{ id: string }>(
+      db,
+      `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+       VALUES ($1,$2,$3,'Pre-031 site','Address') RETURNING id`,
+      [tenantId, clientId, `PRE031-SITE-${Date.now()}`]
+    ))[0].id;
+    const shiftId = (await queryInDatabase<{ id: string }>(
+      db,
+      `INSERT INTO shifts (tenant_id,site_id,shift_date,start_time,end_time,required_qualification)
+       VALUES ($1,$2,'2024-01-02','22:00','06:00','Sachkunde') RETURNING id`,
+      [tenantId, siteId]
+    ))[0].id;
+    await expect(queryInDatabase(db, `SELECT end_date FROM shifts WHERE id=$1`, [shiftId]))
+      .rejects.toThrow(/end_date/);
+
+    fs.copyFileSync(
+      path.join(REAL_MIGRATIONS_DIR, '031_planning_cover_actuals.sql'),
+      path.join(dir, '031_planning_cover_actuals.sql')
+    );
+    fs.copyFileSync(
+      path.join(REAL_MIGRATIONS_DIR, '032_planning_approvals_templates_notifications.sql'),
+      path.join(dir, '032_planning_approvals_templates_notifications.sql')
+    );
+    await runMigrations({ connectionString: withDatabaseName(db), migrationsDir: dir, logger: noopLogger });
+
+    const backfilled = await queryInDatabase<{ end_date: string; ends_at: string }>(
+      db,
+      `SELECT end_date::text,ends_at::text FROM shifts WHERE id=$1`,
+      [shiftId]
+    );
+    expect(backfilled[0].end_date).toBe('2024-01-03');
+    await queryInDatabase(db, `UPDATE shifts SET end_date='2024-01-04' WHERE id=$1`, [shiftId]);
+    const triggered = await queryInDatabase<{ end_date: string; ends_at: string }>(
+      db,
+      `SELECT end_date::text,ends_at::text FROM shifts WHERE id=$1`,
+      [shiftId]
+    );
+    expect(triggered[0].end_date).toBe('2024-01-04');
+    expect(triggered[0].ends_at).toContain('2024-01-04');
+    const scopedConstraint = await queryInDatabase<{ present: boolean }>(
+      db,
+      `SELECT EXISTS (SELECT 1 FROM pg_constraint
+        WHERE conrelid='public.shifts'::regclass AND conname='shifts_end_date_order') AS present`
+    );
+    expect(scopedConstraint[0].present).toBe(true);
+    await expect(queryInDatabase(db, `UPDATE shifts SET end_date='2024-01-01' WHERE id=$1`, [shiftId]))
+      .rejects.toThrow(/shifts_end_date_order/);
+  });
+
   test('2. Zweiter Lauf führt keine Migration erneut aus', async () => {
     const db = await createTestDatabase();
     const dir = makeMigrationsDir();
@@ -742,7 +843,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
     expect(second.applied).toEqual([]);
     expect(second.baselined).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
 
     const after = await historyRows(db);
     expect(after).toEqual(before);
@@ -857,7 +958,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(await tableExists(db, 'migration_marker_006')).toBe(true);
 
     const history = await historyRows(db);
-    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030']);
+    expect(history.map((row) => row.version)).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
   });
 
   test('4. Fehlerhafte Migration wird nicht registriert und zurückgerollt', async () => {
@@ -913,7 +1014,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
 
   test('7. Bestehende Datenbank mit 001–005 wird als Baseline übernommen', async () => {
     const db = await createTestDatabase();
-    const dir = makeMigrationsDir({}, ['030_service_planning.sql']);
+    const dir = makeMigrationsDir({}, ['030_service_planning.sql', '031_planning_cover_actuals.sql', '032_planning_approvals_templates_notifications.sql']);
     const alarmMigrationPath = path.join(dir,'015_alarm_emergency_management.sql');
     const alarmMigration = fs.readFileSync(alarmMigrationPath,'utf8');
     fs.unlinkSync(alarmMigrationPath);
@@ -1063,7 +1164,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       '027_patrol_employee_groups.sql',
       '028_patrol_document_attachments.sql',
       '029_document_relationship_delete_permission.sql',
-      '030_service_planning.sql'
+      '030_service_planning.sql',
+      '031_planning_cover_actuals.sql',
+      '032_planning_approvals_templates_notifications.sql'
     ]);
     fs.rmSync(path.join(dir, '011_operational_sync_permissions.sql'), { force: true });
     fs.rmSync(path.join(dir, '012_document_management.sql'), { force: true });
@@ -1265,9 +1368,9 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
 
-    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030']);
+    expect(result.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
     expect(result.baselined).toEqual([]);
-    expect((await historyRows(db))).toHaveLength(28);
+    expect((await historyRows(db))).toHaveLength(30);
   });
 
   test('26. Fremde Tabelle verhindert die Einstufung als leere Datenbank', async () => {
@@ -1666,7 +1769,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       migrationsDir: dir,
       logger: noopLogger
     });
-    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030']);
+    expect(first.applied).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
 
     const second = await runMigrations({
       connectionString: withDatabaseName(db),
@@ -1674,7 +1777,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       logger: noopLogger
     });
     expect(second.applied).toEqual([]);
-    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030']);
+    expect(second.skipped).toEqual(['001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013', '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026', '027', '028', '029', '030', '031', '032']);
   });
 
   test('47. Fremdes Objekt bei Migration oberhalb 004 wird erkannt', async () => {
@@ -1687,7 +1790,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     const message = await captureMigrationError(db, dir);
     expect(message).toMatch(/Unerwartetes Objekt im Schema public: Tabelle "fremd_tabelle"/);
     expect(message).not.toMatch(/"neue_tabelle"/);
-    expect(await historyRows(db)).toHaveLength(29);
+    expect(await historyRows(db)).toHaveLength(31);
   });
 
   test('48. Fremde Funktion mit gleichem Namen, aber anderer Signatur wird erkannt', async () => {

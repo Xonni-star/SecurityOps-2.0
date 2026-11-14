@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 import crypto from 'crypto';
-import { storePlanningFindings, validateShiftCandidate } from '../services/planningService';
+import { shiftEndDateAfterStartDateChange, storePlanningFindings, validateShiftCandidate } from '../services/planningService';
 
 /**
  * Tenant-scoped reference data and CRUD endpoints for the operational modules.
@@ -368,6 +368,7 @@ const shiftCreateSchema = z.object({
   siteId: z.string().guid(),
   employeeId: z.string().guid().nullable().optional(),
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date muss YYYY-MM-DD sein.'),
+  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'endDate muss YYYY-MM-DD sein.').optional(),
   startTime: z.string().min(3).max(10),
   endTime: z.string().min(3).max(10),
   startOffsetMinutes: z.number().int().min(-840).max(840).optional(),
@@ -414,6 +415,7 @@ const SHIFT_COLUMNS: Record<string, string> = {
   siteId: 'site_id',
   employeeId: 'employee_id',
   date: 'shift_date',
+  endDate: 'end_date',
   startTime: 'start_time',
   endTime: 'end_time',
   type: 'type',
@@ -446,9 +448,14 @@ const TASK_COLUMNS: Record<string, string> = {
 
 const SHIFT_SELECT = `s.id, s.site_id, st.name AS site_name, s.employee_id,
   NULLIF(concat(e.first_name, ' ', e.last_name), ' ') AS employee_name,
-  s.shift_date, s.start_time, s.end_time, s.starts_at, s.ends_at, s.time_zone,
+  s.shift_date, s.end_date, s.start_time, s.end_time, s.starts_at, s.ends_at, s.time_zone,
   s.break_minutes, s.type, s.status, s.planning_status,
   s.required_qualification, s.conflict_reason, s.revision_version`;
+
+function dateOnly(value: string | Date): string {
+  if (!(value instanceof Date)) return String(value).slice(0, 10);
+  return `${String(value.getFullYear()).padStart(4, '0')}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
 
 const KEY_SELECT = `k.id, k.site_id, st.name AS site_name, k.key_number, k.label,
   k.type, k.status, k.current_holder_id,
@@ -529,15 +536,15 @@ export async function createShift(req: Request, res: Response, next: NextFunctio
       }
       const inserted = await client.query(
         `INSERT INTO shifts
-          (tenant_id, site_id, employee_id, shift_date, start_time, end_time, starts_at, ends_at, time_zone,
+          (tenant_id, site_id, employee_id, shift_date, end_date, start_time, end_time, starts_at, ends_at, time_zone,
            break_minutes, type, status, planning_status, required_qualification, conflict_reason)
-         VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft',$12,$13)
-         RETURNING id,site_id,employee_id,shift_date,start_time,end_time,starts_at,ends_at,time_zone,
+         VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft',$13,$14)
+         RETURNING id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
                    break_minutes,type,status,planning_status,required_qualification,conflict_reason,revision_version`,
         [
-          tenantId, body.siteId, body.date, body.startTime, body.endTime, validation.resolved.startsAt,
-          validation.resolved.endsAt, validation.resolved.timeZone, body.breakMinutes, body.type,
-          body.status, body.requiredQualification, body.conflictReason ?? null
+          tenantId, body.siteId, body.date, validation.resolved.endDate, body.startTime, body.endTime,
+          validation.resolved.startsAt, validation.resolved.endsAt, validation.resolved.timeZone,
+          body.breakMinutes, body.type, body.status, body.requiredQualification, body.conflictReason ?? null
         ]
       );
       const shiftId = inserted.rows[0].id as string;
@@ -589,7 +596,7 @@ export async function updateShift(req: Request, res: Response, next: NextFunctio
 
     const result = await withTenantTransaction(tenantId, async client => {
       const current = await client.query(
-        `SELECT site_id,employee_id,shift_date,start_time,end_time,break_minutes,
+        `SELECT site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,break_minutes,
                 required_qualification,revision_version,planning_status,schedule_period_id
            FROM shifts WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
         [tenantId, id]
@@ -608,19 +615,46 @@ export async function updateShift(req: Request, res: Response, next: NextFunctio
         if (period.rows[0]?.status === 'published') return { published: true as const };
       }
       const employeeId = changes.employeeId === undefined ? old.employee_id : changes.employeeId;
+      const shiftDate = changes.date ?? dateOnly(old.shift_date);
+      const intervalChanged = changes.siteId !== undefined || changes.date !== undefined ||
+        changes.endDate !== undefined || changes.startTime !== undefined || changes.endTime !== undefined ||
+        changes.startOffsetMinutes !== undefined || changes.endOffsetMinutes !== undefined;
       const validation = await validateShiftCandidate(client, {
         tenantId,
         siteId: changes.siteId ?? old.site_id,
         employeeId,
-        date: changes.date ?? old.shift_date.toISOString?.().slice(0, 10) ?? String(old.shift_date).slice(0, 10),
+        date: shiftDate,
+        endDate: changes.endDate ?? (changes.date === undefined ? dateOnly(old.end_date)
+          : shiftEndDateAfterStartDateChange(dateOnly(old.shift_date), dateOnly(old.end_date), shiftDate)),
         startTime: changes.startTime ?? String(old.start_time).slice(0, 8),
         endTime: changes.endTime ?? String(old.end_time).slice(0, 8),
         startOffsetMinutes: changes.startOffsetMinutes,
         endOffsetMinutes: changes.endOffsetMinutes,
         requiredQualification: changes.requiredQualification ?? old.required_qualification,
         breakMinutes: changes.breakMinutes ?? old.break_minutes,
+        storedStartsAt: intervalChanged ? undefined : old.starts_at,
+        storedEndsAt: intervalChanged ? undefined : old.ends_at,
         excludeShiftId: id
       });
+      if (old.schedule_period_id) {
+        const period = await client.query(
+          'SELECT status,date_from,date_to FROM schedule_periods WHERE tenant_id=$1 AND id=$2',
+          [tenantId, old.schedule_period_id]
+        );
+        if (period.rows[0]?.status === 'published') return { published: true as const };
+        if (period.rows.length) {
+          const periodFrom = dateOnly(period.rows[0].date_from);
+          const periodTo = dateOnly(period.rows[0].date_to);
+          const shiftFrom = changes.date ?? dateOnly(old.shift_date);
+          if (shiftFrom < periodFrom || validation.resolved.endDate > periodTo) {
+            validation.findings.push({
+              code: 'OUTSIDE_SCHEDULE_PERIOD', severity: 'blocking',
+              message: 'Die Schicht liegt außerhalb des Datumsbereichs der Dienstplanperiode.',
+              details: { periodFrom, periodTo, shiftFrom, shiftTo: validation.resolved.endDate }
+            });
+          }
+        }
+      }
       if (validation.findings.some(finding => finding.severity === 'blocking')) {
         const stored = await storePlanningFindings(client, tenantId, validation.findings, {
           shiftId: id, employeeId: employeeId ?? undefined, profileVersionId: validation.profileVersionId
@@ -628,14 +662,16 @@ export async function updateShift(req: Request, res: Response, next: NextFunctio
         return { validationFailure: stored.findings };
       }
       const assignments = entries
-        .filter(([key]) => key !== 'startOffsetMinutes' && key !== 'endOffsetMinutes')
+        .filter(([key]) => key !== 'startOffsetMinutes' && key !== 'endOffsetMinutes' && key !== 'endDate')
         .map(([key], index) => `${SHIFT_COLUMNS[key]} = $${index + 1}`);
       const values: unknown[] = entries
-        .filter(([key]) => key !== 'startOffsetMinutes' && key !== 'endOffsetMinutes')
+        .filter(([key]) => key !== 'startOffsetMinutes' && key !== 'endOffsetMinutes' && key !== 'endDate')
         .map(([, value]) => value);
-      assignments.push('starts_at = $' + (values.length + 1), 'ends_at = $' + (values.length + 2), 'time_zone = $' + (values.length + 3));
-      values.push(validation.resolved.startsAt, validation.resolved.endsAt, validation.resolved.timeZone);
-      const resetsValidation = ['siteId', 'employeeId', 'date', 'startTime', 'endTime', 'requiredQualification', 'breakMinutes']
+      assignments.push('end_date = $' + (values.length + 1), 'starts_at = $' + (values.length + 2),
+        'ends_at = $' + (values.length + 3), 'time_zone = $' + (values.length + 4));
+      values.push(validation.resolved.endDate, validation.resolved.startsAt, validation.resolved.endsAt, validation.resolved.timeZone);
+      const resetsValidation = ['siteId', 'employeeId', 'date', 'endDate', 'startTime', 'endTime',
+        'startOffsetMinutes', 'endOffsetMinutes', 'requiredQualification', 'breakMinutes']
         .some(key => (changes as Record<string, unknown>)[key] !== undefined);
       if (resetsValidation) assignments.push("planning_status = 'draft'");
       assignments.push('revision_version = revision_version + 1', 'updated_at = CURRENT_TIMESTAMP');
@@ -644,7 +680,7 @@ export async function updateShift(req: Request, res: Response, next: NextFunctio
         `UPDATE shifts SET ${assignments.join(', ')}
           WHERE id=$${values.length - 2} AND tenant_id=$${values.length - 1}
             AND revision_version=$${values.length}
-          RETURNING id,site_id,employee_id,shift_date,start_time,end_time,starts_at,ends_at,time_zone,
+          RETURNING id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
                     break_minutes,type,status,planning_status,required_qualification,conflict_reason,revision_version`,
         values
       );

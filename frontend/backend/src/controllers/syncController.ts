@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
 import { createHandover, handoverCreateSchema, HandoverConflictError } from '../services/handoverService';
 import { computePayloadHash } from '../services/syncHash';
-import { storePlanningFindings, validateShiftCandidate } from '../services/planningService';
+import { shiftEndDateAfterStartDateChange, storePlanningFindings, validateShiftCandidate } from '../services/planningService';
 import {
   recordPatrolException,
   recordPatrolRoundCompletion,
@@ -36,6 +36,38 @@ const syncPushBatchSchema = z.object({
   deviceId: z.string().min(4).max(128),
   mutations: z.array(syncMutationItemSchema).min(1, 'Mindestens eine Mutation muss übermittelt werden.')
 });
+
+function dateOnly(value: string | Date): string {
+  if (!(value instanceof Date)) return String(value).slice(0, 10);
+  return `${String(value.getFullYear()).padStart(4, '0')}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
+
+function canonicalShiftSnapshot(row: any): Record<string, unknown> {
+  const staffingRequirements = row.staffing_requirements ?? [];
+  return {
+    id: row.id,
+    siteId: row.site_id,
+    employeeId: row.employee_id,
+    date: dateOnly(row.shift_date),
+    endDate: dateOnly(row.end_date),
+    startTime: String(row.start_time).slice(0, 8),
+    endTime: String(row.end_time).slice(0, 8),
+    startsAt: row.starts_at,
+    endsAt: row.ends_at,
+    timeZone: row.time_zone,
+    breakMinutes: row.break_minutes,
+    type: row.type,
+    status: row.status,
+    planningStatus: row.planning_status,
+    requiredQualification: row.required_qualification,
+    conflictReason: row.conflict_reason,
+    schedulePeriodId: row.schedule_period_id,
+    revisionVersion: Number(row.revision_version),
+    staffingRequirements: staffingRequirements.length
+      ? staffingRequirements
+      : [{ qualificationType: row.required_qualification, requiredCount: 1 }]
+  };
+}
 
 const conflictResolveSchema = z.object({
   clientUuid: z.string().min(8).max(64),
@@ -180,7 +212,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
           continue;
         }
 
-        let itemResult: SyncResultItem;
+        let itemResult: SyncResultItem | undefined;
 
         // 1. GUARDBOOK
         if (mut.entityType === 'guardbook') {
@@ -299,6 +331,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               employeeId: z.string().guid().nullable().optional(),
               shiftDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
               date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+              endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
               startTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/),
               endTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/),
               startOffsetMinutes: z.number().int().min(-840).max(840).optional(),
@@ -322,7 +355,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               const value = input.data;
               const validation = await validateShiftCandidate(client, {
                 tenantId, siteId: value.siteId, employeeId: value.employeeId ?? null,
-                date: value.date!, startTime: value.startTime, endTime: value.endTime,
+                date: value.date!, endDate: value.endDate, startTime: value.startTime, endTime: value.endTime,
                 startOffsetMinutes: value.startOffsetMinutes, endOffsetMinutes: value.endOffsetMinutes,
                 breakMinutes: value.breakMinutes, requiredQualification: value.requiredQualification
               });
@@ -338,13 +371,13 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               } else {
                 const inserted = await client.query(
                   `INSERT INTO shifts
-                    (tenant_id,site_id,employee_id,shift_date,start_time,end_time,starts_at,ends_at,time_zone,
+                    (tenant_id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
                      break_minutes,type,status,planning_status,required_qualification,conflict_reason,
                      client_mutation_id,revision_version)
-                   VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,'draft',$12,$13,$14,1)
+                   VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'draft',$13,$14,$15,1)
                    ON CONFLICT (tenant_id,client_mutation_id) DO NOTHING
-                   RETURNING id,revision_version`,
-                  [tenantId, value.siteId, value.date, value.startTime, value.endTime,
+                   RETURNING id,revision_version,end_date`,
+                  [tenantId, value.siteId, value.date, validation.resolved.endDate, value.startTime, value.endTime,
                     validation.resolved.startsAt, validation.resolved.endsAt, validation.resolved.timeZone,
                     value.breakMinutes, value.type, value.employeeId ? value.status : 'Offen',
                     value.requiredQualification, value.conflictReason ?? null, mut.clientUuid]
@@ -384,8 +417,13 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
               itemResult = { clientUuid: mut.clientUuid, serverId: 'none', status: 'REJECTED', serverVersion: mut.baseVersion, message: 'Ungültige Schicht-ID.' };
             } else {
               const current = await client.query(
-                `SELECT id,site_id,employee_id,shift_date,start_time,end_time,starts_at,ends_at,time_zone,
-                        break_minutes,type,status,planning_status,required_qualification,conflict_reason,revision_version
+                `SELECT id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
+                        break_minutes,type,status,planning_status,required_qualification,conflict_reason,schedule_period_id,revision_version,
+                        COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                          'qualificationType',qualification_type,'requiredCount',required_count
+                        ) ORDER BY qualification_type)
+                          FROM shift_staffing_requirements r
+                         WHERE r.tenant_id=shifts.tenant_id AND r.shift_id=shifts.id), '[]'::jsonb) AS staffing_requirements
                    FROM shifts WHERE tenant_id=$1 AND id=$2 FOR UPDATE`,
                 [tenantId, shiftId.data]
               );
@@ -395,13 +433,18 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 itemResult = {
                   clientUuid: mut.clientUuid, serverId: shiftId.data, status: 'CONFLICT',
                   serverVersion: current.rows[0].revision_version,
-                  conflictData: { serverStatus: current.rows[0].status, serverVersion: current.rows[0].revision_version },
+                  conflictData: {
+                    serverStatus: current.rows[0].status,
+                    serverVersion: current.rows[0].revision_version,
+                    serverSnapshot: canonicalShiftSnapshot(current.rows[0])
+                  },
                   message: 'Atomarer Versionskonflikt bei Schichtaktualisierung.'
                 };
               } else if (current.rows[0].planning_status === 'published') {
                 itemResult = {
                   clientUuid: mut.clientUuid, serverId: shiftId.data, status: 'CONFLICT',
                   serverVersion: current.rows[0].revision_version,
+                  conflictData: { serverSnapshot: canonicalShiftSnapshot(current.rows[0]) },
                   message: 'Veröffentlichte Schichten müssen über einen neuen Dienstplanvorgang geändert werden.'
                 };
               } else {
@@ -412,6 +455,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                   employeeId: z.string().guid().nullable().optional(),
                   shiftDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
                   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+                  endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
                   startTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
                   endTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
                   startOffsetMinutes: z.number().int().min(-840).max(840).optional(),
@@ -427,18 +471,45 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                 } else {
                   const value = updateSchema.data;
                   const employeeId = value.employeeId === undefined ? old.employee_id : value.employeeId;
+                  const shiftDate = value.shiftDate ?? value.date ?? dateOnly(old.shift_date);
+                  const intervalChanged = value.siteId !== undefined || value.shiftDate !== undefined ||
+                    value.date !== undefined || value.endDate !== undefined || value.startTime !== undefined ||
+                    value.endTime !== undefined || value.startOffsetMinutes !== undefined ||
+                    value.endOffsetMinutes !== undefined;
                   const validation = await validateShiftCandidate(client, {
                     tenantId, siteId: value.siteId ?? old.site_id, employeeId,
-                    date: value.shiftDate ?? value.date ?? String(old.shift_date).slice(0, 10),
+                    date: shiftDate,
+                    endDate: value.endDate ?? (value.shiftDate === undefined && value.date === undefined
+                      ? dateOnly(old.end_date)
+                      : shiftEndDateAfterStartDateChange(dateOnly(old.shift_date), dateOnly(old.end_date), shiftDate)),
                     startTime: value.startTime ?? String(old.start_time).slice(0, 8),
                     endTime: value.endTime ?? String(old.end_time).slice(0, 8),
                     startOffsetMinutes: value.startOffsetMinutes,
                     endOffsetMinutes: value.endOffsetMinutes,
                     breakMinutes: value.breakMinutes ?? old.break_minutes,
                     requiredQualification: value.requiredQualification ?? old.required_qualification,
+                    storedStartsAt: intervalChanged ? undefined : old.starts_at,
+                    storedEndsAt: intervalChanged ? undefined : old.ends_at,
                     excludeShiftId: shiftId.data
                   });
-                  if (validation.findings.some(finding => finding.severity === 'blocking')) {
+                  if (old.schedule_period_id) {
+                    const period = await client.query(
+                      'SELECT date_from,date_to,status FROM schedule_periods WHERE tenant_id=$1 AND id=$2',
+                      [tenantId, old.schedule_period_id]
+                    );
+                    if (period.rows[0]?.status === 'published') {
+                      itemResult = { clientUuid: mut.clientUuid, serverId: shiftId.data, status: 'CONFLICT',
+                        serverVersion: old.revision_version, message: 'Veröffentlichte Schichten können nicht offline geändert werden.' };
+                    } else if (period.rows.length &&
+                        ((value.shiftDate ?? value.date ?? dateOnly(old.shift_date)) < dateOnly(period.rows[0].date_from) ||
+                         validation.resolved.endDate > dateOnly(period.rows[0].date_to))) {
+                      validation.findings.push({
+                        code: 'OUTSIDE_SCHEDULE_PERIOD', severity: 'blocking',
+                        message: 'Die Schicht liegt außerhalb des Datumsbereichs der Dienstplanperiode.'
+                      });
+                    }
+                  }
+                  if (!itemResult && validation.findings.some(finding => finding.severity === 'blocking')) {
                     const stored = await storePlanningFindings(client, tenantId, validation.findings, {
                       shiftId: shiftId.data, employeeId: employeeId ?? undefined,
                       profileVersionId: validation.profileVersionId
@@ -448,7 +519,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                       serverVersion: old.revision_version, message: 'Serverseitige Dienstplanprüfung abgelehnt.',
                       conflictData: { validationRunId: stored.runId, findings: stored.findings }
                     };
-                  } else {
+                  } else if (!itemResult) {
                     const rawFields: Array<[string, unknown, string]> = [
                       ['siteId', value.siteId, 'site_id'], ['employeeId', value.employeeId, 'employee_id'],
                       ['shiftDate', value.shiftDate ?? value.date, 'shift_date'], ['startTime', value.startTime, 'start_time'],
@@ -459,10 +530,10 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
                     const fields = rawFields.filter((field): field is [string, unknown, string] => field[1] !== undefined);
                     const sets = fields.map((field, index) => `${field[2]}=$${index + 1}`);
                     const values: unknown[] = fields.map(field => field[1]);
-                    sets.push(`starts_at=$${values.length + 1}`, `ends_at=$${values.length + 2}`,
-                      `time_zone=$${values.length + 3}`, "planning_status='draft'",
+                    sets.push(`end_date=$${values.length + 1}`, `starts_at=$${values.length + 2}`,
+                      `ends_at=$${values.length + 3}`, `time_zone=$${values.length + 4}`, "planning_status='draft'",
                       'revision_version=revision_version+1', 'updated_at=CURRENT_TIMESTAMP');
-                    values.push(validation.resolved.startsAt, validation.resolved.endsAt, validation.resolved.timeZone);
+                    values.push(validation.resolved.endDate, validation.resolved.startsAt, validation.resolved.endsAt, validation.resolved.timeZone);
                     values.push(shiftId.data, tenantId, mut.baseVersion);
                     const updated = await client.query(
                       `UPDATE shifts SET ${sets.join(', ')}
@@ -957,6 +1028,7 @@ export async function pushSyncMutations(req: Request, res: Response, next: NextF
         // ----------------------------------------------------------------------
         // ATOMARE PERSISTIERUNG IN sync_idempotency_receipts
         // ----------------------------------------------------------------------
+        if (!itemResult) throw new Error(`Sync-Mutation ${mut.clientUuid} wurde nicht verarbeitet.`);
         await client.query(
           `INSERT INTO sync_idempotency_receipts (tenant_id, client_mutation_id, entity_type, action, payload_hash, status, server_id, server_version, response_json)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -1217,8 +1289,13 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
       else if (body.entityType === 'shift') {
         const shiftId = z.string().guid().parse(body.localPayload?.id || body.clientUuid);
         const shiftCheck = await client.query(
-          `SELECT id,site_id,employee_id,shift_date,start_time,end_time,starts_at,ends_at,time_zone,
-                  break_minutes,type,status,required_qualification,conflict_reason,revision_version
+          `SELECT id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,time_zone,
+                  break_minutes,type,status,planning_status,required_qualification,conflict_reason,schedule_period_id,revision_version,
+                  COALESCE((SELECT jsonb_agg(jsonb_build_object(
+                    'qualificationType',qualification_type,'requiredCount',required_count
+                  ) ORDER BY qualification_type)
+                    FROM shift_staffing_requirements r
+                   WHERE r.tenant_id=shifts.tenant_id AND r.shift_id=shifts.id), '[]'::jsonb) AS staffing_requirements
              FROM shifts WHERE id=$1 AND tenant_id=$2 FOR UPDATE`,
           [shiftId, tenantId]
         );
@@ -1231,7 +1308,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
 
         if (body.strategy === 'USE_LOCAL') {
           if (Number(currentShift.revision_version) !== body.expectedVersion) {
-            throw new ConflictError(`Versionskonflikt: Server-Version (${currentShift.revision_version}) weicht von erwarteter Version (${body.expectedVersion}) ab.`);
+            conflictResponseData = {
+              applied: false,
+              code: 'REVISION_CONFLICT',
+              clientUuid: body.clientUuid,
+              entityType: body.entityType,
+              strategy: body.strategy,
+              serverState: canonicalShiftSnapshot(currentShift),
+              serverVersion: Number(currentShift.revision_version)
+            };
+            return;
           }
           const local = z.object({
             employeeId: z.string().guid().nullable().optional(),
@@ -1239,6 +1325,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
             conflictReason: z.string().max(500).nullable().optional(),
             shiftDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
             date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+            endDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
             startTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
             endTime: z.string().regex(/^\d{2}:\d{2}(?::\d{2})?$/).optional(),
             startOffsetMinutes: z.number().int().min(-840).max(840).optional(),
@@ -1247,17 +1334,43 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
             requiredQualification: z.string().min(2).max(100).optional()
           }).strict().parse(body.localPayload ?? {});
           const employeeId = local.employeeId === undefined ? currentShift.employee_id : local.employeeId;
+          const shiftDate = local.shiftDate ?? local.date ?? dateOnly(currentShift.shift_date);
+          const intervalChanged = local.shiftDate !== undefined || local.date !== undefined ||
+            local.endDate !== undefined || local.startTime !== undefined || local.endTime !== undefined ||
+            local.startOffsetMinutes !== undefined || local.endOffsetMinutes !== undefined;
           const validation = await validateShiftCandidate(client, {
             tenantId, siteId: currentShift.site_id, employeeId,
-            date: local.shiftDate ?? local.date ?? String(currentShift.shift_date).slice(0, 10),
+            date: shiftDate,
+            endDate: local.endDate ?? (local.shiftDate === undefined && local.date === undefined
+              ? dateOnly(currentShift.end_date)
+              : shiftEndDateAfterStartDateChange(dateOnly(currentShift.shift_date), dateOnly(currentShift.end_date), shiftDate)),
             startTime: local.startTime ?? String(currentShift.start_time).slice(0, 8),
             endTime: local.endTime ?? String(currentShift.end_time).slice(0, 8),
             startOffsetMinutes: local.startOffsetMinutes,
             endOffsetMinutes: local.endOffsetMinutes,
             breakMinutes: local.breakMinutes ?? currentShift.break_minutes,
             requiredQualification: local.requiredQualification ?? currentShift.required_qualification,
+            storedStartsAt: intervalChanged ? undefined : currentShift.starts_at,
+            storedEndsAt: intervalChanged ? undefined : currentShift.ends_at,
             excludeShiftId: shiftId
           });
+          if (currentShift.schedule_period_id) {
+            const period = await client.query(
+              'SELECT date_from,date_to,status FROM schedule_periods WHERE tenant_id=$1 AND id=$2',
+              [tenantId, currentShift.schedule_period_id]
+            );
+            if (period.rows[0]?.status === 'published') {
+              throw new ConflictError('Veröffentlichte Schichten können nicht offline geändert werden.');
+            }
+            if (period.rows.length &&
+                ((local.shiftDate ?? local.date ?? dateOnly(currentShift.shift_date)) < dateOnly(period.rows[0].date_from) ||
+                 validation.resolved.endDate > dateOnly(period.rows[0].date_to))) {
+              validation.findings.push({
+                code: 'OUTSIDE_SCHEDULE_PERIOD', severity: 'blocking',
+                message: 'Die Schicht liegt außerhalb des Datumsbereichs der Dienstplanperiode.'
+              });
+            }
+          }
           if (validation.findings.some(finding => finding.severity === 'blocking')) {
             const stored = await storePlanningFindings(client, tenantId, validation.findings, {
               shiftId, employeeId: employeeId ?? undefined, profileVersionId: validation.profileVersionId
@@ -1268,7 +1381,7 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
               clientUuid: body.clientUuid,
               entityType: body.entityType,
               strategy: body.strategy,
-              serverState: currentShift,
+              serverState: canonicalShiftSnapshot(currentShift),
               validationRunId: stored.runId,
               findings: stored.findings
             };
@@ -1277,15 +1390,16 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
           const updRes = await client.query(
             `UPDATE shifts
                 SET employee_id=$1,status=COALESCE($2,status),conflict_reason=$3,
-                    shift_date=$4,start_time=$5,end_time=$6,starts_at=$7,ends_at=$8,time_zone=$9,
-                    break_minutes=$10,required_qualification=$11,planning_status='draft',
+                    shift_date=$4,end_date=$5,start_time=$6,end_time=$7,starts_at=$8,ends_at=$9,time_zone=$10,
+                    break_minutes=$11,required_qualification=$12,planning_status='draft',
                     revision_version=revision_version+1,updated_at=CURRENT_TIMESTAMP
-              WHERE id=$12 AND tenant_id=$13 AND revision_version=$14
-              RETURNING id,site_id,employee_id,shift_date,start_time,end_time,starts_at,ends_at,
+              WHERE id=$13 AND tenant_id=$14 AND revision_version=$15
+              RETURNING id,site_id,employee_id,shift_date,end_date,start_time,end_time,starts_at,ends_at,
                         time_zone,break_minutes,type,status,planning_status,required_qualification,
                         conflict_reason,revision_version`,
             [employeeId, local.status ?? null, local.conflictReason ?? null,
               local.shiftDate ?? local.date ?? currentShift.shift_date,
+              validation.resolved.endDate,
               local.startTime ?? currentShift.start_time, local.endTime ?? currentShift.end_time,
               validation.resolved.startsAt, validation.resolved.endsAt, validation.resolved.timeZone,
               local.breakMinutes ?? currentShift.break_minutes,
@@ -1325,10 +1439,10 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
              VALUES ($1,$2,'shift.conflict_resolution','shift',$3,$4::jsonb)`,
             [tenantId, userId, shiftId, JSON.stringify({ clientUuid: body.clientUuid, validationRunId: stored.runId })]
           );
-          actualServerData = updRes.rows[0];
+          actualServerData = canonicalShiftSnapshot(updRes.rows[0]);
           updated = true;
         } else if (body.strategy === 'USE_SERVER') {
-          actualServerData = currentShift;
+          actualServerData = canonicalShiftSnapshot(currentShift);
           updated = true;
         }
       }
@@ -1460,8 +1574,9 @@ export async function resolveSyncConflict(req: Request, res: Response, next: Nex
     });
 
     if (conflictResponseData?.applied === false) {
-    res.status(422).json({ success: false, ...conflictResponseData });
-    return;
+      res.status(conflictResponseData.code === 'REVISION_CONFLICT' ? 409 : 422)
+        .json({ success: false, ...conflictResponseData });
+      return;
     }
 
     res.json({

@@ -15,9 +15,12 @@ export interface ShiftCandidate extends LocalShiftTime {
   tenantId: string;
   siteId: string;
   employeeId?: string | null;
+  lockEmployee?: boolean;
   requiredQualification: string;
   breakMinutes?: number;
   excludeShiftId?: string;
+  storedStartsAt?: Date | string;
+  storedEndsAt?: Date | string;
 }
 
 export interface PlanningFinding {
@@ -52,6 +55,13 @@ function wallParts(epochMs: number, timeZone: string): number[] {
   }).formatToParts(new Date(epochMs));
   const value = (type: string) => Number(parts.find(part => part.type === type)?.value);
   return [value('year'), value('month'), value('day'), value('hour'), value('minute'), value('second')];
+}
+
+function dateAtInstant(value: Date | string, timeZone: string): string {
+  const instant = value instanceof Date ? value : new Date(value);
+  if (!Number.isFinite(instant.getTime())) throw new PlanningTimeError('Gespeicherter Schichtzeitraum ist ungültig.');
+  const [year, month, day] = wallParts(instant.getTime(), timeZone);
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
 function parseLocalDateTime(date: string, time: string): { date: string; time: string; epochMs: number } {
@@ -127,6 +137,15 @@ function resolveLocalInstant(
 function addOneDate(date: string): string {
   const parsed = parseLocalDateTime(date, '12:00');
   return new Date(parsed.epochMs + 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+}
+
+export function shiftEndDateAfterStartDateChange(oldStartDate: string, oldEndDate: string, newStartDate: string): string {
+  const oldStart = parseLocalDateTime(oldStartDate, '12:00').epochMs;
+  const oldEnd = parseLocalDateTime(oldEndDate, '12:00').epochMs;
+  const newStart = parseLocalDateTime(newStartDate, '12:00').epochMs;
+  const dayOffset = Math.round((oldEnd - oldStart) / (24 * 60 * 60 * 1000));
+  const shifted = new Date(newStart + dayOffset * 24 * 60 * 60 * 1000);
+  return `${String(shifted.getUTCFullYear()).padStart(4, '0')}-${String(shifted.getUTCMonth() + 1).padStart(2, '0')}-${String(shifted.getUTCDate()).padStart(2, '0')}`;
 }
 
 export function resolveShiftTime(input: LocalShiftTime, siteTimeZone: string): ResolvedShiftTime {
@@ -214,11 +233,27 @@ export async function validateShiftCandidate(
     };
   }
 
-  const resolved = resolveShiftTime({ ...candidate, timeZone: site.rows[0].time_zone }, site.rows[0].time_zone);
+  const timeZone = site.rows[0].time_zone as string;
+  let resolved: ResolvedShiftTime;
+  if (candidate.storedStartsAt !== undefined && candidate.storedEndsAt !== undefined) {
+    const startsAt = candidate.storedStartsAt instanceof Date ? candidate.storedStartsAt : new Date(candidate.storedStartsAt);
+    const endsAt = candidate.storedEndsAt instanceof Date ? candidate.storedEndsAt : new Date(candidate.storedEndsAt);
+    if (!Number.isFinite(startsAt.getTime()) || !Number.isFinite(endsAt.getTime()) || endsAt <= startsAt) {
+      throw new PlanningTimeError('Gespeicherter Schichtzeitraum ist ungültig.');
+    }
+    resolved = {
+      timeZone,
+      startsAt,
+      endsAt,
+      endDate: candidate.endDate ?? dateAtInstant(endsAt, timeZone)
+    };
+  } else {
+    resolved = resolveShiftTime({ ...candidate, timeZone }, timeZone);
+  }
   const findings: PlanningFinding[] = [];
   let profileVersionId: string | undefined;
   const profile = await client.query(
-    `SELECT v.id, v.source_name, v.rules
+    `SELECT v.id, p.scope, v.source_name, v.rules
        FROM schedule_rule_profile_versions v
        JOIN schedule_rule_profiles p ON p.id=v.profile_id AND p.tenant_id=v.tenant_id
       WHERE v.tenant_id=$1 AND p.active=TRUE
@@ -227,12 +262,25 @@ export async function validateShiftCandidate(
         AND v.effective_from <= $2::date
         AND (v.effective_until IS NULL OR v.effective_until >= $2::date)
       ORDER BY v.effective_from DESC, v.version_number DESC
-      LIMIT 1`,
+      `,
     [candidate.tenantId, candidate.date, candidate.siteId]
   );
-  const rules = profile.rows[0]?.rules;
-  profileVersionId = profile.rows[0]?.id;
-  const ruleSource = profile.rows[0]?.source_name as string | undefined;
+  const siteSpecificProfiles = profile.rows.filter(row => row.scope?.siteId === candidate.siteId);
+  const applicableProfiles = siteSpecificProfiles.length
+    ? siteSpecificProfiles
+    : profile.rows.filter(row => typeof row.scope?.siteId !== 'string');
+  const selectedProfile = applicableProfiles.length === 1 ? applicableProfiles[0] : undefined;
+  const rules = selectedProfile?.rules;
+  profileVersionId = selectedProfile?.id;
+  const ruleSource = selectedProfile?.source_name as string | undefined;
+  if (applicableProfiles.length > 1) {
+    findings.push({
+      code: 'RULE_PROFILE_AMBIGUOUS',
+      severity: 'blocking',
+      message: 'Mehrere aktive, freigegebene Regelprofilrevisionen gelten gleichzeitig für diesen Einsatz.',
+      details: { profileVersionIds: applicableProfiles.map(row => row.id) }
+    });
+  }
   const addRuleFinding = (
     code: string,
     message: string,
@@ -309,7 +357,9 @@ export async function validateShiftCandidate(
   }
   if (!candidate.employeeId) return { resolved, findings, profileVersionId };
 
-  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${candidate.tenantId}:employee-shift:${candidate.employeeId}`]);
+  if (candidate.lockEmployee !== false) {
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`${candidate.tenantId}:employee-shift:${candidate.employeeId}`]);
+  }
   const employee = await client.query(
     `SELECT status, archived_at
        FROM employees WHERE tenant_id=$1 AND id=$2`,
