@@ -1,5 +1,6 @@
 import { Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { env } from './env';
+import { getRequestAuthorizationContext } from '../middleware/requestAuthorizationContext';
 
 // 1. Unprivilegierter Verbindungspool für den normalen Anwendungsbetrieb (secops_app_user)
 export const pool = new Pool({
@@ -31,6 +32,7 @@ async function releaseContextClient(client: PoolClient): Promise<void> {
     await client.query(
       `SELECT set_config('app.current_tenant',$1,false),
               set_config('app.current_user_id',$1,false),
+              set_config('app.current_permission','',false),
               set_config('app.session_lookup_hash','',false)`,
       [NO_CONTEXT_ID]
     );
@@ -87,6 +89,12 @@ export async function withTenantTransaction<T>(
   try {
     await client.query('BEGIN');
     await client.query("SELECT set_config('app.current_tenant', $1, true)", [tenantId]);
+    const requestContext = getRequestAuthorizationContext();
+    await client.query(
+      `SELECT set_config('app.current_user_id',$1,true),
+              set_config('app.current_permission',$2,true)`,
+      [requestContext?.userId ?? NO_CONTEXT_ID, requestContext?.permissionCode ?? '']
+    );
 
     const result = await callback(client);
     await client.query('COMMIT');
@@ -111,6 +119,7 @@ export async function withUserContextTransaction<T>(
   try {
     await client.query('BEGIN');
     await client.query("SELECT set_config('app.current_user_id', $1, true)", [userId]);
+    await client.query("SELECT set_config('app.current_permission','',true)");
     const result = await callback(client);
     await client.query('COMMIT');
     return result;
@@ -140,6 +149,11 @@ export async function withSessionLookupTransaction<T>(
       return null;
     }
     await client.query("SELECT set_config('app.current_tenant', $1, true)", [session.rows[0].tenant_id]);
+    await client.query(
+      `SELECT set_config('app.current_user_id',$1,true),
+              set_config('app.current_permission','',true)`,
+      [session.rows[0].user_id]
+    );
     const result = await callback(client, session.rows[0]);
     await client.query('COMMIT');
     return result;
@@ -163,6 +177,11 @@ export async function withSystemTransaction<T>(
     // NULL-UUID statt Leerstring: RLS-Policies casten app.current_tenant nach uuid.
     // Ein Leerstring würde die Abfrage mit "invalid input syntax for type uuid" abbrechen.
     await client.query("SELECT set_config('app.current_tenant', '00000000-0000-0000-0000-000000000000', true)");
+    await client.query(
+      `SELECT set_config('app.current_user_id',$1,true),
+              set_config('app.current_permission','',true)`,
+      [NO_CONTEXT_ID]
+    );
     const result = await callback(client);
     await client.query('COMMIT');
     return result;

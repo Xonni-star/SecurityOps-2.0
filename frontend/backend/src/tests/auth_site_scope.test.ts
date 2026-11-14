@@ -10,7 +10,14 @@ function runPermissionCheck(
   method: string,
   path: string,
   permissionCode: string,
-  options: { query?: Record<string, unknown>; params?: Record<string, unknown>; body?: Record<string, unknown>; permissions?: string[] } = {}
+  options: {
+    query?: Record<string, unknown>;
+    params?: Record<string, unknown>;
+    body?: Record<string, unknown>;
+    permissions?: string[];
+    sitePermissions?: Array<{ code: string; siteId: string }>;
+    ownPermissions?: string[];
+  } = {}
 ) {
   const req = {
     method,
@@ -24,7 +31,8 @@ function runPermissionCheck(
       tenantId: '44444444-4444-4444-8444-444444444444',
       role: 'Object lead',
       permissions: options.permissions ?? [],
-      sitePermissions: [grant, createGrant],
+      sitePermissions: options.sitePermissions ?? [grant, createGrant],
+      ownPermissions: options.ownPermissions ?? [],
       sessionHash: 'opaque-session-hash'
     }
   } as unknown as Request;
@@ -39,26 +47,26 @@ function runPermissionCheck(
 }
 
 describe('site-scoped authorization', () => {
-  test('allows a site grant only for an explicitly filtered supported read', () => {
+  test('allows the scoped permission and delegates row filtering to PostgreSQL RLS', () => {
     const allowed = runPermissionCheck('GET', '/api/v1/employees', grant.code, { query: { siteId: siteA } });
     expect(allowed.next).toHaveBeenCalledTimes(1);
 
     const unfiltered = runPermissionCheck('GET', '/api/v1/employees', grant.code);
-    expect(unfiltered.next).not.toHaveBeenCalled();
-    expect(unfiltered.res.status).toHaveBeenCalledWith(403);
+    expect(unfiltered.next).toHaveBeenCalledTimes(1);
 
     const otherSite = runPermissionCheck('GET', '/api/v1/employees', grant.code, { query: { siteId: siteB } });
-    expect(otherSite.next).not.toHaveBeenCalled();
-    expect(otherSite.res.status).toHaveBeenCalledWith(403);
+    expect(otherSite.next).toHaveBeenCalledTimes(1);
   });
 
-  test('does not treat a site filter on unsupported reads as authorization', () => {
-    const result = runPermissionCheck('GET', '/api/v1/planning/shifts', grant.code, { query: { siteId: siteA } });
-    expect(result.next).not.toHaveBeenCalled();
-    expect(result.res.status).toHaveBeenCalledWith(403);
+  test('allows site-scoped customer reads and delegates customer scope to PostgreSQL RLS', () => {
+    const result = runPermissionCheck('GET', '/api/v1/customers', 'customers:read', {
+      query: { siteId: siteA },
+      sitePermissions: [{ code: 'customers:read', siteId: siteA }]
+    });
+    expect(result.next).toHaveBeenCalledTimes(1);
   });
 
-  test('allows a site-scoped create only for the granted site and denies unscoped writes', () => {
+  test('allows site-scoped writes to reach PostgreSQL RLS for row-specific enforcement', () => {
     const allowed = runPermissionCheck('POST', '/api/v1/handovers', 'handovers:create', {
       body: { siteId: siteA }
     });
@@ -67,10 +75,10 @@ describe('site-scoped authorization', () => {
     const wrongSite = runPermissionCheck('POST', '/api/v1/handovers', 'handovers:create', {
       body: { siteId: siteB }
     });
-    expect(wrongSite.next).not.toHaveBeenCalled();
+    expect(wrongSite.next).toHaveBeenCalledTimes(1);
 
     const unscoped = runPermissionCheck('POST', '/api/v1/handovers', 'handovers:create');
-    expect(unscoped.next).not.toHaveBeenCalled();
+    expect(unscoped.next).toHaveBeenCalledTimes(1);
   });
 
   test('tenant-wide permission remains explicit and independent of site filters', () => {
@@ -79,5 +87,38 @@ describe('site-scoped authorization', () => {
       permissions: ['planning:read']
     });
     expect(result.next).toHaveBeenCalledTimes(1);
+  });
+
+  test('allows OWN only for implemented owner-scoped permissions', () => {
+    const ownRead = runPermissionCheck('GET', '/api/v1/employees', 'employees:read', {
+      ownPermissions: ['employees:read']
+    });
+    expect(ownRead.next).toHaveBeenCalledTimes(1);
+
+    const ownWrite = runPermissionCheck('PATCH', '/api/v1/employees/employee-id', 'employees:update', {
+      ownPermissions: ['employees:update']
+    });
+    expect(ownWrite.next).not.toHaveBeenCalled();
+    expect(ownWrite.res.status).toHaveBeenCalledWith(403);
+  });
+
+  test('a site-scoped user read grant is limited to the supported filtered list route', () => {
+    const userGrant = { code: 'users:read', siteId: siteA };
+    const allowed = runPermissionCheck('GET', '/api/v1/admin/users', 'users:read', {
+      query: { siteId: siteA },
+      sitePermissions: [userGrant]
+    });
+    expect(allowed.next).toHaveBeenCalledTimes(1);
+
+    const wrongSite = runPermissionCheck('GET', '/api/v1/admin/users', 'users:read', {
+      query: { siteId: siteB },
+      sitePermissions: [userGrant]
+    });
+    expect(wrongSite.next).not.toHaveBeenCalled();
+
+    const detail = runPermissionCheck('GET', '/api/v1/admin/users/user-id', 'users:read', {
+      sitePermissions: [userGrant]
+    });
+    expect(detail.next).not.toHaveBeenCalled();
   });
 });
