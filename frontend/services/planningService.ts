@@ -229,6 +229,7 @@ export type PlanningRuleCode =
   | 'maximum_shift_minutes'
   | 'maximum_daily_minutes'
   | 'maximum_weekly_minutes'
+  | 'maximum_monthly_minutes'
   | 'overtime_threshold_weekly_minutes'
   | 'minimum_break_minutes'
   | 'break_after_minutes'
