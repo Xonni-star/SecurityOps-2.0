@@ -265,7 +265,10 @@ export class IndexedDbService {
       };
 
       const store = tx.objectStore('outbox');
-      store.put(item);
+      const request = store.add(item);
+      request.onerror = () => {
+        reject(request.error || new Error(`[INDEXEDDB FEHLER] Speichern der Mutation ${item.id} fehlgeschlagen`));
+      };
     });
   }
 
