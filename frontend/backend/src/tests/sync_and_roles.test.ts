@@ -619,6 +619,122 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     }
   });
 
+  test('Configured daily work limit counts Berlin DST transitions using the stored site timezone', async () => {
+    const previousZone = await withTenantTransaction(testTenantA, tx => tx.query(
+      'SELECT time_zone FROM sites WHERE tenant_id=$1 AND id=$2',
+      [testTenantA, siteAId]
+    ));
+    await withTenantTransaction(testTenantA, tx => tx.query(
+      'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+      ['Europe/Berlin', testTenantA, siteAId]
+    ));
+
+    try {
+      const profile = await request(app).post('/api/v1/planning/rule-profiles')
+        .set(authHeaders(testTokenA)).send({
+          name: `DST daily limit ${Date.now()}`,
+          scope: { siteId: siteAId },
+          effectiveFrom: '2027-03-28',
+          effectiveUntil: '2027-10-31',
+          sourceName: 'Test-configured-DST-daily-limit',
+          sourceReference: 'fixture:dst-daily-limit',
+          rules: [{
+            code: 'maximum_daily_minutes',
+            value: 180,
+            source: 'fixture:dst-daily-limit',
+            severity: 'blocking'
+          }]
+        });
+      expect(profile.status).toBe(201);
+      const versionId = profile.body.data.version.id as string;
+      const approved = await request(app)
+        .post(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}/versions/${versionId}/approve`)
+        .set(authHeaders(planningApproverToken)).send({});
+      expect(approved.status).toBe(200);
+      const activated = await request(app).patch(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}`)
+        .set(authHeaders(testTokenA)).send({ active: true });
+      expect(activated.status).toBe(200);
+
+      const springShift = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId,
+          date: '2027-03-28',
+          startTime: '00:00',
+          endTime: '04:00',
+          requiredQualification: 'Sachkunde'
+        });
+      expect(springShift.status).toBe(201);
+      const springStored = await withTenantTransaction(testTenantA, tx => tx.query(
+        `SELECT time_zone,starts_at,ends_at,
+                EXTRACT(EPOCH FROM (ends_at-starts_at))/60 AS elapsed_minutes
+           FROM shifts WHERE tenant_id=$1 AND id=$2`,
+        [testTenantA, springShift.body.data.shift.id]
+      ));
+      expect(springStored.rows[0]).toMatchObject({
+        time_zone: 'Europe/Berlin',
+        starts_at: new Date('2027-03-27T23:00:00.000Z'),
+        ends_at: new Date('2027-03-28T02:00:00.000Z')
+      });
+      expect(Number(springStored.rows[0].elapsed_minutes)).toBe(180);
+      const springAssigned = await request(app)
+        .post(`/api/v1/planning/shifts/${springShift.body.data.shift.id}/assignments`)
+        .set(authHeaders(testTokenA)).send({
+          employeeId: guardAId,
+          expectedVersion: springShift.body.data.shift.revision_version
+        });
+      expect(springAssigned.status).toBe(200);
+
+      const fallShift = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId,
+          date: '2027-10-31',
+          startTime: '00:00',
+          endTime: '04:00',
+          requiredQualification: 'Sachkunde'
+        });
+      expect(fallShift.status).toBe(201);
+      const fallStored = await withTenantTransaction(testTenantA, tx => tx.query(
+        `SELECT time_zone,starts_at,ends_at,
+                EXTRACT(EPOCH FROM (ends_at-starts_at))/60 AS elapsed_minutes
+           FROM shifts WHERE tenant_id=$1 AND id=$2`,
+        [testTenantA, fallShift.body.data.shift.id]
+      ));
+      expect(fallStored.rows[0]).toMatchObject({
+        time_zone: 'Europe/Berlin',
+        starts_at: new Date('2027-10-30T22:00:00.000Z'),
+        ends_at: new Date('2027-10-31T03:00:00.000Z')
+      });
+      expect(Number(fallStored.rows[0].elapsed_minutes)).toBe(300);
+      const fallRejected = await request(app)
+        .post(`/api/v1/planning/shifts/${fallShift.body.data.shift.id}/assignments`)
+        .set(authHeaders(testTokenA)).send({
+          employeeId: guardAId,
+          expectedVersion: fallShift.body.data.shift.revision_version
+        });
+      expect(fallRejected.status).toBe(409);
+      expect(fallRejected.body.data.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'MAXIMUM_DAILY_WORK',
+          severity: 'blocking',
+          sourceName: 'fixture:dst-daily-limit',
+          details: expect.objectContaining({
+            profileVersionId: versionId,
+            localDate: '2027-10-31',
+            existingMinutes: 0,
+            candidateMinutes: 300,
+            dailyWorkMinutes: 300,
+            maximumDailyMinutes: 180
+          })
+        })
+      ]));
+    } finally {
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        [previousZone.rows[0].time_zone, testTenantA, siteAId]
+      ));
+    }
+  });
+
   test('Planning revalidates the full multi-day shift interval during publication', async () => {
     const period = await request(app).post('/api/v1/planning/periods').set(authHeaders(testTokenA)).send({
       name: `Multi-day planning ${Date.now()}`,
