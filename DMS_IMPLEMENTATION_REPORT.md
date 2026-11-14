@@ -2,7 +2,7 @@
 
 **Status checked:** 2026-11-14
 
-**Verified main commit:** `e2d57f6def5a5f48d1454f34d5935787fb2bb90b`
+**Verified main commit:** `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`
 
 **Project status:** In development; not approved for production.
 
@@ -22,12 +22,12 @@ These are implementation statements, not evidence that production object storage
 
 | Evidence | Result | What it covers |
 |---|---|---|
-| Main CI | Run [43609474644](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609474644) passed all seven jobs on current `main`, including the DMS API integration, ClamAV adapter, and full-schema restore jobs. | Root, frontend, backend/PostgreSQL, scanner, DMS API, restore, and Docker checks; not production deployment. |
+| Main CI | Run [43612331431](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612331431) passed all seven jobs on `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`, including the DMS API integration, ClamAV adapter, and full-schema restore jobs. | Root, frontend, backend/PostgreSQL, scanner, DMS API, restore, and Docker checks; not production deployment. |
 | DMS API integration | Merged PR #37 exercises the API with PostgreSQL, private MinIO, and ClamAV. It checks type/size validation, clean release and authorized download, EICAR quarantine, tenant/auth boundaries, private storage, and audit events. | Isolated test services and synthetic content; not production scanner/storage availability or operational acceptance. |
-| Release artifacts | Run [43609786489](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609786489) successfully built the package from CI artifacts. | Package generation only; not a production release or deployment. |
-| ClamAV adapter check | Merged PR #31 adds an INSTREAM integration check against clean content and benign EICAR; the current main CI passed it. | Scanner adapter protocol and related tests; production scanner availability is not established. |
+| Release artifacts | Run [43612645484](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612645484) successfully built the package from CI artifacts on the same commit. | Package generation only; not a production release or deployment. |
+| ClamAV adapter check | Merged PR #31 adds an INSTREAM integration check against clean content and benign EICAR; main CI run 43612331431 passed it, including PR #39's malformed-response regression test. | Scanner adapter protocol and related tests; production scanner availability is not established. |
 | ClamAV runtime smoke | A separate isolated runtime smoke recognized benign EICAR through `clamdscan --stream`. | Runtime scanner recognition only; distinct from the application adapter CI check. |
-| Isolated restore checks | Merged PRs #29–#30 added and hardened MinIO and SeaweedFS test checks, including test DB/object snapshots, SHA-256 and metadata comparison, credential/mount isolation, and disposable-resource cleanup. | Test-only PostgreSQL metadata and S3-compatible snapshots; not a full SecurityOps installation, full migrated-schema restore, or production/provider restore. |
+| Isolated restore checks | PRs #29–#30 validate MinIO and SeaweedFS test snapshots, while PR #38 applies the repository migration runner to the full current schema and verifies synthetic tenant/user/DMS records, RLS behavior, object hashes, and metadata after restore. | Isolated test data/services; not a full production installation or production/provider restore. |
 
 ## Limitations and production/provider status
 

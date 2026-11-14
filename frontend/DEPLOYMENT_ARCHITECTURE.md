@@ -19,9 +19,9 @@ Express / TypeScript API (intern, Port 8000)
 PostgreSQL 16 (intern)
 ```
 
-Ein einmaliger `migrate`-Container führt Datenbankmigrationen mit `secops_admin` aus. Danach initialisiert `db-init` das Passwort für die Least-Privilege-Rolle `secops_app_user`; der Backend-Container nutzt diese Rolle. Ein weiterer Initialisierungscontainer bereitet das private DMS-Volume vor. Konfiguration: [`deploy/docker-compose.production.yml`](./deploy/docker-compose.production.yml), [`deploy/Caddyfile`](./deploy/Caddyfile).
+Ein einmaliger `migrate`-Container führt Datenbankmigrationen mit `secops_admin` aus. Danach initialisiert `db-init` das Passwort für die Least-Privilege-Rolle `secops_app_user`; der Backend-Container nutzt diese Rolle. DMS-Objekte werden im betreiberkonfigurierten privaten S3-kompatiblen Speicher abgelegt, nicht in einem Compose-DMS-Volume. Konfiguration: [`deploy/docker-compose.production.yml`](./deploy/docker-compose.production.yml), [`deploy/Caddyfile`](./deploy/Caddyfile) und [`deploy/PRODUCTION_DEPLOYMENT.md`](./deploy/PRODUCTION_DEPLOYMENT.md).
 
-Ein Backup-Container ist in Compose konfiguriert. Er erstellt im 24-Stunden-Intervall einen AES-256-CBC/PBKDF2-verschlüsselten PostgreSQL-Dump inklusive DMS-Dateivolume und löscht Archive nach 30 Tagen. Das beschreibt die Konfiguration, nicht den Nachweis erfolgreicher Sicherungs- oder Wiederherstellungsläufe. Das Restore-Runbook liegt unter [`deploy/restore.sh`](./deploy/restore.sh); Wiederherstellungen müssen in einer isolierten Umgebung geübt werden.
+Ein Backup-Container ist in Compose konfiguriert. Er erstellt im 24-Stunden-Intervall einen verschlüsselten PostgreSQL-Dump und löscht Archive nach 30 Tagen. Er sichert keine externen DMS-Objekte; deren Sicherung und Versionierung müssen separat mit dem S3-kompatiblen Speicheranbieter konfiguriert und geprüft werden. Das Restore-Skript stellt die Datenbank wieder her; DMS-Objekte müssen separat über den Speicheranbieter wiederhergestellt werden. Das beschreibt die Konfiguration, nicht den Nachweis eines Produktions-Backups oder -Restores. Das Restore-Runbook liegt unter [`deploy/restore.sh`](./deploy/restore.sh); Wiederherstellungen müssen in einer isolierten Umgebung geübt werden.
 
 ## Nicht implementierte bzw. nicht nachgewiesene Skalierung
 

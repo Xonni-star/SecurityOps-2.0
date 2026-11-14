@@ -2,7 +2,7 @@
 
 **Status checked:** 2026-11-14
 
-**Main:** `e2d57f6def5a5f48d1454f34d5935787fb2bb90b`
+**Main:** `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`
 
 **Project status:** In development; not approved for production.
 
@@ -10,7 +10,7 @@ This report distinguishes implementation in merged code, automated CI, isolated 
 
 ## Pull requests and current main CI
 
-PRs [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25) through [#38](https://github.com/Xonni-star/SecurityOps-2.0/pull/38) are merged. No pull requests were open at the time of the mainline check; the subsequent draft PR #39 is not merged and is not included in this mainline snapshot. The verified merge commits for PRs #25–#34 are:
+PRs [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25) through [#39](https://github.com/Xonni-star/SecurityOps-2.0/pull/39) are merged. Draft PR [#40](https://github.com/Xonni-star/SecurityOps-2.0/pull/40) is open and is not included in this mainline snapshot. The verified merge commits for PRs #25–#34 are:
 
 | PR | Merged commit |
 |---|---|
@@ -33,8 +33,9 @@ PRs [#35](https://github.com/Xonni-star/SecurityOps-2.0/pull/35) through [#38](h
 | #36 | `5f2a6b5` | Add configured monthly work-limit validation. |
 | #37 | `2ebb810` | Add isolated PostgreSQL, private MinIO, and real-ClamAV DMS API-flow coverage. |
 | #38 | `e2d57f6` | Validate full-schema backup/restore and synthetic tenant/DMS data in CI. |
+| #39 | `4b7cd7d` | Reject malformed ClamAV scanner responses. |
 
-Main CI run [43609474644](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609474644) passed all seven jobs on the verified main commit: root checks/startup, frontend tests/build, backend PostgreSQL/migration/build/Jest, ClamAV adapter integration, full DMS API integration, full-schema backup/restore integration, and production Docker configuration/image builds. The release-artifacts run [43609786489](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609786489) also succeeded, building a package from CI artifacts. This is artifact generation, not a production deployment.
+Main CI run [43612331431](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612331431) passed all seven jobs on `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`, including root checks/startup, frontend tests/build, backend PostgreSQL/migration/build/Jest, ClamAV adapter integration, full DMS API integration, full-schema backup/restore integration, and production Docker configuration/image builds. Release-artifacts run [43612645484](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612645484) also succeeded on the same commit, building a package from CI artifacts. This is artifact generation, not a production deployment.
 
 The merged changes include:
 
