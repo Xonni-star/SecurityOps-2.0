@@ -212,6 +212,47 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  clamav-adapter-integration:
+    name: ClamAV – DMS INSTREAM adapter integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container: node:24-bookworm
+    defaults:
+      run:
+        working-directory: frontend/backend
+
+    services:
+      clamav:
+        image: clamav/clamav:1.4.3
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgresql://integration:integration-only@localhost:5432/integration
+      JWT_SECRET: integration-only-secret-not-for-production-0001
+      CORS_ORIGIN: http://localhost:3000
+      DMS_SCAN_REQUIRED: "true"
+      DMS_SCANNER_PROVIDER: clamav
+      DMS_CLAMAV_HOST: clamav
+      DMS_CLAMAV_PORT: 3310
+      DMS_CLAMAV_TIMEOUT_MS: 30000
+
+    steps:
+      - name: Repository auschecken
+        uses: actions/checkout@v4
+
+      - name: Node.js einrichten
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: frontend/backend/package-lock.json
+
+      - name: Abhängigkeiten installieren
+        run: npm ci
+
+      - name: DMS-ClamAV-INSTREAM-Integrationstest
+        run: npm run test:clamav-integration
+
   docker-production:
     name: Produktions-Docker – Konfiguration & Image-Builds
     runs-on: ubuntu-latest
