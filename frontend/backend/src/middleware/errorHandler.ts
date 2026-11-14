@@ -11,7 +11,8 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
     return;
   }
 
-  const reportedStatus = err?.statusCode ?? err?.status;
+  const isPermissionDenied = err?.code === '42501';
+  const reportedStatus = isPermissionDenied ? 403 : (err?.statusCode ?? err?.status);
   const statusCode = Number.isInteger(reportedStatus) && reportedStatus >= 400 && reportedStatus <= 599
     ? reportedStatus
     : 500;
@@ -26,6 +27,8 @@ export function errorHandler(err: any, req: Request, res: Response, next: NextFu
 
   res.status(statusCode).json({
     success: false,
-    message: statusCode >= 500 ? 'Interner Serverfehler' : (err.message || 'Anfrage fehlgeschlagen')
+    message: isPermissionDenied
+      ? 'Zugriff verweigert.'
+      : statusCode >= 500 ? 'Interner Serverfehler' : (err.message || 'Anfrage fehlgeschlagen')
   });
 }

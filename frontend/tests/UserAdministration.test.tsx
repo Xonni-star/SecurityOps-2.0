@@ -23,7 +23,8 @@ const roleFixtures = [{
   permissions: [
     { code: 'employees:read', site_id: 'site-1', data_scope: 'SITE' },
     { code: 'employees:read', site_id: 'site-2', data_scope: 'SITE' },
-    { code: 'users:read', site_id: null, data_scope: 'TENANT' }
+    { code: 'users:read', site_id: null, data_scope: 'TENANT' },
+    { code: 'logbook:read', site_id: null, data_scope: 'OWN' }
   ]
 }];
 
@@ -61,7 +62,8 @@ describe('UserAdministration API integration', () => {
       if (url.includes('/admin/roles')) return apiResponse(includeRoleFixtures ? roleFixtures : []);
       if (url.includes('/admin/permissions')) return apiResponse([
         { code: 'employees:read', module: 'employees', description: 'Mitarbeiter lesen' },
-        { code: 'users:read', module: 'users', description: 'Benutzer lesen' }
+        { code: 'users:read', module: 'users', description: 'Benutzer lesen' },
+        { code: 'logbook:read', module: 'logbook', description: 'Eigenes Wachbuch lesen' }
       ]);
       if (url.includes('/admin/sites')) return apiResponse([
         { id: 'site-1', name: 'Hauptwache', site_code: 'HW-1' },
@@ -109,7 +111,7 @@ describe('UserAdministration API integration', () => {
     includeRoleFixtures = true;
     const roleAdmin: AuthUser = {
       ...user,
-      permissions: ['users:read', 'roles:read', 'roles:manage', 'employees:read']
+      permissions: ['users:read', 'roles:read', 'roles:manage', 'employees:read', 'logbook:read']
     };
     await act(async () => {
       root.render(<UserAdministration authUser={roleAdmin} />);
@@ -130,6 +132,7 @@ describe('UserAdministration API integration', () => {
     const siteGrant = container.querySelector<HTMLSelectElement>('select[aria-label="Objekte für employees:read"]');
     expect(siteGrant?.multiple).toBe(true);
     expect(Array.from(siteGrant?.selectedOptions ?? [], option => option.value)).toEqual(['site-1', 'site-2']);
+    expect(container.querySelector<HTMLSelectElement>('select[aria-label="Datenzugriff für logbook:read"]')?.value).toBe('OWN');
 
     await act(async () => {
       Array.from(container.querySelectorAll('button'))
@@ -140,7 +143,8 @@ describe('UserAdministration API integration', () => {
     expect(rolePatchBody?.permissions).toEqual([
       { code: 'employees:read', siteId: 'site-1', dataScope: 'SITE', canDelegate: false },
       { code: 'employees:read', siteId: 'site-2', dataScope: 'SITE', canDelegate: false },
-      { code: 'users:read', siteId: null, dataScope: 'TENANT', canDelegate: false }
+      { code: 'users:read', siteId: null, dataScope: 'TENANT', canDelegate: false },
+      { code: 'logbook:read', siteId: null, dataScope: 'OWN', canDelegate: false }
     ]);
   });
 });

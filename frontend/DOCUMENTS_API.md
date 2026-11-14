@@ -4,6 +4,10 @@ Base path: `/api/v1/documents`. All endpoints require an authenticated cookie se
 
 Uploads use `Content-Type: application/octet-stream`, `X-File-Name` (URL-encoded UTF-8 basename), and the cookie/CSRF requirements used by other mutation routes. Metadata is sent as URL query parameters for the initial upload. The server validates the maximum size, extension, signature and supported format before writing to private storage. Binary downloads return the raw file; errors retain the standard JSON response envelope.
 
+## Storage and scan status
+
+These are existing backend routes; the authorization change does not add DMS endpoints. Files are currently stored on the server's private local filesystem under `DMS_STORAGE_PATH`. `UnavailableDocumentScanner` is a placeholder that returns `not_scanned`; no malware scanning or quarantine is currently performed. Production S3-compatible storage, local MinIO, and an operational scanner/quarantine workflow remain follow-on work and must not be inferred from these endpoints.
+
 ## Documents
 
 | Method and path | Permission | Purpose |

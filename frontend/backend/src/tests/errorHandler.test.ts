@@ -39,4 +39,22 @@ describe('API error disclosure', () => {
       log.mockRestore();
     }
   });
+
+  test('maps PostgreSQL row-level permission errors to a generic forbidden response', () => {
+    const req: any = { path: '/api/v1/private', method: 'GET' };
+    const body: any = {};
+    const res: any = {
+      status: jest.fn().mockReturnThis(),
+      json: jest.fn(value => Object.assign(body, value))
+    };
+    const log = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+
+    try {
+      errorHandler(Object.assign(new Error('permission denied for table employee_records'), { code: '42501' }), req, res, jest.fn());
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(body).toEqual({ success: false, message: 'Zugriff verweigert.' });
+    } finally {
+      log.mockRestore();
+    }
+  });
 });

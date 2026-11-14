@@ -3,6 +3,7 @@ import argon2 from 'argon2';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { withTenantTransaction } from '../config/database';
+import { OWN_SCOPED_PERMISSION_CODES, SITE_SCOPED_PERMISSION_CODES } from '../security/authorizationScopes';
 
 const uuid = z.string().uuid();
 const strongPassword = z.string().min(12).max(256);
@@ -15,9 +16,31 @@ const userFields = z.object({
 const permissionGrants = z.array(z.object({
   code: z.string().min(1).max(100),
   siteId: uuid.nullable().optional(),
-  dataScope: z.enum(['TENANT', 'SITE']).default('TENANT'),
+  dataScope: z.enum(['TENANT', 'SITE', 'OWN']).default('TENANT'),
   canDelegate: z.boolean().default(false)
-}).strict()).max(500);
+}).strict().superRefine((grant, ctx) => {
+  if ((grant.dataScope === 'SITE') !== Boolean(grant.siteId)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['siteId'],
+      message: 'Standortberechtigungen benötigen genau eine Objekt-ID.'
+    });
+  }
+  if (grant.dataScope === 'SITE' && !SITE_SCOPED_PERMISSION_CODES.has(grant.code) && grant.code !== 'users:read') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['dataScope'],
+      message: 'SITE ist für diese Berechtigung nicht implementiert.'
+    });
+  }
+  if (grant.dataScope === 'OWN' && !OWN_SCOPED_PERMISSION_CODES.has(grant.code)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['dataScope'],
+      message: 'OWN ist für diese Berechtigung nicht durch ein eindeutiges Eigentümermodell unterstützt.'
+    });
+  }
+})).max(500);
 const sensitiveDelegation = new Set(['users:manage', 'roles:manage', 'roles:delegate_admin']);
 
 function actor(req: Request) {
@@ -94,6 +117,7 @@ export async function listUsers(req: Request, res: Response, next: NextFunction)
     const result = await withTenantTransaction(tenantId, db => {
       const values: unknown[] = [tenantId];
       const where = ['tm.tenant_id=$1'];
+      let siteFilterParameter = 'NULL::uuid';
       if (filters.q) {
         values.push(`%${filters.q.replace(/[\\%_]/g, '\\$&')}%`);
         where.push(`(u.email ILIKE $${values.length} OR u.first_name ILIKE $${values.length} OR u.last_name ILIKE $${values.length})`);
@@ -107,6 +131,7 @@ export async function listUsers(req: Request, res: Response, next: NextFunction)
       }
       if (filters.siteId) {
         values.push(filters.siteId);
+        siteFilterParameter = `$${values.length}`;
         where.push(`EXISTS (SELECT 1 FROM tenant_user_roles fs WHERE fs.tenant_id=tm.tenant_id AND fs.user_id=tm.user_id AND (fs.site_id=$${values.length} OR fs.site_id IS NULL))`);
       }
       return db.query(
@@ -117,11 +142,13 @@ export async function listUsers(req: Request, res: Response, next: NextFunction)
                 COALESCE((SELECT json_agg(json_build_object('id',tr.id,'name',tr.name,'siteId',tur.site_id))
                   FROM tenant_user_roles tur JOIN tenant_roles tr
                     ON tr.id=tur.role_id AND tr.tenant_id=tur.tenant_id
-                 WHERE tur.tenant_id=tm.tenant_id AND tur.user_id=tm.user_id),'[]'::json) AS roles,
+                 WHERE tur.tenant_id=tm.tenant_id AND tur.user_id=tm.user_id
+                   AND (${siteFilterParameter} IS NULL OR tur.site_id=${siteFilterParameter})), '[]'::json) AS roles,
                 COALESCE((SELECT json_agg(json_build_object('id',s.id,'name',s.name))
                   FROM tenant_user_roles tur JOIN sites s
                     ON s.id=tur.site_id AND s.tenant_id=tur.tenant_id
-                 WHERE tur.tenant_id=tm.tenant_id AND tur.user_id=tm.user_id AND tur.site_id IS NOT NULL),'[]'::json) AS sites
+                 WHERE tur.tenant_id=tm.tenant_id AND tur.user_id=tm.user_id AND tur.site_id IS NOT NULL
+                   AND (${siteFilterParameter} IS NULL OR tur.site_id=${siteFilterParameter})), '[]'::json) AS sites
            FROM tenant_memberships tm JOIN users u ON u.id=tm.user_id
           WHERE ${where.join(' AND ')}
           ORDER BY u.last_name,u.first_name,u.email`,
@@ -354,7 +381,7 @@ async function replaceRolePermissions(
   await validateSites(db,tenantId,grants.flatMap(grant=>grant.siteId?[grant.siteId]:[]));
   const permissions=await db.query('SELECT id,code FROM permissions WHERE code=ANY($1::text[])',[codes]);
   if(permissions.rows.length!==new Set(codes).size)throw Object.assign(new Error('Eine oder mehrere Berechtigungen sind ungültig.'),{status:400});
-  if(grants.some(grant=>(grant.dataScope==='SITE')!==Boolean(grant.siteId)))throw Object.assign(new Error('Standortberechtigungen benötigen genau eine Objekt-ID.'),{status:400});
+  if(grants.some(grant=>grant.dataScope==='OWN'&&grant.siteId))throw Object.assign(new Error('OWN-Berechtigungen können nicht zusätzlich auf ein Objekt begrenzt werden.'),{status:400});
   await db.query('DELETE FROM tenant_role_permissions WHERE tenant_id=$1 AND role_id=$2',[tenantId,roleId]);
   for(const grant of grants){
     const permission=permissions.rows.find(row=>row.code===grant.code)!;
