@@ -45,7 +45,7 @@ services:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Set test MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Set a test-only MINIO_ROOT_PASSWORD}
     volumes:
-      - ${RESTORE_TEST_TMPDIR:?Set RESTORE_TEST_TMPDIR}:/restore-test
+      - ${RESTORE_TEST_DATA_DIR:?Set RESTORE_TEST_DATA_DIR}:/test-data:ro
     entrypoint: ["/bin/sh", "-c"]
     command: ["while true; do sleep 3600; done"]
 

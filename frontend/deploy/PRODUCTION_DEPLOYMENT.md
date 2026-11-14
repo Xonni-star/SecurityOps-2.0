@@ -183,6 +183,8 @@ cd frontend/deploy
 
 Der Test verwendet ein eindeutiges Compose-Projekt mit eigenen PostgreSQL-/MinIO-Containern und Volumes, Testzugangsdaten, einem separaten Quell-Bucket und einem separaten Snapshot-Bucket. Er erstellt und verschlüsselt einen Datenbankdump mit `backup_cron.sh`, verändert danach Testdaten, stellt den Dump mit `restore.sh` wieder her und verifiziert Datenbankwerte, Objekt-SHA-256 sowie Objektmetadaten nach dem Snapshot-Restore. Die Compose-Datei für Produktion und deren Ressourcen werden nicht verwendet; die Testressourcen werden anschließend projektbezogen entfernt.
 
+Die Restore-Zugangsdaten liegen in einer lokalen temporären Datei, die nicht in den Test-MC-Container eingebunden wird. Der Container erhält nur das Fixture-Verzeichnis schreibgeschützt.
+
 Der S3-Schritt prüft MinIO lokal mit `mc mirror --preserve`; er belegt weder Anbieter-Versionierung/Replikation noch einen Restore bei einem externen S3-Anbieter. ClamAV und der Anwendungs-Upload-/Scan-Workflow werden in diesem Restore-Test nicht gestartet oder geprüft.
 
 Für einen isolierten Datenbanktest ohne MinIO kann `./test_backup_restore.sh --database-only` verwendet werden. Dieser Modus prüft nicht die DMS-Objektsicherung.
