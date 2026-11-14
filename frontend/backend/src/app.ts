@@ -228,6 +228,7 @@ app.get('/api/v1/documents/:id/versions', authenticateJwt, requirePermission('do
 app.post('/api/v1/documents/:id/versions', authenticateJwt, requirePermission('documents:update'),
   express.raw({ type: 'application/octet-stream', limit: documentController.documentUploadBodyParserLimit() }),
   documentController.createDocumentVersion);
+app.post('/api/v1/documents/:id/versions/:version/rescan', authenticateJwt, requirePermission('documents:update'), documentController.rescanDocumentVersion);
 app.post('/api/v1/documents/:id/versions/:version/restore', authenticateJwt, requirePermission('documents:update'), documentController.restoreDocumentVersion);
 app.get('/api/v1/documents/:id/download', authenticateJwt, requirePermission('documents:download'), documentController.downloadDocument);
 app.patch('/api/v1/documents/:id/relationship', authenticateJwt, requirePermission('documents:update'), documentController.updateDocumentRelationship);

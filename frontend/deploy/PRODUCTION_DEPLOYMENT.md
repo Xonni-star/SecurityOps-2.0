@@ -51,6 +51,8 @@ Werte in `.env` setzen:
 | `DMS_CLAMAV_TIMEOUT_MS` | Scanner-Timeout (Default 30 Sekunden) |
 | `DMS_MAX_FILE_SIZE_BYTES` | Maximale Uploadgröße je Datei (Default 10 MiB, Obergrenze 100 MiB) |
 
+Production Compose runs no ClamAV container; ClamAV must be operated separately and reachable from the backend. Required host/provider settings configure a client but do not verify scanner availability during startup. The first successful scan is the only evidence that a file was scanned; unavailable/error results remain quarantined and blocked. ClamAV's `zINSTREAM` TCP protocol does not authenticate or encrypt connections, so restrict it to a private, isolated network and permit access only from the backend. Local development uses the ClamAV service in `docker-compose.minio.yml`.
+
 Express vertraut nur den in `TRUST_PROXY` ausdrücklich angegebenen Proxy-IP-Adressen/CIDRs; die Voreinstellung vertraut keinem Proxy. Im Production-Compose-Netz ist nur Caddy öffentlich, der Backend-Port wird nicht veröffentlicht, Caddy hat die feste interne Adresse `172.30.0.2`, und die Caddy-Konfiguration überschreibt `X-Forwarded-For` mit der tatsächlichen Verbindungsadresse. Bei geänderten Netzwerkwerten müssen `SECOPS_PROXY_IPV4` und `TRUST_PROXY` übereinstimmen; `TRUST_PROXY` darf nicht pauschal das gesamte Docker-Subnetz oder `*` freigeben. Dadurch basiert die Rate-Limit-IP auf dem Client hinter genau diesem vertrauenswürdigen Proxy, während nicht vertrauenswürdige `X-Forwarded-For`-Header ignoriert werden.
 
 Secrets erzeugen:

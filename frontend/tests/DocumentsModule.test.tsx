@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   apiGet: vi.fn(),
+  apiPost: vi.fn(),
   storeState: {
     documents: [] as unknown[],
     setDocuments: vi.fn(),
@@ -22,7 +23,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock('../services/apiClient', () => ({
   apiClient: {
     get: mocks.apiGet,
-    post: vi.fn(),
+    post: mocks.apiPost,
     patch: vi.fn(),
     uploadFile: vi.fn(),
     downloadFile: vi.fn()
@@ -76,6 +77,8 @@ describe('DocumentsModule archive view', () => {
     mocks.storeState.setDocuments = vi.fn((documents: unknown[]) => {
       mocks.storeState.documents = documents;
     });
+    mocks.storeState.authUser.permissions = ['documents:read', 'documents:download'];
+    mocks.apiPost.mockResolvedValue({ scan_status: 'clean', released: true });
     mocks.apiGet.mockImplementation((endpoint: string) => {
       if (endpoint === '/documents/categories' || endpoint === '/documents/folders') return Promise.resolve([]);
       return Promise.resolve(endpoint.includes('archived=true') ? [archivedDocument] : [activeDocument]);
@@ -130,5 +133,40 @@ describe('DocumentsModule archive view', () => {
     expect(container.textContent).toContain('Scanner nicht verfügbar · Quarantäne');
     expect(container.querySelector('button[title="Herunterladen"]')).toBeNull();
     expect(container.querySelector('button[title="Vorschau"]')).toBeNull();
+    expect(container.textContent).not.toContain('Erneut prüfen');
+  });
+
+  test('lets users with update permission retry a quarantined scan', async () => {
+    mocks.storeState.authUser.permissions = ['documents:read', 'documents:update'];
+    mocks.apiGet.mockImplementation((endpoint: string) => {
+      if (endpoint === '/documents/categories' || endpoint === '/documents/folders') return Promise.resolve([]);
+      if (endpoint === '/documents/active-doc/versions') {
+        return Promise.resolve([{
+          id: 'version-a',
+          version_number: 1,
+          original_filename: 'active.pdf',
+          content_type: 'application/pdf',
+          size_bytes: 120,
+          scan_status: 'unavailable',
+          released: false,
+          storage_deleted_at: null,
+          storage_deletion_pending_at: null,
+          created_at: '2026-01-01T00:00:00.000Z',
+          created_by: 'user-a'
+        }]);
+      }
+      return Promise.resolve(endpoint.includes('archived=true') ? [archivedDocument] : [activeDocument]);
+    });
+
+    await act(async () => root.render(<DocumentsModule />));
+    const historyButton = container.querySelector('button[title="Versionshistorie"]');
+    await act(async () => historyButton?.click());
+    const rescanButton = Array.from(container.querySelectorAll('button'))
+      .find((button) => button.textContent?.includes('Erneut prüfen'));
+    expect(rescanButton).toBeDefined();
+
+    await act(async () => rescanButton?.click());
+    expect(mocks.apiPost).toHaveBeenCalledWith('/documents/active-doc/versions/1/rescan', {});
+    expect(container.textContent).toContain('erfolgreich erneut geprüft und freigegeben');
   });
 });

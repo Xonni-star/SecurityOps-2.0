@@ -269,14 +269,17 @@ async function finalizeDocumentScan(
     not_scanned: 'scan_not_configured'
   } as const)[scanStatus];
   await withTenantTransaction(tenantId, async (db) => {
-    await db.query(
+    const updated = await db.query(
       `UPDATE document_versions
           SET scan_status=$1::varchar(20),
               scanned_at=CASE WHEN $1::varchar(20) IN ('clean','infected') THEN CURRENT_TIMESTAMP ELSE NULL END,
               scan_error_code=$2, released_at=CASE WHEN $3 THEN CURRENT_TIMESTAMP ELSE NULL END
-        WHERE tenant_id=$4 AND document_id=$5 AND version_number=$6`,
+        WHERE tenant_id=$4 AND document_id=$5 AND version_number=$6
+          AND storage_deleted_at IS NULL AND storage_deletion_pending_at IS NULL
+        RETURNING id`,
       [scanStatus, scanErrorCode, release, tenantId, documentId, versionNumber]
     );
+    if (!updated.rows.length) throw httpError(409, 'Die Version wird gelöscht und kann nicht freigegeben werden.');
     await audit(db, tenantId, documentId, userId, action, {
       version: versionNumber,
       released: release,
@@ -284,6 +287,97 @@ async function finalizeDocumentScan(
     });
   });
   return scanStatus;
+}
+
+export async function rescanDocumentVersion(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const tenantId = req.user!.tenantId;
+    const user = req.user!;
+    const documentId = uuid(req.params.id);
+    const versionNumber = z.coerce.number().int().positive().parse(req.params.version);
+    const source = await withTenantTransaction(tenantId, async (db) => {
+      const result = await db.query(
+        `SELECT version.storage_key, version.size_bytes, version.sha256_hash,
+                version.released_at, version.storage_deleted_at, version.storage_deletion_pending_at
+           FROM documents document
+           JOIN document_versions version
+             ON version.document_id=document.id AND version.tenant_id=document.tenant_id
+          WHERE document.id=$1 AND document.tenant_id=$2 AND version.version_number=$3
+          FOR UPDATE OF version`,
+        [documentId, tenantId, versionNumber]
+      );
+      if (!result.rows.length) throw httpError(404, 'Dokumentversion nicht gefunden.');
+      const version = result.rows[0];
+      if (version.storage_deleted_at || version.storage_deletion_pending_at) {
+        throw httpError(409, 'Eine gelöschte oder zur Löschung vorgemerkte Version kann nicht geprüft werden.');
+      }
+      if (version.released_at) throw httpError(409, 'Die Version ist bereits freigegeben.');
+      await db.query(
+        `UPDATE document_versions
+            SET scan_status='pending', scanned_at=NULL, scan_error_code=NULL, released_at=NULL
+          WHERE tenant_id=$1 AND document_id=$2 AND version_number=$3`,
+        [tenantId, documentId, versionNumber]
+      );
+      await audit(db, tenantId, documentId, user.userId, 'scan_retry_started', {
+        version: versionNumber
+      });
+      return version;
+    });
+
+    let scanStatus: 'clean' | 'infected' | 'unavailable' | 'error';
+    let scanErrorCode: string | null = null;
+    try {
+      const bytes = await readDocumentBlob(source.storage_key);
+      if (bytes.length !== Number(source.size_bytes) ||
+          createHash('sha256').update(bytes).digest('hex') !== source.sha256_hash.trim()) {
+        throw new Error('Stored document integrity check failed.');
+      }
+      scanStatus = await documentScanner.scan(bytes);
+    } catch (error) {
+      if (error instanceof DocumentScannerUnavailableError) {
+        scanStatus = 'unavailable';
+        scanErrorCode = 'provider_unavailable';
+      } else {
+        scanStatus = 'error';
+        scanErrorCode = 'stored_object_or_scanner_error';
+      }
+      console.error('[DMS RESCAN] Quarantined version remains blocked.', { status: scanStatus });
+    }
+
+    const released = scanStatus === 'clean';
+    const action = ({
+      clean: 'scan_clean',
+      infected: 'scan_infected',
+      unavailable: 'scan_unavailable',
+      error: 'scan_error'
+    } as const)[scanStatus];
+    const updated = await withTenantTransaction(tenantId, async (db) => {
+      const result = await db.query(
+        `UPDATE document_versions
+            SET scan_status=$1::varchar(20),
+                scanned_at=CASE WHEN $1::varchar(20) IN ('clean','infected') THEN CURRENT_TIMESTAMP ELSE NULL END,
+                scan_error_code=$2, released_at=CASE WHEN $3 THEN CURRENT_TIMESTAMP ELSE NULL END
+          WHERE tenant_id=$4 AND document_id=$5 AND version_number=$6
+            AND storage_deleted_at IS NULL AND storage_deletion_pending_at IS NULL
+          RETURNING id`,
+        [scanStatus, scanErrorCode, released, tenantId, documentId, versionNumber]
+      );
+      if (!result.rows.length) throw httpError(409, 'Die Version wurde während der Prüfung zur Löschung vorgemerkt.');
+      await audit(db, tenantId, documentId, user.userId, action, {
+        version: versionNumber,
+        retry: true,
+        released,
+        ...(scanErrorCode ? { errorCode: scanErrorCode } : {})
+      });
+      return result.rows[0];
+    });
+    res.status(scanStatus === 'clean' ? 200 : 202).json({
+      success: true,
+      data: { id: updated.id, version_number: versionNumber, scan_status: scanStatus, released }
+    });
+  } catch (error) {
+    next(error);
+  }
 }
 
 export async function listDocuments(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -487,7 +581,8 @@ export async function listDocumentVersions(req: Request, res: Response, next: Ne
       return db.query(
         `SELECT id, version_number, original_filename, content_type, size_bytes::int AS size_bytes, sha256_hash,
                 scan_status, (released_at IS NOT NULL AND storage_deleted_at IS NULL) AS released,
-                scan_error_code, storage_deleted_at, created_by, created_at, restored_from_version
+                scan_error_code, storage_deleted_at, storage_deletion_pending_at,
+                created_by, created_at, restored_from_version
          FROM document_versions WHERE document_id = $1 AND tenant_id = $2 ORDER BY version_number DESC`,
         [documentId, tenantId]
       );
@@ -707,31 +802,121 @@ export async function deleteDocumentFiles(req: Request, res: Response, next: Nex
       );
       if (!document.rows.length) throw httpError(409, 'Dateien können nur bei archivierten Dokumenten gelöscht werden.');
       const versions = await db.query(
-        `SELECT storage_key, version_number FROM document_versions
+        `SELECT version_number, storage_key FROM document_versions
           WHERE document_id=$1 AND tenant_id=$2 AND storage_deleted_at IS NULL`,
         [documentId, tenantId]
       );
-      for (const version of versions.rows) await removeDocumentBlob(version.storage_key);
       if (versions.rows.length) {
         await db.query(
-          `UPDATE document_versions SET storage_deleted_at=CURRENT_TIMESTAMP, released_at=NULL
+          `UPDATE document_versions
+              SET storage_deletion_pending_at=COALESCE(storage_deletion_pending_at,CURRENT_TIMESTAMP),
+                  released_at=NULL
             WHERE document_id=$1 AND tenant_id=$2 AND storage_deleted_at IS NULL`,
           [documentId, tenantId]
         );
+        for (const version of versions.rows) {
+          await db.query(
+            `INSERT INTO document_storage_deletion_outbox
+              (tenant_id,document_id,version_number,storage_key,requested_by)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (tenant_id,document_id,version_number) DO NOTHING`,
+            [tenantId, documentId, version.version_number, version.storage_key, user.userId]
+          );
+        }
         await db.query(
           `UPDATE documents SET status='In Prüfung', approved_by=NULL, approved_at=NULL,
              updated_at=CURRENT_TIMESTAMP WHERE id=$1 AND tenant_id=$2`,
           [documentId, tenantId]
         );
-        await audit(db, tenantId, documentId, user.userId, 'files_deleted', {
+        await audit(db, tenantId, documentId, user.userId, 'file_deletion_requested', {
           versions: versions.rows.map((version: { version_number: number }) => version.version_number)
         });
       }
     });
-    res.json({ success: true, data: { id: documentId, filesDeleted: true } });
+    const pending = await processDocumentStorageDeletion(tenantId, documentId, user.userId);
+    res.status(pending ? 202 : 200).json({
+      success: true,
+      data: { id: documentId, filesDeleted: pending === 0, deletionPending: pending > 0, pendingVersions: pending }
+    });
   } catch (error) {
     next(error);
   }
+}
+
+async function processDocumentStorageDeletion(
+  tenantId: string,
+  documentId: string,
+  userId: string
+): Promise<number> {
+  const jobs = await withTenantTransaction(tenantId, (db) => db.query(
+    `SELECT version_number, storage_key FROM document_storage_deletion_outbox
+      WHERE document_id=$1 AND tenant_id=$2 AND completed_at IS NULL
+      ORDER BY version_number`,
+    [documentId, tenantId]
+  ));
+
+  for (const job of jobs.rows) {
+    const claimed = await withTenantTransaction(tenantId, async (db) => {
+      const attempt = await db.query(
+        `UPDATE document_storage_deletion_outbox
+            SET attempt_count=attempt_count+1, last_error_code=NULL
+          WHERE tenant_id=$1 AND document_id=$2 AND version_number=$3 AND completed_at IS NULL
+          RETURNING attempt_count`,
+        [tenantId, documentId, job.version_number]
+      );
+      if (attempt.rows.length) {
+        await audit(db, tenantId, documentId, userId, 'file_deletion_attempted', {
+          version: job.version_number,
+          attempt: attempt.rows[0].attempt_count
+        });
+      }
+      return attempt.rows.length > 0;
+    });
+    if (!claimed) continue;
+
+    try {
+      await removeDocumentBlob(job.storage_key);
+    } catch {
+      await withTenantTransaction(tenantId, async (db) => {
+        await db.query(
+          `UPDATE document_storage_deletion_outbox SET last_error_code='storage_delete_failed'
+            WHERE tenant_id=$1 AND document_id=$2 AND version_number=$3 AND completed_at IS NULL`,
+          [tenantId, documentId, job.version_number]
+        );
+        await audit(db, tenantId, documentId, userId, 'file_deletion_failed', {
+          version: job.version_number,
+          errorCode: 'storage_delete_failed'
+        });
+      });
+      continue;
+    }
+
+    await withTenantTransaction(tenantId, async (db) => {
+      const completed = await db.query(
+        `UPDATE document_storage_deletion_outbox SET completed_at=CURRENT_TIMESTAMP, last_error_code=NULL
+          WHERE tenant_id=$1 AND document_id=$2 AND version_number=$3 AND completed_at IS NULL
+          RETURNING version_number`,
+        [tenantId, documentId, job.version_number]
+      );
+      if (!completed.rows.length) return;
+      await db.query(
+        `UPDATE document_versions
+            SET storage_deleted_at=CURRENT_TIMESTAMP, storage_deletion_pending_at=NULL, released_at=NULL
+          WHERE tenant_id=$1 AND document_id=$2 AND version_number=$3`,
+        [tenantId, documentId, job.version_number]
+      );
+      await audit(db, tenantId, documentId, userId, 'file_storage_deleted', {
+        version: job.version_number
+      });
+    });
+  }
+
+  const pending = await withTenantTransaction(tenantId, (db) => db.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM document_storage_deletion_outbox
+      WHERE document_id=$1 AND tenant_id=$2 AND completed_at IS NULL`,
+    [documentId, tenantId]
+  ));
+  return Number(pending.rows[0].count);
 }
 
 export async function restoreDocument(req: Request, res: Response, next: NextFunction): Promise<void> {

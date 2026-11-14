@@ -32,6 +32,7 @@ interface DocumentVersion {
   released: boolean;
   scan_error_code?: string | null;
   storage_deleted_at?: string | null;
+  storage_deletion_pending_at?: string | null;
   created_at: string;
   created_by: string;
   restored_from_version?: number;
@@ -109,6 +110,7 @@ export const DocumentsModule: React.FC = () => {
   const [editRelationshipId, setEditRelationshipId] = useState('');
   const [versionsDocument, setVersionsDocument] = useState<ManagedDocument | null>(null);
   const [versions, setVersions] = useState<DocumentVersion[]>([]);
+  const [rescanVersion, setRescanVersion] = useState<number | null>(null);
   const [folderDialogOpen, setFolderDialogOpen] = useState(false);
   const [folderName, setFolderName] = useState('');
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
@@ -395,6 +397,26 @@ export const DocumentsModule: React.FC = () => {
     }
   };
 
+  const rescanVersionFile = async (version: DocumentVersion) => {
+    if (!versionsDocument) return;
+    setRescanVersion(version.version_number);
+    try {
+      const result = await apiClient.post<{ scan_status: string; released: boolean }>(
+        `/documents/${versionsDocument.id}/versions/${version.version_number}/rescan`,
+        {}
+      );
+      setScanNotice(result.released
+        ? `Version ${version.version_number} wurde erfolgreich erneut geprüft und freigegeben.`
+        : `Version ${version.version_number} bleibt nach der Prüfung gesperrt (${result.scan_status}).`);
+      await openVersions(versionsDocument);
+      await refreshDocuments(archivedView);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Datei konnte nicht erneut geprüft werden.');
+    } finally {
+      setRescanVersion(null);
+    }
+  };
+
   const changeDocumentFolder = async (documentId: string, folderId: string) => {
     try {
       await apiClient.post(`/documents/${documentId}/move`, { folderId: folderId || null });
@@ -661,7 +683,7 @@ export const DocumentsModule: React.FC = () => {
           <div className="flex items-center justify-between border-b border-slate-800 pb-3"><div><h2 className="font-bold text-white">Versionshistorie</h2><p className="mt-1 text-xs text-slate-400">{versionsDocument.title}</p></div><button onClick={() => setVersionsDocument(null)} aria-label="Dialog schließen"><X className="h-5 w-5 text-slate-400" /></button></div>
           <div className="mt-3 divide-y divide-slate-800">{versions.map((version) => <div key={version.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
             <div className="min-w-0"><p className="text-sm font-semibold text-slate-200">Version {version.version_number} {Number(version.version_number) === Number(versionsDocument.version) && <span className="text-xs text-blue-300">(aktuell)</span>}</p><p className="mt-1 truncate text-xs text-slate-500">{version.original_filename} · {bytesLabel(Number(version.size_bytes))} · {dateLabel(version.created_at)}</p><p className="mt-1 text-[10px] text-amber-300">Virenscan: {version.released ? version.scan_status === 'clean' ? 'geprüft und freigegeben' : 'nicht durchgeführt (optionale Prüfung)' : version.scan_status === 'infected' ? 'infiziert · gesperrt' : version.scan_status === 'unavailable' ? 'Scanner nicht verfügbar · Quarantäne' : version.scan_status === 'error' ? 'Prüffehler · Quarantäne' : 'Prüfung ausstehend · Quarantäne'}{version.restored_from_version ? ` · wiederhergestellt aus v${version.restored_from_version}` : ''}</p></div>
-            <div className="flex gap-2">{canDownload && version.released && <button disabled={!online} onClick={() => void handleDownload(versionsDocument, Number(version.version_number))} className={`${buttonClass} bg-slate-800 text-slate-300`}><Download className="h-3.5 w-3.5" />Download</button>}{canUpdate && version.released && Number(version.version_number) !== Number(versionsDocument.version) && <button disabled={!online} onClick={() => void restoreVersion(version)} className={`${buttonClass} bg-blue-600/20 text-blue-200`}><RotateCcw className="h-3.5 w-3.5" />Als neue Version wiederherstellen</button>}</div>
+            <div className="flex gap-2">{canUpdate && !version.released && !version.storage_deleted_at && !version.storage_deletion_pending_at && <button disabled={!online || rescanVersion !== null} onClick={() => void rescanVersionFile(version)} className={`${buttonClass} bg-amber-600/20 text-amber-200`}>{rescanVersion === version.version_number ? 'Prüfung läuft …' : 'Erneut prüfen'}</button>}{canDownload && version.released && <button disabled={!online} onClick={() => void handleDownload(versionsDocument, Number(version.version_number))} className={`${buttonClass} bg-slate-800 text-slate-300`}><Download className="h-3.5 w-3.5" />Download</button>}{canUpdate && version.released && Number(version.version_number) !== Number(versionsDocument.version) && <button disabled={!online} onClick={() => void restoreVersion(version)} className={`${buttonClass} bg-blue-600/20 text-blue-200`}><RotateCcw className="h-3.5 w-3.5" />Als neue Version wiederherstellen</button>}</div>
           </div>)}</div>
         </section>
       </div>}

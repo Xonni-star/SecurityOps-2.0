@@ -16,12 +16,12 @@ const noopLogger = () => {};
 const MIGRATION_VERSIONS = [
   '001', '002', '003', '004', '005', '006', '007', '009', '011', '012', '013', '014',
   '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025', '026',
-  '027', '028', '029', '030', '031', '032', '033', '034', '035'
+  '027', '028', '029', '030', '031', '032', '033', '034', '035', '036'
 ];
 const MIGRATION_VERSIONS_WITH_010 = [
   '001', '002', '003', '004', '005', '006', '007', '009', '010', '011', '012', '013',
   '014', '015', '016', '017', '018', '019', '020', '021', '022', '023', '024', '025',
-  '026', '027', '028', '029', '030', '031', '032', '033', '034', '035'
+  '026', '027', '028', '029', '030', '031', '032', '033', '034', '035', '036'
 ];
 
 function migrationUrl(): string {
@@ -130,6 +130,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
     expect(history.every((row) => /^[0-9a-f]{64}$/.test(row.checksum))).toBe(true);
     expect(await tableExists(db, 'sync_conflict_resolution_receipts')).toBe(true);
     expect(await tableExists(db, 'documents')).toBe(true);
+    expect(await tableExists(db, 'document_storage_deletion_outbox')).toBe(true);
     expect(await tableExists(db, 'employee_site_assignments')).toBe(true);
     expect(await tableExists(db, 'emergency_plans')).toBe(true);
     expect(await tableExists(db, 'alarm_incidents')).toBe(true);
@@ -146,7 +147,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       `SELECT table_name, column_name FROM information_schema.columns
         WHERE table_schema='public' AND
           ((table_name='documents' AND column_name='site_id') OR
-           (table_name='document_versions' AND column_name IN ('released_at','scanned_at','scan_error_code','storage_deleted_at')))
+           (table_name='document_versions' AND column_name IN ('released_at','scanned_at','scan_error_code','storage_deleted_at','storage_deletion_pending_at')))
         ORDER BY table_name, column_name`
     );
     expect(dmsLifecycleColumns.map(({ table_name, column_name }) => `${table_name}.${column_name}`)).toEqual([
@@ -154,6 +155,7 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       'document_versions.scan_error_code',
       'document_versions.scanned_at',
       'document_versions.storage_deleted_at',
+      'document_versions.storage_deletion_pending_at',
       'documents.site_id'
     ]);
     for (const table of [
@@ -389,6 +391,30 @@ describe('SecurityOps 2.0 – Versionssicherer Migrationsrunner', () => {
       can_read_documents: true,
       can_update_audit: false,
       can_delete_audit: false
+    });
+    const deletionOutboxSecurity = await queryInDatabase<{
+      row_security: boolean;
+      force_row_security: boolean;
+      can_read: boolean;
+      can_insert: boolean;
+      can_update: boolean;
+      can_delete: boolean;
+    }>(db, `
+      SELECT c.relrowsecurity AS row_security, c.relforcerowsecurity AS force_row_security,
+             has_table_privilege('secops_app_user', 'public.document_storage_deletion_outbox', 'SELECT') AS can_read,
+             has_table_privilege('secops_app_user', 'public.document_storage_deletion_outbox', 'INSERT') AS can_insert,
+             has_table_privilege('secops_app_user', 'public.document_storage_deletion_outbox', 'UPDATE') AS can_update,
+             has_table_privilege('secops_app_user', 'public.document_storage_deletion_outbox', 'DELETE') AS can_delete
+        FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+       WHERE n.nspname='public' AND c.relname='document_storage_deletion_outbox'
+    `);
+    expect(deletionOutboxSecurity[0]).toEqual({
+      row_security: true,
+      force_row_security: true,
+      can_read: true,
+      can_insert: true,
+      can_update: true,
+      can_delete: false
     });
     const handoverTables = await queryInDatabase<{ relname: string; row_security: boolean; force_row_security: boolean }>(
       db,
