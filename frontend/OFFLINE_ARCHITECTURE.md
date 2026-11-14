@@ -1,5 +1,7 @@
 # SecurityOps 2.0 - Phase 6: Offline-First Architektur
 
+> **Projektstatus: In Entwicklung; nicht für Produktion freigegeben.** Offlinefunktionen sind workflow-spezifisch; nicht alle Module oder End-to-End-Geräteabläufe sind implementiert oder abgenommen.
+
 ## 1. PWA & Service Worker
 SecurityOps 2.0 ist als vollwertige Progressive Web App (PWA) nach modernen Webstandards konzipiert:
 - **App Shell Caching**: Die Kernanwendung (`index.html`, Scripts, Styles, Icons) wird über `public/sw.js` lokal im Cache vorgehalten.
@@ -14,6 +16,8 @@ Die lokale Speicherung erfolgt über die native Browser-IndexedDB `SecurityOps2_
 2. **`inbox` Store**: Lokale Replikation von Mandantendaten (Objekte, Schichten, Notfallpläne).
 3. **`attachments` Store**: Allgemeiner lokaler Anhangsspeicher für explizit integrierte Workflows; Alarmfotos sind nicht angebunden.
 4. **`device_meta` Store**: Speicherung der cryptographischen Geräte-ID (`dev-uuid`) und Vertrauensstufe.
+
+Lokale Mandanten-/Benutzer-IDs ordnen zwischengespeicherte Daten und Mutationen zu; sie sind kein Berechtigungsnachweis. Replay und Konfliktentscheidungen benötigen die authentifizierte Sitzung und werden serverseitig tenant- und berechtigungsgeprüft. Konten, Mitgliedschaften, Rollen und Berechtigungen können nicht offline administriert werden. Änderungen an Benutzer- oder Rollenrechten greifen erst nach serverseitiger Prüfung; eine Offline-UI darf daraus keine Berechtigung oder bestätigte Änderung ableiten.
 
 SOP-Kenntnisnahmen verwenden zusätzlich den `sopAcknowledgements`-Store derselben IndexedDB. Jeder Eintrag ist an Mandant, Benutzer, SOP-Zuweisung und konkrete Versions-ID gebunden und enthält einen stabilen `clientMutationId` sowie den Erfassungszeitpunkt. Der Eintrag wird dauerhaft gespeichert, bevor die Oberfläche die Bestätigung als vorgemerkt anzeigt; fehlgeschlagene Übertragungen werden mit derselben Mutation-ID erneut versucht und erst nach bestätigter Serverantwort entfernt. Der allgemeine Entity-Outbox-Endpunkt wird dafür nicht verwendet. Alte localStorage-Einträge werden nur dann einmalig übernommen, wenn die konkrete Versions-ID zuverlässig zugeordnet werden kann.
 

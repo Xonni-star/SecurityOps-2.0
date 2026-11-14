@@ -5,7 +5,7 @@ import { app } from '../app';
 import { migrationPool, withTenantTransaction } from '../config/database';
 import { materializePatrolOccurrences, processTenantPatrolSchedules } from '../services/patrolScheduleWorker';
 import { removeDocumentBlob } from '../services/documentFiles';
-import { authHeaders } from './testUtils';
+import { authHeaders, insertTenantMembership } from './testUtils';
 
 const SEED_PASSWORD = 'SecOpsVault2025SecurePassword!';
 const TENANT_ID = '11111111-1111-1111-1111-111111111111';
@@ -65,6 +65,7 @@ beforeAll(async () => {
     [userEmail, passwordHash]
   );
   userId = user.rows[0].id;
+  await insertTenantMembership(TENANT_ID, userId);
   const role = await migrationPool.query("SELECT id FROM roles WHERE name='Einsatzleitung'");
   if (!role.rows.length) throw new Error('Patrol integration test role is missing.');
   await migrationPool.query(
@@ -626,6 +627,7 @@ test('patrol API verifies tokens, serializes routes, and makes round/exception r
     [guardEmail, guardPasswordHash]
   );
   scopeUserId = guardUser.rows[0].id;
+  await insertTenantMembership(TENANT_ID, scopeUserId);
   const guardRole = await migrationPool.query("SELECT id FROM roles WHERE name='Wachdienstmitarbeiter'");
   if (!guardRole.rows.length) throw new Error('Patrol guard integration role is missing.');
   await migrationPool.query(

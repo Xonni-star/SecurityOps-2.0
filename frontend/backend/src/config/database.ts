@@ -24,6 +24,23 @@ migrationPool.on('error', () => {
   console.error('[POSTGRES MIGRATION POOL FEHLER] Idle migration client reported an error.');
 });
 
+const NO_CONTEXT_ID = '00000000-0000-0000-0000-000000000000';
+
+async function releaseContextClient(client: PoolClient): Promise<void> {
+  try {
+    await client.query(
+      `SELECT set_config('app.current_tenant',$1,false),
+              set_config('app.current_user_id',$1,false),
+              set_config('app.session_lookup_hash','',false)`,
+      [NO_CONTEXT_ID]
+    );
+  } catch {
+    client.release(new Error('Database request context reset failed.'));
+    throw new Error('Database request context reset failed.');
+  }
+  client.release();
+}
+
 /**
  * 3. Verbindliche Rollenprüfung vor Start des HTTP-Servers:
  * Stellt sicher, dass secops_app_user weder SUPERUSER noch BYPASSRLS besitzt.
@@ -54,7 +71,7 @@ export async function verifyAppDatabaseRole(): Promise<void> {
 
     console.log(`[POSTGRES SICHERHEIT] Anwendungsrolle '${app_user}' erfolgreich verifiziert (NOSUPERUSER, NOBYPASSRLS).`);
   } finally {
-    client.release();
+    await releaseContextClient(client);
   }
 }
 
@@ -82,12 +99,55 @@ export async function withTenantTransaction<T>(
     }
     throw error;
   } finally {
-    try {
-      await client.query("SELECT set_config('app.current_tenant', '', false)");
-    } catch {
-      // Ignorieren falls Verbindung bereits beendet
+    await releaseContextClient(client);
+  }
+}
+
+export async function withUserContextTransaction<T>(
+  userId: string,
+  callback: (client: PoolClient) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.current_user_id', $1, true)", [userId]);
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { console.error('[POSTGRES ROLLBACK FEHLER] User transaction rollback failed.'); }
+    throw error;
+  } finally {
+    await releaseContextClient(client);
+  }
+}
+
+export async function withSessionLookupTransaction<T>(
+  tokenHash: string,
+  callback: (client: PoolClient, session: { user_id: string; tenant_id: string }) => Promise<T>
+): Promise<T | null> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query("SELECT set_config('app.session_lookup_hash', $1, true)", [tokenHash]);
+    const session = await client.query<{ user_id: string; tenant_id: string }>(
+      `SELECT user_id,tenant_id FROM user_sessions
+        WHERE token_hash=$1 AND revoked=false AND expires_at>CURRENT_TIMESTAMP`,
+      [tokenHash]
+    );
+    if (!session.rows.length) {
+      await client.query('COMMIT');
+      return null;
     }
-    client.release();
+    await client.query("SELECT set_config('app.current_tenant', $1, true)", [session.rows[0].tenant_id]);
+    const result = await callback(client, session.rows[0]);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    try { await client.query('ROLLBACK'); } catch { console.error('[POSTGRES ROLLBACK FEHLER] Session transaction rollback failed.'); }
+    throw error;
+  } finally {
+    await releaseContextClient(client);
   }
 }
 
@@ -114,7 +174,7 @@ export async function withSystemTransaction<T>(
     }
     throw error;
   } finally {
-    client.release();
+    await releaseContextClient(client);
   }
 }
 

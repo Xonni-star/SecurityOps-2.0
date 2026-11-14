@@ -2,7 +2,14 @@ import { login } from '../controllers/authController';
 import { query } from '../config/database';
 import argon2 from 'argon2';
 
-jest.mock('../config/database', () => ({ query: jest.fn() }));
+jest.mock('../config/database', () => {
+  const query = jest.fn();
+  return {
+    query,
+    withUserContextTransaction: jest.fn((_userId: string, callback: (db: { query: typeof query }) => unknown) => callback({ query })),
+    withTenantTransaction: jest.fn((_tenantId: string, callback: (db: { query: typeof query }) => unknown) => callback({ query }))
+  };
+});
 
 describe('login issues opaque cookie sessions', () => {
   beforeEach(() => {
@@ -10,9 +17,11 @@ describe('login issues opaque cookie sessions', () => {
     jest.spyOn(argon2, 'verify').mockResolvedValue(true);
     (query as jest.Mock)
       .mockResolvedValueOnce({ rows: [{ id: '11111111-1111-1111-1111-111111111111', email: 'guard@example.test', password_hash: 'argon-hash', first_name: 'Test', last_name: 'Guard', is_active: true, failed_login_attempts: 0, locked_until: null }] })
-      .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ tenant_id: '22222222-2222-2222-2222-222222222222', tenant_name: 'Tenant A', role_id: '33333333-3333-3333-3333-333333333333', role_name: 'Operator' }] })
+      .mockResolvedValueOnce({ rows: [{ tenant_id: '22222222-2222-2222-2222-222222222222', tenant_name: 'Tenant A', role_name: 'Operator', first_name: 'Tenant', last_name: 'Person' }] })
       .mockResolvedValueOnce({ rows: [{ code: 'logbook:read' }] })
+      .mockResolvedValueOnce({ rows: [{ role_name: 'Operator' }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
   });
 
@@ -30,6 +39,7 @@ describe('login issues opaque cookie sessions', () => {
     await login(req, res, next);
     expect(next).not.toHaveBeenCalled();
     expect(res.body.data.accessToken).toBeUndefined();
+    expect(res.body.data.user.fullName).toBe('Tenant Person');
     expect(res.body.data.csrfToken).toBeTruthy();
     const sessionCookie = cookies.find(([name]) => name === 'secops_session');
     expect(sessionCookie?.[1]).toHaveLength(43);

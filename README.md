@@ -88,7 +88,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Alarme/Notfallpläne | implementiert, nicht deployed | Versionierte Pläne, Vorfälle, Ereignisse, Offline-Queue und Eskalationsworker; externe E-Mail-/Push-Zustellung ist nicht konfiguriert |
 | Übergaben | in `main` integriert, nicht deployed | Tenant-scoped Protokolle, getrennte Bestätigungen, Ereignisse, übernommene Aufgaben, DMS-Links und Offline-Sync |
 | Kontrollgänge | in `main` integriert, nicht deployed | RLS, QR/NFC/manuelle Scans, versionierte Routen, Gruppen, Termin-Vorkommen, Abweichungen und Offline-Sync; externe Benachrichtigung und Offline-Binäranhänge fehlen |
-| Benutzer/Rechte | Authentifizierung und RBAC vorhanden | Opaque Cookie-Sitzungen, CSRF, Login-Lockout und Berechtigungsprüfung; keine Benutzer-/Rollen-Administrations-API |
+| Benutzer/Rechte | Tenant-scoped Administration im aktuellen PR-Arbeitsstand | Bestehende Auth/RBAC erweitert um Benutzerverwaltung, konfigurierbare tenant-eigene Rollen, Site-Grants, Audit und Passwort-Reset-Vorbereitung; Online-Adminfunktionen, serverseitige Prüfung; noch nicht in `main` |
 | Offline-Sync | teilweise integriert | IndexedDB-Outbox und modulbezogene Sync-Pfade; nicht jede Funktion und jedes Binärartefakt ist offline verfügbar |
 | Dienstplanung | Phase-2-Backend/UI in offenen PRs [#16](https://github.com/Xonni-star/SecurityOps-2.0/pull/16) und [#19](https://github.com/Xonni-star/SecurityOps-2.0/pull/19), nicht deployed | API-gestützte Kalender- und Planungsabläufe; keine Rechtskonformitätsaussage. Status, CI-Köpfe, Audit-Ergebnis und verbleibende Grenzen: [Phase-2-Abschlussbericht](./PHASE_2_FINAL_COMPLETION_REPORT.md) |
 
@@ -113,13 +113,13 @@ npm --prefix frontend/backend audit
 npm --prefix frontend/backend audit --omit=dev
 ```
 
-Audit snapshot (2026-11-13): `npm --prefix frontend audit` found 0 vulnerabilities. The full backend audit found 7 low-severity findings in the Jest/`ts-jest` test-tooling dependency chain, including `deepmerge` GHSA-gcqx-w48m-w2h4; `npm --prefix frontend/backend audit --omit=dev` found 0 vulnerabilities. npm's suggested `--force` fix downgrades Jest to 25.1.0 and is a breaking change, so no dependency changes were made from this audit.
+Audit snapshot (2026-11-14): `npm --prefix frontend audit` found 0 vulnerabilities. The full backend audit found 7 LOW findings for `deepmerge@4.3.1` (GHSA-gcqx-w2h4) in Jest/`ts-jest` development dependencies; `npm --prefix frontend/backend audit --omit=dev` found 0 production findings. Upstream has no patched 4.x release; do not force the breaking Jest downgrade suggested by npm.
 
 ---
 
 ## Sicherheit
 
-* **Mandantenisolation:** PostgreSQL 16+ erzwingt `FORCE ROW LEVEL SECURITY`; ohne gesetzten Transaktionskontext (`SET LOCAL app.current_tenant`) liefert die Datenbank physisch keine Datensätze.
+* **Mandantenisolation:** RLS und `FORCE ROW LEVEL SECURITY` sind für ausgewählte tenantgebundene Tabellen konfiguriert; dies gilt nicht pauschal für jede historische Tabelle. Tenant-scoped API-Zugriffe setzen ihren Datenbankkontext aus der authentifizierten Sitzung. Bekannte modulbezogene Grenzen stehen in den jeweiligen API-/Sicherheitsdokumenten.
 * **Least Privilege:** Der operative Benutzer `secops_app_user` besitzt weder Superuser- noch `BYPASSRLS`-Rechte; die Rolle wird beim Serverstart verifiziert.
 * **Authentifizierung:** Argon2id-Passworthashes, opake zufällige `HttpOnly`-Sitzungscookies, Datenbank-Widerruf, CSRF-Schutz und kontoabhängiger Lockout nach Fehlversuchen. Ein globales IP-basiertes Limit ist aktiv; der In-Memory-Zähler wird nicht zwischen Replikas geteilt, weshalb Multi-Instance-Deployments ein zusätzliches Gateway-Limit benötigen.
 * **Offline-Sync:** Idempotente Mutationen über `POST /api/v1/sync/push`; Übergaben verwenden zusätzlich `POST /api/v1/handovers/sync`, Advisory Locks und persistente Quittungen. Lokale Erfassung bleibt bis zur API-Quittung ausstehend; Konflikte überschreiben keine bestätigten Protokolle.
@@ -132,8 +132,10 @@ Audit snapshot (2026-11-13): `npm --prefix frontend audit` found 0 vulnerabiliti
 * [frontend/INSTALLATION_GUIDE.md](./frontend/INSTALLATION_GUIDE.md) — Installation und Inbetriebnahme
 * [frontend/SYSTEM_OVERVIEW.md](./frontend/SYSTEM_OVERVIEW.md) — Systemüberblick
 * [frontend/HANDOVERS_API.md](./frontend/HANDOVERS_API.md) — Übergabe-API, Statusmodell und Offline-Synchronisierung
-* [frontend/SECURITY_AUDIT.md](./frontend/SECURITY_AUDIT.md) — Sicherheitsaudit
+* [frontend/USER_ADMINISTRATION_API.md](./frontend/USER_ADMINISTRATION_API.md) — Benutzer-/Rollen-API, Berechtigungsgrenzen und Reset-Ablauf
+* [frontend/SECURITY_AUDIT.md](./frontend/SECURITY_AUDIT.md) — historischer Sicherheitsaudit-Snapshot und aktueller Verweis
 * [frontend/KNOWN_ISSUES.md](./frontend/KNOWN_ISSUES.md) — bekannte Einschränkungen
+* [docs/development/NEXT_DEVELOPMENT_REPORT.md](./docs/development/NEXT_DEVELOPMENT_REPORT.md) — aktueller Bericht zu Benutzer-/Rechteverwaltung und Verifikation
 * [PHASE_1_INTEGRATION_COMPLETION_REPORT.md](./PHASE_1_INTEGRATION_COMPLETION_REPORT.md) — aktueller quellcodebasierter Umsetzungsstand, Befunde und Prüfgrenzen
 * [frontend/SERVICE_PLANNING_SPECIFICATION.md](./frontend/SERVICE_PLANNING_SPECIFICATION.md) — Dienstplanungs-Spezifikation und Phase-2-Implementierungsstand
 * [PHASE_2_FINAL_COMPLETION_REPORT.md](./PHASE_2_FINAL_COMPLETION_REPORT.md) — verifizierte Phase-2-PR-/CI-Stände, Tests, npm audit und verbleibende Grenzen

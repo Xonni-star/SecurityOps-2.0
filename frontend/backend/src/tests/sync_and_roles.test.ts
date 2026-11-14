@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import request from 'supertest';
 import { app } from '../app';
 import { pool, migrationPool, withTenantTransaction, verifyAppDatabaseRole } from '../config/database';
-import { cleanupTestData, authHeaders } from './testUtils';
+import { cleanupTestData, authHeaders, insertTenantMembership } from './testUtils';
 import { env } from '../config/env';
 
 describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Konfliktauflösung', () => {
@@ -59,14 +59,15 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     `, [`sync.user.${Date.now()}@secops.local`]);
     testUserAId = uRes.rows[0].id;
 
-    await pool.query(
+    await insertTenantMembership(testTenantA, testUserAId);
+    await migrationPool.query(
       'INSERT INTO user_roles (user_id, role_id, tenant_id) VALUES ($1, $2, $3);',
       [testUserAId, testRoleEinsatzId, testTenantA]
     );
 
     testTokenA = crypto.randomBytes(32).toString('base64url');
     const tokenHash = crypto.createHash('sha256').update(testTokenA).digest('hex');
-    await pool.query(`
+    await migrationPool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
     `, [testUserAId, testTenantA, tokenHash]);
@@ -76,10 +77,11 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
        VALUES ($1,'unused-test-hash','Planning','Approver') RETURNING id`,
       [`planning.approver.${Date.now()}@secops.local`]
     )).rows[0].id;
-    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)',
+    await insertTenantMembership(testTenantA, planningApproverId);
+    await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)',
       [planningApproverId, testRoleEinsatzId, testTenantA]);
     planningApproverToken = crypto.randomBytes(32).toString('base64url');
-    await pool.query(
+    await migrationPool.query(
       `INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked)
        VALUES ($1,$2,$3,NOW()+interval '1 hour',false)`,
       [planningApproverId, testTenantA, crypto.createHash('sha256').update(planningApproverToken).digest('hex')]
@@ -94,10 +96,11 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
        VALUES ($1,'unused-test-hash','Planning','Denied') RETURNING id`,
       [`planning.denied.${Date.now()}@secops.local`]
     )).rows[0].id;
-    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)',
+    await insertTenantMembership(testTenantA, planningDeniedUserId);
+    await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)',
       [planningDeniedUserId, deniedRoleId, testTenantA]);
     planningDeniedToken = crypto.randomBytes(32).toString('base64url');
-    await pool.query(
+    await migrationPool.query(
       `INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked)
        VALUES ($1,$2,$3,NOW()+interval '1 hour',false)`,
       [planningDeniedUserId, testTenantA, crypto.createHash('sha256').update(planningDeniedToken).digest('hex')]
@@ -210,9 +213,10 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
     const restrictedRoleId = (await pool.query("INSERT INTO roles (name,description) VALUES ($1,'restricted sync role') RETURNING id", [`RestrictedSync_${Date.now()}`])).rows[0].id;
     restrictedUserId = (await pool.query("INSERT INTO users (email,password_hash,first_name,last_name) VALUES ($1,'unused','Restricted','Sync') RETURNING id", [`restricted.${Date.now()}@secops.local`])).rows[0].id;
-    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [restrictedUserId, restrictedRoleId, testTenantA]);
+    await insertTenantMembership(testTenantA, restrictedUserId);
+    await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [restrictedUserId, restrictedRoleId, testTenantA]);
     const restrictedToken = crypto.randomBytes(32).toString('base64url');
-    await pool.query("INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked) VALUES ($1,$2,$3,NOW()+interval '1 hour',false)",
+    await migrationPool.query("INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked) VALUES ($1,$2,$3,NOW()+interval '1 hour',false)",
       [restrictedUserId, testTenantA, crypto.createHash('sha256').update(restrictedToken).digest('hex')]);
     const denied = await request(app).post('/api/v1/employees/sync').set(authHeaders(restrictedToken))
       .send(mutation('emp-denied-' + Date.now(), 'UPDATE', 2, { id: guardAId, firstName: 'NichtErlaubt' }));
@@ -1395,10 +1399,11 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     const logbookPermissionId = (await pool.query("SELECT id FROM permissions WHERE code='logbook:create'")).rows[0].id;
     await pool.query('INSERT INTO role_permissions (role_id, permission_id) VALUES ($1,$2)', [roleId, logbookPermissionId]);
     const userId = (await pool.query("INSERT INTO users (email,password_hash,first_name,last_name) VALUES ($1,'unused','Nur','Wachbuch') RETURNING id", [`log-only-${Date.now()}@secops.test`])).rows[0].id;
-    await pool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [userId, roleId, testTenantA]);
+    await insertTenantMembership(testTenantA, userId);
+    await migrationPool.query('INSERT INTO user_roles (user_id,role_id,tenant_id) VALUES ($1,$2,$3)', [userId, roleId, testTenantA]);
     const token = crypto.randomBytes(32).toString('base64url');
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
-    await pool.query("INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked) VALUES ($1,$2,$3,NOW()+interval '1 hour',false)", [userId,testTenantA,tokenHash]);
+    await migrationPool.query("INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked) VALUES ($1,$2,$3,NOW()+interval '1 hour',false)", [userId,testTenantA,tokenHash]);
 
     const mutationId = `forbidden-shift-${Date.now()}`;
     const result = await request(app).post('/api/v1/sync/push').set(authHeaders(token)).send({
@@ -1715,8 +1720,9 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
     const tokenB = crypto.randomBytes(32).toString('base64url');
     const tokenHashB = crypto.createHash('sha256').update(tokenB).digest('hex');
-    await pool.query('INSERT INTO user_roles (user_id, role_id, tenant_id) VALUES ($1, $2, $3)', [testUserAId, testRoleEinsatzId, testTenantB]);
-    await pool.query(`
+    await insertTenantMembership(testTenantB, testUserAId);
+    await migrationPool.query('INSERT INTO user_roles (user_id, role_id, tenant_id) VALUES ($1, $2, $3)', [testUserAId, testRoleEinsatzId, testTenantB]);
+    await migrationPool.query(`
       INSERT INTO user_sessions (user_id, tenant_id, token_hash, expires_at, revoked)
       VALUES ($1, $2, $3, NOW() + interval '1 hour', false);
     `, [testUserAId, testTenantB, tokenHashB]);
