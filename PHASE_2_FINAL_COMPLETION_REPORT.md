@@ -1,10 +1,12 @@
 # Phase 2 service planning — implementation and evidence status
 
 **Status checked:** 2026-11-14
-**Verified main commit:** `ed7f5f053849dc8e97b8ab79dfe2073f2974f73e`
+
+**Verified main commit:** `7ee8ce62d7c706cdd400304f256ce8e7c6426a05`
+
 **Project status:** In development; not approved for production.
 
-The Phase 2 planning backend and frontend workflow PRs (#16–#19) are merged. This confirms implementation in the repository, not production readiness or legal compliance. Main CI run [43600456464](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43600456464) passed the four standard jobs at the verified main commit.
+The Phase 2 planning backend and frontend workflow PRs (#16–#19) are merged. The configurable daily work limit from PR #33 is also merged into current `main`; no PR remains open. This confirms implementation in the repository, not production readiness or legal compliance.
 
 ## Implementation in `main`
 
@@ -12,23 +14,21 @@ The planning module includes revisioned shifts and periods, templates, staffing 
 
 The frontend consumes the planning API for roster, templates, suggestions, actual-time review, notifications, reports, and eligible offline shift draft/create/update workflows. Offline planning data is limited to the most recently cached date range per tenant/user. Assignment and approval, template operations, reporting, rule-profile changes, notification reads, and other unsupported actions remain online-only. Planning notifications are in-app; external email/push delivery is not established.
 
-There is no general claim that the planning module enforces working-time, rest-period, tariff, or other legal requirements. Actual-time approval is a workflow control, not a payroll result or legal determination.
+Merged PR #33 adds an optional `maximum_daily_minutes` rule for active, approved profiles. It does not provide a general working-time, rest-period, tariff, or legal-compliance determination. Actual-time approval is a workflow control, not a payroll result or legal determination.
 
-## Open planning change: PR #33
-
-[PR #33](https://github.com/Xonni-star/SecurityOps-2.0/pull/33), which adds an optional `maximum_daily_minutes` rule for active, approved profiles, remains **open and unmerged** at head `7ec3fb694bbc2e741c69d19ea8a05c311b284c41`. Its four standard CI jobs passed. Local backend/frontend builds and 26 roster tests passed. Two focused PostgreSQL 16 DST tests passed: Berlin spring-forward 00:00–04:00 counted as 180 elapsed minutes and was accepted at the limit; fall-back 00:00–04:00 counted as 300 minutes and was rejected. The test restores the site's IANA time zone in `finally`.
-
-A separate clean-main comparison on fresh PostgreSQL 16 databases found the same 21 failing assertions in `sync_and_roles.test.ts` on baseline and feature (feature: 21 failed/10 passed; baseline: 21 failed/9 passed). The new daily-limit test passes. These are pre-existing baseline failures, not evidence that PR #33 introduced them.
-
-## Evidence and remaining limits
+## Automated and focused validation
 
 | Evidence | Result | Scope limit |
 |---|---|---|
-| Main automated CI | Run 43600456464 passed root, frontend, backend/PostgreSQL, and Docker jobs on main. | Does not establish deployment, browser/device acceptance, or production workload behavior. |
-| Merged planning PR CI | PRs #16–#19 are merged; their recorded four-job CI checks passed. | CI verifies the tested revisions, not operational acceptance. |
-| PR #33 CI and focused local tests | All four standard CI jobs and the focused local checks listed above passed. | PR #33 remains unmerged; these changes are not in main. |
-| Production and domain acceptance | Not established. | Deployment, operator recovery, browser/device coverage, and legal/domain review remain outstanding. |
+| Main automated CI | Run [43604825009](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43604825009) passed all five jobs on current `main`, including backend PostgreSQL/Jest, frontend tests/build, and Docker checks. | Does not establish deployment, browser/device acceptance, or production workload behavior. |
+| Release artifacts | Run [43605173522](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43605173522) successfully built the package from CI artifacts. | Artifact generation is not a production deployment or acceptance. |
+| Focused PR #33 checks | Previously recorded local backend/frontend builds, 26 roster tests, and two focused PostgreSQL 16 DST tests passed on the change later merged as PR #33. Berlin spring-forward 00:00–04:00 counted as 180 elapsed minutes and fall-back 00:00–04:00 as 300 minutes. | These are targeted implementation tests, not browser/device acceptance or legal/domain review. |
 
-The full backend development dependency tree retains a LOW `deepmerge@4.3.1` advisory with no safe patched version identified. It is an upstream development-dependency blocker, not a production dependency finding.
+## Evidence and remaining limits
 
-Earlier PR states, test totals, and run identifiers elsewhere in this historical report referred to 2026-11-13 and have been replaced by the current status above.
+- Implementation of the merged planning workflows and configurable daily limit is established by code on `main`.
+- Current automated main CI passed; the release-artifact workflow built a package, but neither result establishes a production rollout.
+- No production installation, external-provider acceptance, operational acceptance, or browser/device acceptance has been established.
+- Legal/domain review remains outstanding; no claim of working-time, rest-period, tariff, or other legal compliance is made.
+
+The backend development dependency tree's last recorded audit identified a LOW `deepmerge@4.3.1` advisory in Jest/`ts-jest` development dependencies. The production-only audit found no production findings at that snapshot.
