@@ -822,15 +822,15 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
         })
       ]));
 
-      const crossingMonth = await createAndAssign('2028-01-31', '23:00', '01:00', 60);
+      const crossingMonth = await createAndAssign('2027-12-31', '23:00', '01:00', 60);
       expect(crossingMonth.status).toBe(200);
-      const afterCrossingMonth = await createAndAssign('2028-02-02', '08:00', '08:31');
+      const afterCrossingMonth = await createAndAssign('2028-01-02', '08:00', '08:31');
       expect(afterCrossingMonth.status).toBe(409);
       expect(afterCrossingMonth.body.data.findings).toEqual(expect.arrayContaining([
         expect.objectContaining({
           code: 'MAXIMUM_MONTHLY_WORK',
           details: expect.objectContaining({
-            localMonthStart: '2028-02-01',
+            localMonthStart: '2028-01-01',
             existingMinutes: 30,
             candidateMinutes: 31,
             monthlyWorkMinutes: 61
