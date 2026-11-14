@@ -16,7 +16,7 @@ on:
   push:
     branches: ["main", "release/*"]
   pull_request:
-    branches: ["main", "xonni-star-phase-2-backend-planning"]
+    branches: ["main", "xonni-star-phase-2-backend-planning", "xonni-star-phase-2-planning-ui"]
   workflow_dispatch:
 
 permissions:
