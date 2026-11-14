@@ -40,11 +40,8 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
 
   const [isSyncing, setIsSyncing] = useState(false);
   const [activeTab, setActiveTab] = useState<'outbox' | 'conflicts' | 'storage'>('outbox');
-  const [storageStats, setStorageStats] = useState<{ usageBytes: number; quotaBytes: number; percentage: number }>({
-    usageBytes: 1250000,
-    quotaBytes: 50000000,
-    percentage: 2.5
-  });
+  const [storageStats, setStorageStats] = useState<{ usageBytes: number; quotaBytes: number; percentage: number } | null>(null);
+  const [storageError, setStorageError] = useState('');
 
   // Selected conflict for three-way side-by-side diff
   const [selectedConflict, setSelectedConflict] = useState<any | null>(null);
@@ -61,24 +58,29 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
 
   useEffect(() => {
     if (isOpen) {
+      let isCurrent = true;
+      setStorageStats(null);
+      setStorageError('');
       offlineVault.getStorageEstimates().then((stats) => {
-        setStorageStats({
-          usageBytes: stats.usageBytes || 1250000,
-          quotaBytes: stats.quotaBytes || 50000000,
-          percentage: stats.percentage || 2.5
-        });
+        if (!isCurrent) return;
+        if (stats) setStorageStats(stats);
+        else setStorageError('Dieser Browser stellt keine verlässliche Speicherbelegung bereit.');
+      }).catch((error) => {
+        if (isCurrent) setStorageError(error instanceof Error ? error.message : 'Speicherbelegung konnte nicht gelesen werden.');
       });
+      return () => { isCurrent = false; };
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
 
-  const pendingCount = syncQueue.filter((q) => q.status === 'pending').length;
+  const pendingCount = syncQueue.filter((q) => q.status === 'pending' || q.status === 'failed').length;
   const syncedCount = syncQueue.filter((q) => q.status === 'synced').length;
   const conflictItems = syncQueue.filter((q) => q.status === 'conflict');
+  const conflictClientPayload = selectedConflict?.conflictDetails?.clientPayload ?? selectedConflict?.payload;
   const selectedConflictPayload = selectedConflict?.entityType === 'patrol'
-    ? Object.fromEntries(Object.entries(selectedConflict.payload || {}).filter(([key]) => !/token/i.test(key)))
-    : selectedConflict?.payload;
+    ? Object.fromEntries(Object.entries(conflictClientPayload || {}).filter(([key]) => !/token/i.test(key)))
+    : conflictClientPayload;
   const hasShiftServerSnapshot = selectedConflict?.entityType !== 'shift' ||
     Boolean(selectedConflict.conflictDetails?.serverPayload &&
       typeof selectedConflict.conflictDetails.serverPayload === 'object' &&
@@ -240,6 +242,11 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                       <p className="text-[11px] text-slate-400 mt-1">
                         {item.payload.title || item.payload.name || JSON.stringify(item.payload).slice(0, 75)}
                       </p>
+                      {item.errorMessage && (
+                        <p role="status" className="text-[11px] text-rose-300 mt-1">
+                          {item.errorMessage}
+                        </p>
+                      )}
 
                       <div className="text-[10px] text-slate-500 font-mono mt-1 flex items-center gap-3">
                         <span>Erfasst: {item.createdAt}</span>
@@ -284,6 +291,8 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                   <div className="p-4 rounded-xl bg-slate-900 border border-blue-500/40 space-y-2">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400 block">
                       Lokale Offline-Version (Gerät)
+                      {(selectedConflict.conflictDetails?.clientVersion ?? selectedConflict.baseVersion) !== undefined &&
+                        ` · Revision ${selectedConflict.conflictDetails?.clientVersion ?? selectedConflict.baseVersion}`}
                     </span>
                     <div className="p-2.5 rounded-lg bg-slate-950 font-mono text-[11px] text-slate-200">
                       <pre>{JSON.stringify(selectedConflictPayload, null, 2)}</pre>
@@ -305,6 +314,8 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                   <div className="p-4 rounded-xl bg-slate-900 border border-slate-700 space-y-2">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400 block">
                       Aktueller Server-Stand (PostgreSQL)
+                      {selectedConflict.conflictDetails?.serverVersion !== undefined &&
+                        ` · Revision ${selectedConflict.conflictDetails.serverVersion}`}
                     </span>
                     <div className="p-2.5 rounded-lg bg-slate-950 font-mono text-[11px] text-slate-400">
                       <pre>{JSON.stringify(
@@ -374,6 +385,7 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
         {/* Tab 3: Storage & Quota */}
         {activeTab === 'storage' && (
           <div className="flex-1 overflow-y-auto p-5 space-y-4 text-xs">
+            {storageStats ? (
             <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 font-bold text-slate-200">
@@ -392,6 +404,11 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                 <div>Verfügbare Quota: <strong className="text-slate-200">{(storageStats.quotaBytes / 1024 / 1024).toFixed(0)} MB</strong></div>
               </div>
             </div>
+            ) : (
+              <p role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-4 text-amber-200">
+                {storageError || 'Speicherbelegung wird ermittelt.'}
+              </p>
+            )}
 
             <div className="p-4 rounded-xl bg-slate-900 border border-slate-800 text-[11px] space-y-2 text-slate-400">
               <span className="font-bold text-slate-300 block">Sicherheitshinweis zu lokalen Daten:</span>
