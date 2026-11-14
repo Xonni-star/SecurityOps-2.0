@@ -2,11 +2,11 @@
 
 **Status checked:** 2026-11-14
 
-**Verified main commit:** `e2d57f6def5a5f48d1454f34d5935787fb2bb90b`
+**Verified main commit:** `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`
 
 **Project status:** In development; not approved for production.
 
-This is an implementation and evidence snapshot, not a compliance or production-readiness declaration. PRs #25–#38 are merged; no PRs were open when checked. PR #36 added a configured monthly work-limit rule, PR #37 added an isolated DMS API flow, and PR #38 added full-schema backup/restore validation with synthetic tenant/DMS records. The current PR and CI record is in the [mainline integration report](./MAINLINE_INTEGRATION_STATUS.md).
+This is an implementation and evidence snapshot, not a compliance or production-readiness declaration. PRs #25–#39 are merged. PR #36 added a configured monthly work-limit rule, PR #37 added an isolated DMS API flow, PR #38 added full-schema backup/restore validation with synthetic tenant/DMS records, and PR #39 rejects malformed ClamAV responses. Draft PR #40 is open but not merged. The current PR and CI record is in the [mainline integration report](./MAINLINE_INTEGRATION_STATUS.md).
 
 ## Current implementation snapshot
 
@@ -24,10 +24,10 @@ This is an implementation and evidence snapshot, not a compliance or production-
 
 | Check | Result and scope |
 |---|---|
-| Main CI | Run [43609474644](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609474644) passed all seven jobs on the verified main commit, including frontend/backend, PostgreSQL, DMS API/scanner, full-schema restore, and Docker checks. |
-| Release artifacts | Run [43609786489](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609786489) successfully built the package from CI artifacts. This is not a deployment. |
+| Main CI | Run [43612331431](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612331431) passed all seven jobs on `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`, including frontend/backend, PostgreSQL, DMS API/scanner, full-schema restore, and Docker checks. |
+| Release artifacts | Run [43612645484](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612645484) successfully built the package from CI artifacts on that commit. This is not a deployment. |
 | Isolated restore tests | The MinIO and SeaweedFS checks associated with PRs #29–#30 exercised test database/object snapshots, hash and metadata comparison, credential/mount isolation, and disposable-resource cleanup. They do not prove a full installation or production/provider restore. |
-| ClamAV checks | Main CI passed the DMS INSTREAM adapter integration job. The isolated adapter/runtime checks cover clean content and benign EICAR, not production scanner availability or full DMS-flow acceptance. |
+| ClamAV checks | Main CI run 43612331431 passed the DMS INSTREAM adapter integration job, including PR #39's malformed-response regression test. The isolated adapter/runtime checks cover clean content and benign EICAR, not production scanner availability. |
 | Planning tests | Focused PostgreSQL 16 tests associated with merged PRs #33 and #36 cover configured daily/monthly work limits and Berlin spring-forward 00:00–04:00 as 180 elapsed minutes and fall-back 00:00–04:00 as 300 minutes; frontend/backend validation passed on those changes. These targeted results are not legal or production acceptance. |
 | Offline retry tests | Merged PR #32 added tests for persisted retry timing, reuse of the same mutation ID, terminal/conflict exclusions, and a bounded attempt count. The current main CI passed its frontend test/build job. |
 

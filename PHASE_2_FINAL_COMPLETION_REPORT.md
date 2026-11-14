@@ -2,11 +2,11 @@
 
 **Status checked:** 2026-11-14
 
-**Verified main commit:** `e2d57f6def5a5f48d1454f34d5935787fb2bb90b`
+**Verified main commit:** `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`
 
 **Project status:** In development; not approved for production.
 
-The Phase 2 planning backend and frontend workflow PRs (#16–#19) are merged. Configurable daily, weekly, and monthly work limits from PRs #33 and #36 are present in current `main`; no PRs were open when checked. This confirms implementation in the repository, not production readiness or legal compliance.
+The Phase 2 planning backend and frontend workflow PRs (#16–#19) are merged. Configurable daily, weekly, and monthly work limits from PRs #33 and #36 are present in current `main`. PR #39 (ClamAV response validation) is also merged; open draft PR #40 is not part of this mainline snapshot. This confirms implementation in the repository, not production readiness or legal compliance.
 
 ## Implementation in `main`
 
@@ -20,8 +20,8 @@ Merged PRs #33 and #36 add optional `maximum_daily_minutes`, `maximum_weekly_min
 
 | Evidence | Result | Scope limit |
 |---|---|---|
-| Main automated CI | Run [43609474644](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609474644) passed all seven jobs on current `main`, including backend PostgreSQL/Jest, frontend tests/build, DMS API/scanner integration, full-schema restore, and Docker checks. | Does not establish deployment, browser/device acceptance, or production workload behavior. |
-| Release artifacts | Run [43609786489](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43609786489) successfully built the package from CI artifacts. | Artifact generation is not a production deployment or acceptance. |
+| Main automated CI | Run [43612331431](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612331431) passed all seven jobs on `4b7cd7de1b26755a0379b67f7222d55ef2deeb4b`, including backend PostgreSQL/Jest, frontend tests/build, DMS API/scanner integration, full-schema restore, and Docker checks. | Does not establish deployment, browser/device acceptance, or production workload behavior. |
+| Release artifacts | Run [43612645484](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43612645484) successfully built the package from CI artifacts on the same commit. | Artifact generation is not a production deployment or acceptance. |
 | Focused PR #33 checks | Previously recorded local backend/frontend builds, 26 roster tests, and two focused PostgreSQL 16 DST tests passed on the change later merged as PR #33. Berlin spring-forward 00:00–04:00 counted as 180 elapsed minutes and fall-back 00:00–04:00 as 300 minutes. | These are targeted implementation tests, not browser/device acceptance or legal/domain review. |
 
 ## Evidence and remaining limits
