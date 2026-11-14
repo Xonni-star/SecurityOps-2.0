@@ -507,6 +507,118 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     expect(editPublished.body.code).toBe('SCHEDULE_PERIOD_PUBLISHED');
   });
 
+  test('Configured daily work limit splits overnight shifts and allocates breaks once', async () => {
+    const previousZone = await withTenantTransaction(testTenantA, tx => tx.query(
+      'SELECT time_zone FROM sites WHERE tenant_id=$1 AND id=$2',
+      [testTenantA, siteAId]
+    ));
+    await withTenantTransaction(testTenantA, tx => tx.query(
+      'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+      ['UTC', testTenantA, siteAId]
+    ));
+
+    try {
+      const profile = await request(app).post('/api/v1/planning/rule-profiles')
+        .set(authHeaders(testTokenA)).send({
+          name: `Daily limit ${Date.now()}`,
+          scope: { siteId: siteAId },
+          effectiveFrom: '2027-03-10',
+          effectiveUntil: '2027-03-12',
+          sourceName: 'Test-configured-daily-limit',
+          sourceReference: 'fixture:daily-limit',
+          rules: [{
+            code: 'maximum_daily_minutes',
+            value: 180,
+            source: 'fixture:daily-limit',
+            severity: 'blocking'
+          }]
+        });
+      expect(profile.status).toBe(201);
+      const versionId = profile.body.data.version.id as string;
+      const approved = await request(app)
+        .post(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}/versions/${versionId}/approve`)
+        .set(authHeaders(planningApproverToken)).send({});
+      expect(approved.status).toBe(200);
+      const activated = await request(app).patch(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}`)
+        .set(authHeaders(testTokenA)).send({ active: true });
+      expect(activated.status).toBe(200);
+
+      const existing = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId,
+          date: '2027-03-10',
+          startTime: '22:00',
+          endTime: '02:00',
+          breakMinutes: 60,
+          requiredQualification: 'Sachkunde'
+        });
+      expect(existing.status).toBe(201);
+      const existingAssigned = await request(app)
+        .post(`/api/v1/planning/shifts/${existing.body.data.shift.id}/assignments`)
+        .set(authHeaders(testTokenA)).send({
+          employeeId: guardAId,
+          expectedVersion: existing.body.data.shift.revision_version
+        });
+      expect(existingAssigned.status).toBe(200);
+
+      const overLimit = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId,
+          date: '2027-03-11',
+          startTime: '22:00',
+          endTime: '02:00',
+          breakMinutes: 30,
+          requiredQualification: 'Sachkunde'
+        });
+      expect(overLimit.status).toBe(201);
+      const rejected = await request(app)
+        .post(`/api/v1/planning/shifts/${overLimit.body.data.shift.id}/assignments`)
+        .set(authHeaders(testTokenA)).send({
+          employeeId: guardAId,
+          expectedVersion: overLimit.body.data.shift.revision_version
+        });
+      expect(rejected.status).toBe(409);
+      expect(rejected.body.data.findings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          code: 'MAXIMUM_DAILY_WORK',
+          severity: 'blocking',
+          sourceName: 'fixture:daily-limit',
+          details: expect.objectContaining({
+            profileVersionId: versionId,
+            localDate: '2027-03-11',
+            existingMinutes: 90,
+            candidateMinutes: 105,
+            dailyWorkMinutes: 195,
+            maximumDailyMinutes: 180
+          })
+        })
+      ]));
+
+      const withinLimit = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId,
+          date: '2027-03-11',
+          startTime: '22:00',
+          endTime: '02:00',
+          breakMinutes: 60,
+          requiredQualification: 'Sachkunde'
+        });
+      expect(withinLimit.status).toBe(201);
+      const accepted = await request(app)
+        .post(`/api/v1/planning/shifts/${withinLimit.body.data.shift.id}/assignments`)
+        .set(authHeaders(testTokenA)).send({
+          employeeId: guardAId,
+          expectedVersion: withinLimit.body.data.shift.revision_version
+        });
+      expect(accepted.status).toBe(200);
+    } finally {
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        [previousZone.rows[0].time_zone, testTenantA, siteAId]
+      ));
+    }
+  });
+
   test('Planning revalidates the full multi-day shift interval during publication', async () => {
     const period = await request(app).post('/api/v1/planning/periods').set(authHeaders(testTokenA)).send({
       name: `Multi-day planning ${Date.now()}`,
