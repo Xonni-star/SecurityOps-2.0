@@ -14,6 +14,8 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
   let planningDeniedUserId: string;
   let planningDeniedToken: string;
   let restrictedUserId: string;
+  let siteScopedUserId: string;
+  let siteScopedTargetUserId: string;
   let testRoleEinsatzId: string;
   let testTokenA: string;
   let siteAId: string;
@@ -225,9 +227,130 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
 
   afterAll(async () => {
     // Administrative Bereinigung inkl. Append-Only-Trigger (nur Testdatenbank).
-    await cleanupTestData([testTenantA, testTenantB], [testUserAId, planningApproverId, planningDeniedUserId, restrictedUserId]);
+    await cleanupTestData([testTenantA, testTenantB], [testUserAId, planningApproverId, planningDeniedUserId, restrictedUserId, siteScopedUserId, siteScopedTargetUserId]);
     await pool.end();
     await migrationPool.end();
+  });
+
+  test('site-scoped sync grants authorize only mutations for their assigned site', async () => {
+    const siteB = await withTenantTransaction(testTenantA, async tx => {
+      const client = await tx.query(
+        `INSERT INTO clients (tenant_id,client_number,company_name,contract_start,contract_end)
+         VALUES ($1,$2,'Site Scope Test','2025-01-01','2026-01-01') RETURNING id`,
+        [testTenantA, `SITE-SCOPE-${Date.now()}`]
+      );
+      const site = await tx.query(
+        `INSERT INTO sites (tenant_id,client_id,site_code,name,address)
+         VALUES ($1,$2,$3,'Site B','Test') RETURNING id`,
+        [testTenantA, client.rows[0].id, `SITE-B-${Date.now()}`]
+      );
+      const employee = await tx.query(
+        `INSERT INTO employees (tenant_id,personnel_number,first_name,last_name,email,phone,role,date_of_joining)
+         VALUES ($1,$2,'Site','B Employee',$3,'030','Wachkraft','2025-01-01') RETURNING id`,
+        [testTenantA, `MA-SITE-B-${Date.now()}`, `site-b-${Date.now()}@secops.test`]
+      );
+      await tx.query(
+        `INSERT INTO employee_site_assignments (tenant_id,employee_id,site_id) VALUES ($1,$2,$3)`,
+        [testTenantA, employee.rows[0].id, site.rows[0].id]
+      );
+      await tx.query(
+        `INSERT INTO guardbook_entries (tenant_id,site_id,guard_id,category,title,description)
+         VALUES ($1,$2,$3,'Vorkommnis','Site B entry','Must remain inaccessible')`,
+        [testTenantA, site.rows[0].id, guardAId]
+      );
+      return { id: site.rows[0].id as string, employeeId: employee.rows[0].id as string };
+    });
+
+    const roleId = (await pool.query(
+      `INSERT INTO tenant_roles (tenant_id,name,description) VALUES ($1,$2,'Site-scoped sync test') RETURNING id`,
+      [testTenantA, `SiteSync_${Date.now()}`]
+    )).rows[0].id as string;
+    await pool.query(
+      `INSERT INTO tenant_role_permissions (tenant_id,role_id,permission_id,site_id,data_scope)
+       SELECT $1,$2,p.id,$3,'SITE' FROM permissions p WHERE p.code=ANY($4::text[])`,
+      [testTenantA, roleId, siteAId, ['logbook:create', 'employees:read', 'users:read']]
+    );
+    siteScopedUserId = (await pool.query(
+      `INSERT INTO users (email,password_hash,first_name,last_name)
+       VALUES ($1,'unused-test-hash','Site','Scoped') RETURNING id`,
+      [`site.scoped.${Date.now()}@secops.local`]
+    )).rows[0].id as string;
+    await insertTenantMembership(testTenantA, siteScopedUserId);
+    await pool.query(
+      `INSERT INTO tenant_user_roles (tenant_id,user_id,role_id) VALUES ($1,$2,$3)`,
+      [testTenantA, siteScopedUserId, roleId]
+    );
+    siteScopedTargetUserId = (await pool.query(
+      `INSERT INTO users (email,password_hash,first_name,last_name)
+       VALUES ($1,'unused-test-hash','Site','Assignment Target') RETURNING id`,
+      [`site.assignment.target.${Date.now()}@secops.local`]
+    )).rows[0].id as string;
+    await insertTenantMembership(testTenantA, siteScopedTargetUserId);
+    await pool.query(
+      `INSERT INTO tenant_user_roles (tenant_id,user_id,role_id,site_id)
+       VALUES ($1,$2,$3,$4),($1,$2,$3,$5)`,
+      [testTenantA, siteScopedTargetUserId, roleId, siteAId, siteB.id]
+    );
+    const token = crypto.randomBytes(32).toString('base64url');
+    await migrationPool.query(
+      `INSERT INTO user_sessions (user_id,tenant_id,token_hash,expires_at,revoked)
+       VALUES ($1,$2,$3,NOW()+interval '1 hour',false)`,
+      [siteScopedUserId, testTenantA, crypto.createHash('sha256').update(token).digest('hex')]
+    );
+
+    const employeeList = await request(app).get('/api/v1/employees').set(authHeaders(token));
+    expect(employeeList.status).toBe(200);
+    expect(employeeList.body.data.map((employee: { id: string }) => employee.id)).toContain(guardAId);
+    expect(employeeList.body.data.map((employee: { id: string }) => employee.id)).not.toContain(siteB.employeeId);
+
+    const filteredForeignSite = await request(app).get(`/api/v1/employees?siteId=${siteB.id}`).set(authHeaders(token));
+    expect(filteredForeignSite.status).toBe(404);
+    expect(filteredForeignSite.body.data).toBeUndefined();
+
+    const siteFilteredUsers = await request(app).get(`/api/v1/admin/users?siteId=${siteAId}`).set(authHeaders(token));
+    expect(siteFilteredUsers.status).toBe(200);
+    const targetUser = siteFilteredUsers.body.data.find((entry: { id: string }) => entry.id === siteScopedTargetUserId);
+    expect(targetUser.roles).toHaveLength(1);
+    expect(targetUser.roles[0].siteId).toBe(siteAId);
+    expect(targetUser.sites).toEqual([{ id: siteAId, name: expect.any(String) }]);
+
+    const push = (clientUuid: string, action: 'CREATE' | 'UPDATE', payload: Record<string, unknown>) =>
+      request(app).post('/api/v1/sync/push').set(authHeaders(token)).send({
+        deviceId: 'site-scope-device',
+        mutations: [{ clientUuid, entityType: 'guardbook', action, clientTimestamp: new Date().toISOString(), payload }]
+      });
+
+    const ownSite = await push(`site-a-${Date.now()}`, 'CREATE', {
+      siteId: siteAId, guardId: guardAId, title: 'Site A entry', description: 'Authorized'
+    });
+    expect(ownSite.body.data[0].status).toBe('SYNCED');
+    const ownSiteRetry = await push(ownSite.body.data[0].clientUuid, 'CREATE', {
+      siteId: siteAId, guardId: guardAId, title: 'Site A entry', description: 'Authorized'
+    });
+    expect(ownSiteRetry.body.data[0]).toEqual(ownSite.body.data[0]);
+
+    const foreignSite = await push(`site-b-${Date.now()}`, 'CREATE', {
+      siteId: siteB.id, guardId: guardAId, title: 'Denied Site B entry', description: 'Denied'
+    });
+    expect(foreignSite.body.data[0]).toMatchObject({
+      status: 'REJECTED',
+      message: expect.stringContaining('fehlende Berechtigung')
+    });
+
+    const foreignEntryId = await withTenantTransaction(testTenantA, async tx => {
+      const entry = await tx.query(
+        `SELECT id FROM guardbook_entries WHERE tenant_id=$1 AND site_id=$2 AND title='Site B entry'`,
+        [testTenantA, siteB.id]
+      );
+      return entry.rows[0].id as string;
+    });
+    const foreignUpdate = await push(`site-b-update-${Date.now()}`, 'UPDATE', {
+      entryId: foreignEntryId, correctionNote: 'Denied'
+    });
+    expect(foreignUpdate.body.data[0]).toMatchObject({
+      status: 'REJECTED',
+      message: expect.stringContaining('fehlende Berechtigung')
+    });
   });
 
   // 1. Wachbuch: CREATE und wiederholte identische Übertragung
