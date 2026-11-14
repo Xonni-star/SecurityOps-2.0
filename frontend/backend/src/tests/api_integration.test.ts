@@ -5,6 +5,7 @@ import { app } from '../app';
 import { pool, migrationPool } from '../config/database';
 import { authHeaders, insertTenantMembership } from './testUtils';
 import { removeDocumentBlob } from '../services/documentFiles';
+import { setDocumentScanner, DocumentScannerUnavailableError } from '../services/documentScanner';
 import { claimDueAlarmEscalationJobs } from '../services/alarmEscalationWorker';
 
 const SEED_PASSWORD = 'SecOpsVault2025SecurePassword!';
@@ -61,6 +62,7 @@ async function login(email: string): Promise<string> {
 }
 
 beforeAll(async () => {
+  setDocumentScanner({ scan: async () => 'clean' });
   await migrationPool.query('DELETE FROM user_roles WHERE user_id IN (SELECT id FROM users WHERE email = $1)', [
     BAVARIA_USER_EMAIL
   ]);
@@ -915,7 +917,7 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(list.body.data).toEqual(expect.arrayContaining([expect.objectContaining({ title })]));
   });
 
-  test('DMS-Upload, Download, Versionierung, Archiv, Audit und Mandantentrennung funktionieren serverseitig', async () => {
+  test('DMS successful scan releases an upload; download, versioning, archive, audit and tenant isolation work server-side', async () => {
     const token = await login(SEED_USER_EMAIL);
     const categories = await request(app).get('/api/v1/documents/categories').set(authHeaders(token));
     expect(categories.status).toBe(200);
@@ -938,7 +940,14 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(upload.status).toBe(201);
     createdDmsDocumentId = upload.body.data.id;
     expect(upload.body.data.size_bytes).toBe(firstBytes.length);
-    expect(upload.body.data.scan_status).toBe('not_scanned');
+    expect(upload.body.data.scan_status).toBe('clean');
+    expect(upload.body.data.file_released).toBe(true);
+    const storedScan = await migrationPool.query(
+      'SELECT scan_status, released_at FROM document_versions WHERE tenant_id=$1 AND document_id=$2 AND version_number=1',
+      [TENANT_FFM_ID, createdDmsDocumentId]
+    );
+    expect(storedScan.rows[0].scan_status).toBe('clean');
+    expect(storedScan.rows[0].released_at).toBeInstanceOf(Date);
 
     const invalidUpload = await request(app)
       .post('/api/v1/documents')
@@ -1012,6 +1021,24 @@ describe('SecurityOps 2.0 – API-Persistenz & Mandantentrennung', () => {
     expect(audit.body.data.map((item: any) => item.action)).toEqual(
       expect.arrayContaining(['created', 'uploaded', 'downloaded', 'version_created', 'version_restored', 'archived', 'restored'])
     );
+
+    setDocumentScanner({
+      scan: async () => { throw new DocumentScannerUnavailableError('test scanner unavailable'); }
+    });
+    const quarantinedVersion = await request(app)
+      .post(`/api/v1/documents/${createdDmsDocumentId}/versions`)
+      .set(authHeaders(token))
+      .set('Content-Type', 'application/octet-stream')
+      .set('X-File-Name', encodeURIComponent('integration-contract-quarantined.pdf'))
+      .send(Buffer.from('%PDF-1.7\nscanner unavailable\n'));
+    setDocumentScanner({ scan: async () => 'clean' });
+    expect(quarantinedVersion.status).toBe(202);
+    expect(quarantinedVersion.body.data.scan_status).toBe('unavailable');
+    expect(quarantinedVersion.body.data.released).toBe(false);
+    const blockedDownload = await request(app)
+      .get(`/api/v1/documents/${createdDmsDocumentId}/download`)
+      .set(authHeaders(token));
+    expect(blockedDownload.status).toBe(423);
   });
 
   test('SOP-Workflow veröffentlicht nur geprüfte Versionen und verlangt Kenntnisnahme je Version', async () => {

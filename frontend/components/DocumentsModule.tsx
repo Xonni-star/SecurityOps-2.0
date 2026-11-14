@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   Archive, ArrowLeft, ChevronRight, Download, Eye, FileText, Folder, FolderPlus,
-  History, Pencil, Plus, RotateCcw, Search, Tag, Upload, X
+  History, Pencil, Plus, RotateCcw, Search, Tag, Trash2, Upload, X
 } from 'lucide-react';
 import { apiClient } from '../services/apiClient';
 import { mapDmsDocumentRow, useSecurityStore } from '../store';
@@ -29,6 +29,9 @@ interface DocumentVersion {
   content_type: string;
   size_bytes: number;
   scan_status: string;
+  released: boolean;
+  scan_error_code?: string | null;
+  storage_deleted_at?: string | null;
   created_at: string;
   created_by: string;
   restored_from_version?: number;
@@ -82,6 +85,7 @@ export const DocumentsModule: React.FC = () => {
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [scanNotice, setScanNotice] = useState('');
   const [online, setOnline] = useState(typeof navigator === 'undefined' || navigator.onLine);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [fileToUpload, setFileToUpload] = useState<File | null>(null);
@@ -297,7 +301,14 @@ export const DocumentsModule: React.FC = () => {
     try {
       setError('');
       setUploadProgress(0);
-      await apiClient.uploadFile(`/documents?${query.toString()}`, fileToUpload, setUploadProgress);
+      const uploaded = await apiClient.uploadFile<{ scan_status: string; file_released: boolean }>(
+        `/documents?${query.toString()}`,
+        fileToUpload,
+        setUploadProgress
+      );
+      setScanNotice(uploaded.file_released
+        ? 'Datei erfolgreich geprüft und freigegeben.'
+        : 'Datei ist in Quarantäne. Download und Freigabe bleiben bis zu einer erfolgreichen Prüfung gesperrt.');
       setUploadOpen(false);
       setFileToUpload(null);
       setUploadTitle('');
@@ -424,6 +435,16 @@ export const DocumentsModule: React.FC = () => {
     }
   };
 
+  const deleteDocumentFiles = async (document: ManagedDocument) => {
+    if (!window.confirm(`Alle gespeicherten Dateiversionen von "${document.title}" unwiderruflich löschen?`)) return;
+    try {
+      await apiClient.delete(`/documents/${document.id}/files`);
+      await refreshDocuments(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Dokumentdateien konnten nicht gelöscht werden.');
+    }
+  };
+
   const restoreDocument = async (document: ManagedDocument) => {
     try {
       await apiClient.post(`/documents/${document.id}/restore`, {});
@@ -442,7 +463,14 @@ export const DocumentsModule: React.FC = () => {
       const file = input.files?.[0];
       if (!file) return;
       try {
-        await apiClient.uploadFile(`/documents/${document.id}/versions`, file, setUploadProgress);
+        const uploaded = await apiClient.uploadFile<{ scan_status: string; released: boolean }>(
+          `/documents/${document.id}/versions`,
+          file,
+          setUploadProgress
+        );
+        setScanNotice(uploaded.released
+          ? 'Neue Version erfolgreich geprüft und freigegeben.'
+          : 'Neue Version ist in Quarantäne. Die Datei bleibt bis zu einer erfolgreichen Prüfung gesperrt.');
         await refreshDocuments(false);
       } catch (reason) {
         setError(reason instanceof Error ? reason.message : 'Neue Version konnte nicht gespeichert werden.');
@@ -484,6 +512,7 @@ export const DocumentsModule: React.FC = () => {
       {error && <div role="alert" className="flex items-start justify-between gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">
         <span>{error}</span><button aria-label="Fehlermeldung schließen" onClick={() => setError('')}><X className="h-4 w-4" /></button>
       </div>}
+      {scanNotice && <div role="status" className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">{scanNotice}</div>}
 
       <div className="grid gap-4 xl:grid-cols-[230px_minmax(0,1fr)]">
         <aside className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900 p-3">
@@ -550,8 +579,13 @@ export const DocumentsModule: React.FC = () => {
                     <p className="mt-2 text-xs text-slate-400">v{document.version} · {bytesLabel(document.sizeBytes)} · {dateLabel(document.uploadedAt)}</p>
                     <p className="mt-1 truncate text-xs text-slate-500">Zuordnung: {relationshipTitle(document)}</p>
                     {document.validUntil && <p className="mt-1 text-xs text-slate-500">Gültig bis: {dateLabel(document.validUntil)}</p>}
-                    <p className={`mt-2 text-[10px] ${document.scanStatus === 'clean' ? 'text-emerald-300' : document.scanStatus === 'infected' ? 'text-rose-300' : 'text-amber-300'}`}>
-                      Virenprüfung: {document.scanStatus === 'clean' ? 'geprüft' : document.scanStatus === 'infected' ? 'infiziert' : 'nicht durchgeführt'}
+                    <p className={`mt-2 text-[10px] ${document.fileReleased ? 'text-emerald-300' : document.scanStatus === 'infected' ? 'text-rose-300' : 'text-amber-300'}`}>
+                      Virenprüfung: {document.fileReleased
+                        ? document.scanStatus === 'clean' ? 'geprüft und freigegeben' : 'nicht durchgeführt (optionale Prüfung)'
+                        : document.scanStatus === 'infected' ? 'infiziert · gesperrt'
+                          : document.scanStatus === 'error' ? 'Prüffehler · Quarantäne'
+                            : document.scanStatus === 'unavailable' ? 'Scanner nicht verfügbar · Quarantäne'
+                              : 'Prüfung ausstehend · Quarantäne'}
                     </p>
                     {document.tags.length > 0 && <div className="mt-2 flex flex-wrap gap-1">{document.tags.map((tag) => <span key={tag.id} className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400"><Tag className="mr-1 inline h-2.5 w-2.5" />{tag.name}</span>)}</div>}
                     {!archivedView && canUpdate && <select aria-label={`Ordner für ${document.title}`} value={document.folderId ?? ''} onChange={(event) => void changeDocumentFolder(document.id, event.target.value)} className="mt-3 w-full rounded-lg border border-slate-800 bg-slate-950 px-2 py-1.5 text-xs text-slate-400">
@@ -559,8 +593,8 @@ export const DocumentsModule: React.FC = () => {
                     </select>}
                   </div>
                   <div className="mt-4 flex flex-wrap items-center gap-1 border-t border-slate-800 pt-3">
-                    {canDownload && <button disabled={!online} title="Herunterladen" onClick={() => void handleDownload(document)} className="rounded-lg p-2 text-slate-300 hover:bg-slate-800 hover:text-white disabled:opacity-40"><Download className="h-4 w-4" /></button>}
-                    {canDownload && ['application/pdf', 'image/', 'text/'].some((type) => type.endsWith('/') ? document.contentType.startsWith(type) : document.contentType === type) && <button disabled={!online} title="Vorschau" onClick={() => void handlePreview(document)} className="rounded-lg p-2 text-slate-300 hover:bg-slate-800 hover:text-white"><Eye className="h-4 w-4" /></button>}
+                    {canDownload && document.fileReleased && <button disabled={!online} title="Herunterladen" onClick={() => void handleDownload(document)} className="rounded-lg p-2 text-slate-300 hover:bg-slate-800 hover:text-white disabled:opacity-40"><Download className="h-4 w-4" /></button>}
+                    {canDownload && document.fileReleased && ['application/pdf', 'image/', 'text/'].some((type) => type.endsWith('/') ? document.contentType.startsWith(type) : document.contentType === type) && <button disabled={!online} title="Vorschau" onClick={() => void handlePreview(document)} className="rounded-lg p-2 text-slate-300 hover:bg-slate-800 hover:text-white"><Eye className="h-4 w-4" /></button>}
                     {!archivedView && canUpdate && <>
                       <button title="Metadaten bearbeiten" onClick={() => openEdit(document)} className="rounded-lg p-2 text-slate-300 hover:bg-slate-800 hover:text-blue-300"><Pencil className="h-4 w-4" /></button>
                       <button disabled={!online} title="Neue Version hochladen" onClick={() => openVersionUpload(document)} className="rounded-lg p-2 text-slate-300 hover:bg-slate-800 hover:text-blue-300"><Upload className="h-4 w-4" /></button>
@@ -568,6 +602,7 @@ export const DocumentsModule: React.FC = () => {
                     <button title="Versionshistorie" onClick={() => void openVersions(document)} className="rounded-lg p-2 text-slate-300 hover:bg-slate-800 hover:text-blue-300"><History className="h-4 w-4" /></button>
                     {!archivedView && canArchive && <button title="Archivieren" onClick={() => void archiveDocument(document)} className="rounded-lg p-2 text-slate-400 hover:bg-amber-500/10 hover:text-amber-300"><Archive className="h-4 w-4" /></button>}
                     {archivedView && canRestore && <button title="Wiederherstellen" onClick={() => void restoreDocument(document)} className="rounded-lg p-2 text-emerald-300 hover:bg-emerald-500/10"><RotateCcw className="h-4 w-4" /></button>}
+                    {archivedView && canArchive && <button title="Dateien unwiderruflich löschen" onClick={() => void deleteDocumentFiles(document)} className="rounded-lg p-2 text-rose-300 hover:bg-rose-500/10"><Trash2 className="h-4 w-4" /></button>}
                   </div>
                 </article>)}
               </div>}
@@ -625,8 +660,8 @@ export const DocumentsModule: React.FC = () => {
         <section className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-700 bg-[#0f172a] p-5">
           <div className="flex items-center justify-between border-b border-slate-800 pb-3"><div><h2 className="font-bold text-white">Versionshistorie</h2><p className="mt-1 text-xs text-slate-400">{versionsDocument.title}</p></div><button onClick={() => setVersionsDocument(null)} aria-label="Dialog schließen"><X className="h-5 w-5 text-slate-400" /></button></div>
           <div className="mt-3 divide-y divide-slate-800">{versions.map((version) => <div key={version.id} className="flex flex-wrap items-center justify-between gap-3 py-3">
-            <div className="min-w-0"><p className="text-sm font-semibold text-slate-200">Version {version.version_number} {Number(version.version_number) === Number(versionsDocument.version) && <span className="text-xs text-blue-300">(aktuell)</span>}</p><p className="mt-1 truncate text-xs text-slate-500">{version.original_filename} · {bytesLabel(Number(version.size_bytes))} · {dateLabel(version.created_at)}</p><p className="mt-1 text-[10px] text-amber-300">Virenscan: {version.scan_status === 'clean' ? 'geprüft' : version.scan_status === 'infected' ? 'infiziert' : 'nicht durchgeführt'}{version.restored_from_version ? ` · wiederhergestellt aus v${version.restored_from_version}` : ''}</p></div>
-            <div className="flex gap-2">{canDownload && <button disabled={!online} onClick={() => void handleDownload(versionsDocument, Number(version.version_number))} className={`${buttonClass} bg-slate-800 text-slate-300`}><Download className="h-3.5 w-3.5" />Download</button>}{canUpdate && Number(version.version_number) !== Number(versionsDocument.version) && <button disabled={!online} onClick={() => void restoreVersion(version)} className={`${buttonClass} bg-blue-600/20 text-blue-200`}><RotateCcw className="h-3.5 w-3.5" />Als neue Version wiederherstellen</button>}</div>
+            <div className="min-w-0"><p className="text-sm font-semibold text-slate-200">Version {version.version_number} {Number(version.version_number) === Number(versionsDocument.version) && <span className="text-xs text-blue-300">(aktuell)</span>}</p><p className="mt-1 truncate text-xs text-slate-500">{version.original_filename} · {bytesLabel(Number(version.size_bytes))} · {dateLabel(version.created_at)}</p><p className="mt-1 text-[10px] text-amber-300">Virenscan: {version.released ? version.scan_status === 'clean' ? 'geprüft und freigegeben' : 'nicht durchgeführt (optionale Prüfung)' : version.scan_status === 'infected' ? 'infiziert · gesperrt' : version.scan_status === 'unavailable' ? 'Scanner nicht verfügbar · Quarantäne' : version.scan_status === 'error' ? 'Prüffehler · Quarantäne' : 'Prüfung ausstehend · Quarantäne'}{version.restored_from_version ? ` · wiederhergestellt aus v${version.restored_from_version}` : ''}</p></div>
+            <div className="flex gap-2">{canDownload && version.released && <button disabled={!online} onClick={() => void handleDownload(versionsDocument, Number(version.version_number))} className={`${buttonClass} bg-slate-800 text-slate-300`}><Download className="h-3.5 w-3.5" />Download</button>}{canUpdate && version.released && Number(version.version_number) !== Number(versionsDocument.version) && <button disabled={!online} onClick={() => void restoreVersion(version)} className={`${buttonClass} bg-blue-600/20 text-blue-200`}><RotateCcw className="h-3.5 w-3.5" />Als neue Version wiederherstellen</button>}</div>
           </div>)}</div>
         </section>
       </div>}

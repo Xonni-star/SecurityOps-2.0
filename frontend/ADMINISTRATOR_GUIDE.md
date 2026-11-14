@@ -26,7 +26,7 @@ Die Reset-Vorbereitung sendet einen einmaligen, 30 Minuten gültigen Token über
 
 ## Backup und Wiederherstellung
 
-Die Produktions-Compose-Datei definiert einen Backup-Container, der alle 24 Stunden einen verschlüsselten PostgreSQL-Dump samt DMS-Dateivolume erstellt und Backups nach 30 Tagen entfernt. Das Vorhandensein der Konfiguration beweist keinen erfolgreichen Backup- oder Restore-Lauf. Prüfen Sie Ausgaben/Volumes und führen Sie Wiederherstellungsübungen in einer isolierten Umgebung durch. Das Restore-Skript liegt unter `frontend/deploy/restore.sh`; es stoppt den Backend-Schreibzugriff und spielt Datenbank sowie DMS-Dateien wieder ein.
+Die Produktions-Compose-Datei definiert einen Backup-Container, der alle 24 Stunden einen verschlüsselten PostgreSQL-Dump erstellt und Backups nach 30 Tagen entfernt. DMS-Dateien liegen im externen S3-kompatiblen Speicher; konfigurieren und testen Sie dort Versionierung/Backup, Retention und Wiederherstellung unabhängig von PostgreSQL. Das Vorhandensein der Konfiguration beweist keinen erfolgreichen Backup- oder Restore-Lauf. Prüfen Sie Ausgaben/Volumes und führen Sie Wiederherstellungsübungen in einer isolierten Umgebung durch. Das Restore-Skript liegt unter `frontend/deploy/restore.sh` und stellt ausschließlich die Datenbank wieder her.
 
 ## Nicht zugesicherte Funktionen
 

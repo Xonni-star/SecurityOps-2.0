@@ -1,5 +1,4 @@
 import dotenv from 'dotenv';
-import path from 'path';
 import { z } from 'zod';
 
 dotenv.config();
@@ -11,7 +10,17 @@ const envSchema = z.object({
   // Nur der Migrationsrunner benötigt die administrative Verbindung.
   // Der normale API-Server läuft ausschließlich mit secops_app_user.
   DATABASE_MIGRATION_URL: z.string().min(10, 'DATABASE_MIGRATION_URL muss für Migrationen konfiguriert sein.').optional(),
-  DMS_STORAGE_PATH: z.string().min(1).default(path.resolve(process.cwd(), 'var', 'documents')),
+  DMS_S3_ENDPOINT: z.string().url().default('http://127.0.0.1:9000'),
+  DMS_S3_REGION: z.string().min(1).default('us-east-1'),
+  DMS_S3_BUCKET: z.string().min(3).max(63).default('securityops-documents'),
+  DMS_S3_ACCESS_KEY: z.string().min(1).default('local-dev-access-key'),
+  DMS_S3_SECRET_KEY: z.string().min(1).default('local-dev-secret-key'),
+  DMS_S3_FORCE_PATH_STYLE: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  DMS_SCAN_REQUIRED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  DMS_SCANNER_PROVIDER: z.enum(['none', 'clamav']).default('none'),
+  DMS_CLAMAV_HOST: z.string().min(1).default('127.0.0.1'),
+  DMS_CLAMAV_PORT: z.coerce.number().int().min(1).max(65535).default(3310),
+  DMS_CLAMAV_TIMEOUT_MS: z.coerce.number().int().positive().max(120000).default(30000),
   DMS_MAX_FILE_SIZE_BYTES: z.coerce.number().int().positive().max(100 * 1024 * 1024).default(10 * 1024 * 1024),
   JWT_SECRET: z.string().min(32, 'JWT_SECRET muss mindestens 32 Zeichen lang sein.'),
   // Nur Einheiten, die auch parseDurationToMs() versteht (siehe authController.ts),
@@ -33,7 +42,19 @@ const envSchema = z.object({
   }
 });
 
-const parsedEnv = envSchema.safeParse(process.env);
+const parsedEnv = envSchema.superRefine((config, context) => {
+  if (config.NODE_ENV !== 'production') return;
+  if ([config.DMS_S3_ACCESS_KEY, config.DMS_S3_SECRET_KEY].some((value) =>
+    value.startsWith('local-dev-') || value.startsWith('CHANGEME'))) {
+    context.addIssue({ code: 'custom', path: ['DMS_S3_ACCESS_KEY'], message: 'Produktionszugangsdaten für S3 müssen gesetzt werden.' });
+  }
+  if (new URL(config.DMS_S3_ENDPOINT).protocol !== 'https:') {
+    context.addIssue({ code: 'custom', path: ['DMS_S3_ENDPOINT'], message: 'Der S3-Endpunkt muss in Produktion HTTPS verwenden.' });
+  }
+  if (config.DMS_SCAN_REQUIRED && config.DMS_SCANNER_PROVIDER === 'none') {
+    context.addIssue({ code: 'custom', path: ['DMS_SCANNER_PROVIDER'], message: 'Bei verpflichtender Prüfung muss ein Scanner konfiguriert sein.' });
+  }
+}).safeParse(process.env);
 
 if (!parsedEnv.success) {
   console.error('[FATAL CONFIG ERROR] Ungültige oder fehlende Umgebungsvariablen:');

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SecurityOps 2.0 - Encrypted PostgreSQL Backup Daemon
-# Runs every 24 hours, AES-256 encrypted, 30-day retention.
+# S3 object retention/backup is managed by the configured object-storage provider.
 
 set -u -o pipefail
 
@@ -17,9 +17,7 @@ while true; do
     echo "[BACKUP $(date)] Starte PostgreSQL pg_dump..."
 
     if pg_dump -h db -U "$POSTGRES_USER" -d "$POSTGRES_DB" -F c -b -f "$DB_DUMP"; then
-        if tar -czf - \
-            -C "$BACKUP_DIR" "$(basename "$DB_DUMP")" \
-            -C /var/lib/securityops documents | \
+        if tar -czf - -C "$BACKUP_DIR" "$(basename "$DB_DUMP")" | \
             openssl enc -aes-256-cbc -salt -pbkdf2 \
               -pass env:BACKUP_ENCRYPTION_KEY -out "$ENC_ARCHIVE"; then
             rm -f "$DB_DUMP"

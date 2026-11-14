@@ -6,31 +6,34 @@ The document-management module now uses the existing Express, PostgreSQL, tenant
 
 ## Delivered
 
-- Added migration `012_document_management.sql` for tenant-scoped categories, nested folders, documents, immutable versions, tags, relationships, and append-only audit events. Tenant RLS is enabled and forced; same-tenant composite foreign keys protect document/category/folder and supported entity relationships.
+- Uses the existing migration `012_document_management.sql` for tenant-scoped categories, nested folders, documents, immutable versions, tags, relationships, and append-only audit events. Migration `035_document_quarantine_and_scan_lifecycle.sql` adds the quarantine, scan/release, deletion, and site-scope changes described below.
 - Added authenticated `/api/v1/documents` endpoints for listing, filtering, details, upload, download/preview, version history and restore, metadata, relationships, folder/category/tag management, archive/restore, and audit history. The server derives tenant identity from the authenticated session and enforces DMS RBAC permissions.
 - Replaced the mock document UI with server-backed search/filtering, folder navigation, upload progress, preview, version history, archive/restore, and relationship controls. Document files are not placed in the browser's offline cache or mutation queue.
-- Added private UUID-keyed filesystem storage, a 10 MiB default upload limit (configurable up to 100 MiB), SHA-256 metadata, filename sanitization, and extension/content-signature checks for PDF, OOXML, text/CSV, and supported image formats. Office files can be downloaded but are not previewed.
-- Added a scanner interface without configuring an antivirus service. Until one is integrated, files are explicitly marked `not_scanned`; the UI does not report them as clean.
-- Added a private persistent `secops_documents` volume and combined database/file backup and restore handling. Backup archives stream through encryption rather than creating a plaintext tar staging archive.
+- Migration `035_document_quarantine_and_scan_lifecycle.sql` adds quarantine/release timestamps, scan states, failure codes, and object-deletion tracking; database rules reject approval/publication while the current version is unreleased.
+- Replaced local filesystem blobs with a private S3-compatible object-store abstraction. Uploads use generated quarantine keys, a 10 MiB default limit (configurable up to 100 MiB), SHA-256 metadata, filename sanitization, and extension/content checks for PDF, OOXML, text/CSV, and supported image formats. Office files can be downloaded but are not previewed.
+- Added a ClamAV provider for the scanner interface and explicit `pending`, `clean`, `infected`, `unavailable`, `error`, and `not_scanned` states. Production requires scanning by default; only clean scans release files. Optional unscanned uploads remain labeled as such. Scan outcomes and permanent deletion of archived file objects are audit events.
+- Added local MinIO/ClamAV Compose services and production S3/ClamAV configuration. PostgreSQL backups no longer claim to include object data; S3 backup/versioning/retention must be configured at the provider.
 - Updated the root and frontend documentation, API reference, security/architecture, offline, database, and backup documentation.
 
 ## Verification
 
-- Applied all 10 repository migrations, including migration 012, to an isolated local PostgreSQL 16 database.
-- Backend Jest: **12 suites, 162 tests passed**, including migration/RLS checks and DMS upload, signature rejection, tenant/RBAC isolation, download, version restore, archive, and audit API coverage.
-- Frontend Vitest: **6 files, 29 tests passed**, including the archive-view regression test.
-- Backend TypeScript build and frontend Vite production build passed.
-- Docker Compose configuration validation and backend/frontend production image builds passed. No containers or application services were deployed.
-- `bash -n` passed for the backup and restore scripts; `git diff --check` passed.
+- Backend TypeScript build passed.
+- Focused backend DMS tests: **2 suites, 7 tests passed**, covering generated S3 keys/fake storage and clean, infected, and unavailable scanner outcomes.
+- Frontend Vitest: **16 files, 97 tests passed**.
+- MinIO and production Docker Compose configuration validation passed; no S3/MinIO service was contacted.
+- `git diff --check` passed.
 
-The frontend build reports Vite warnings about `__dirname` in the Vite config and a minified JavaScript chunk over 500 kB. Dependency installation reported 9 backend dependency audit findings (7 low, 1 moderate, 1 high); the production dependency stage reported 2 (1 moderate, 1 high). These findings were not remediated as part of this DMS change.
+Final PostgreSQL migration/RLS and API integration validation is pending a rebase onto the corrected PR #24 head. At the time of this report, PR #24's latest backend/PostgreSQL CI check is still failing; its frontend, Docker, and root checks pass. No production services were deployed.
+
+The previously recorded migration counts and test totals referred to earlier validation and are not evidence for the current migration 035 change. The frontend build reports Vite warnings about `__dirname` in the Vite config and a minified JavaScript chunk over 500 kB. Dependency installation reported 9 backend dependency audit findings (7 low, 1 moderate, 1 high); the production dependency stage reported 2 (1 moderate, 1 high). These findings were not remediated as part of this DMS change.
 
 ## Limitations and follow-up
 
-- No antivirus engine is configured; `not_scanned` is the only supported scan result in this deployment.
+- Production requires an operator-provided HTTPS S3-compatible endpoint, private bucket and dedicated credentials plus a reachable ClamAV service. Provider availability and policy have not been production-verified.
 - DMS polymorphic relationships are limited to persisted customers, sites, employees, shifts, and guardbook incidents. SOP versions can reference an existing DMS document through their tenant-scoped foreign key; alarm/alert relationships remain unavailable.
 - Authorization is based on tenant RLS and DMS role permissions. Per-document and per-folder ACLs are not implemented.
 - Offline mode does not cache file blobs or support offline DMS edits/uploads.
-- Archived documents and old versions are retained. Automatic retention and physical deletion policies are not implemented.
-- The private Docker volume is not encrypted at rest by this change; host/volume encryption remains an operator responsibility. Backup/restore scripts were syntax-checked and Compose-validated, but a full restore drill was not performed.
+- File objects for archived documents can be permanently deleted through the API, while metadata and audit history remain. Automatic retention is not implemented.
+- Existing filesystem-backed blobs are not automatically copied to S3; migration 035 marks old versions unscanned and unreleased. Operators must migrate/re-upload them and validate backups before upgrading production.
+- S3 object encryption and backup/restore remain provider/operator responsibilities; a full restore drill was not performed.
 - Production deployment, operational acceptance, and production-readiness certification were not performed.

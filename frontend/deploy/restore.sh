@@ -45,16 +45,6 @@ echo "[RESTORE] Spiele PostgreSQL-Dump ein (${POSTGRES_DB})..."
 docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" exec -T db \
   pg_restore -U secops_admin -d "$POSTGRES_DB" --clean --if-exists < "$DB_DUMP_FILE"
 
-DOCUMENTS_DIR="$TEMP_RESTORE_DIR/documents"
-if [ -d "$DOCUMENTS_DIR" ]; then
-    echo "[RESTORE] Stelle privaten DMS-Dateispeicher wieder her..."
-    tar -czf - -C "$TEMP_RESTORE_DIR" documents | \
-      docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" run --rm --no-deps -T backend \
-        tar -xzf - -C /var/lib/securityops
-else
-    echo "[RESTORE] WARNUNG: Dieses Archiv enthält keinen DMS-Dateispeicher."
-fi
-
 echo "[RESTORE] Starte Backend und Proxy..."
 docker compose -f "$SCRIPT_DIR/docker-compose.production.yml" up -d backend proxy
-echo "[RESTORE] Datenbank- und Dateiwiederherstellung abgeschlossen."
+echo "[RESTORE] Datenbankwiederherstellung abgeschlossen. DMS-Objekte müssen über den S3-Anbieter wiederhergestellt werden."

@@ -2,11 +2,15 @@
 
 Base path: `/api/v1/documents`. All endpoints require an authenticated cookie session. Tenant context always comes from the authenticated `user_sessions` row; a request cannot select a tenant. The exact permission for each route is listed below.
 
-Uploads use `Content-Type: application/octet-stream`, `X-File-Name` (URL-encoded UTF-8 basename), and the cookie/CSRF requirements used by other mutation routes. Metadata is sent as URL query parameters for the initial upload. The server validates the maximum size, extension, signature and supported format before writing to private storage. Binary downloads return the raw file; errors retain the standard JSON response envelope.
+Uploads use `Content-Type: application/octet-stream`, `X-File-Name` (URL-encoded UTF-8 basename), and the cookie/CSRF requirements used by other mutation routes. Metadata is sent as URL query parameters for the initial upload. The server validates the maximum size, safe filename, extension, signature and supported format, then writes the generated object key to a private S3-compatible bucket under `quarantine/`. Binary downloads return the raw file; errors retain the standard JSON response envelope.
 
 ## Storage and scan status
 
-These are existing backend routes; the authorization change does not add DMS endpoints. Files are currently stored on the server's private local filesystem under `DMS_STORAGE_PATH`. `UnavailableDocumentScanner` is a placeholder that returns `not_scanned`; no malware scanning or quarantine is currently performed. Production S3-compatible storage, local MinIO, and an operational scanner/quarantine workflow remain follow-on work and must not be inferred from these endpoints.
+Configure `DMS_S3_ENDPOINT`, `DMS_S3_REGION`, `DMS_S3_BUCKET`, and dedicated `DMS_S3_ACCESS_KEY` / `DMS_S3_SECRET_KEY` credentials. Production requires HTTPS and refuses local/example credentials. Objects are private; the API is the only supported access path. Local MinIO and ClamAV services are defined in `deploy/docker-compose.minio.yml` with example settings in `deploy/.env.minio.example`.
+
+`DMS_SCAN_REQUIRED=true` is the production default. Set `DMS_SCANNER_PROVIDER=clamav` and configure the reachable `DMS_CLAMAV_HOST`, port, and timeout. A missing/unavailable scanner, scanner error, or infected result leaves the object quarantined and non-downloadable; no error is treated as a clean result. If scanning is explicitly optional, an absent provider is recorded as `not_scanned`, never as `clean`. Scan outcomes and file deletion are append-only audit events. New document versions return the current scan status and release flag; clients must use the server's `file_released` / `released` value, not infer availability from the document's approval status.
+
+Migration `035_document_quarantine_and_scan_lifecycle.sql` adds the scan/release state and rejects document approval/publication while the current version is unreleased. Existing versions are marked `not_scanned` and require re-upload or a separately operated migration/re-scan before they can be released. The DMS file objects are not included in PostgreSQL backups; configure versioning/replication/backup and retention on the selected S3-compatible provider.
 
 ## Documents
 
@@ -21,6 +25,7 @@ These are existing backend routes; the authorization change does not add DMS end
 | `GET /:id/versions` | `documents:read` | List immutable version metadata |
 | `POST /:id/versions/:version/restore` | `documents:update` | Restore an older version as a new version |
 | `POST /:id/archive` | `documents:archive` | Soft-archive; no file/version is deleted |
+| `DELETE /:id/files` | `documents:archive` | Permanently delete all object versions of an already archived document; retain metadata and audit history |
 | `POST /:id/restore` | `documents:restore` | Restore an archived document |
 | `POST /:id/move` | `documents:update` | Move to a tenant folder or root (`folderId: null`) |
 | `PATCH /:id/relationship` | `documents:update` | Change/remove the tenant-validated relationship |
@@ -41,7 +46,7 @@ Supported relationship types are `customer`, `site`, `employee`, `shift`, and `i
 | `POST /folders/:id/archive` | `documents:archive` | Archive an empty folder; folders with active contents/children are rejected |
 | `GET /tags` | `documents:read` | List tags in the tenant |
 
-Tags are created and assigned through `PATCH /:id` using `tags: string[]`. There is deliberately no physical delete endpoint for documents, versions, folders, categories, tags, or audit events.
+Tags are created and assigned through `PATCH /:id` using `tags: string[]`. The file-delete endpoint removes binary objects only; document/version metadata, relationships, and append-only audit events remain. Folders, categories, tags, and audit history have no physical-delete endpoint.
 
 ## Permission definitions
 

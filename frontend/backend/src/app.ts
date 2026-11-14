@@ -235,6 +235,7 @@ app.post('/api/v1/documents/:id/move', authenticateJwt, requirePermission('docum
 app.get('/api/v1/documents/:id/audit', authenticateJwt, requirePermission('documents:read'), documentController.listDocumentAudit);
 app.patch('/api/v1/documents/:id', authenticateJwt, requirePermission('documents:update'), documentController.updateDocument);
 app.post('/api/v1/documents/:id/archive', authenticateJwt, requirePermission('documents:archive'), documentController.archiveDocument);
+app.delete('/api/v1/documents/:id/files', authenticateJwt, requirePermission('documents:archive'), documentController.deleteDocumentFiles);
 app.post('/api/v1/documents/:id/restore', authenticateJwt, requirePermission('documents:restore'), documentController.restoreDocument);
 
 // SOP / Dienstanweisungen

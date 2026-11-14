@@ -498,7 +498,9 @@ function mapTaskRow(row: any, tenantId: string): TaskItem {
 
 export function mapDmsDocumentRow(row: any, tenantId: string): ManagedDocument {
   const linkedEntityType = asString(row.linked_entity_type, 'general');
-  const scanStatus = row.scan_status === 'clean' || row.scan_status === 'infected' ? row.scan_status : 'not_scanned';
+  const scanStatus = ['pending', 'clean', 'infected', 'unavailable', 'error', 'not_scanned'].includes(row.scan_status)
+    ? row.scan_status
+    : 'not_scanned';
   return {
     id: asString(row.id),
     tenantId,
@@ -511,6 +513,7 @@ export function mapDmsDocumentRow(row: any, tenantId: string): ManagedDocument {
     version: String(asNumber(row.current_version, 1)),
     status: asString(row.status),
     scanStatus,
+    fileReleased: row.file_released === true,
     contentType: asString(row.content_type),
     folderId: row.folder_id ?? undefined,
     folderName: row.folder_name ?? undefined,

@@ -12,6 +12,7 @@
     "test": "jest --runInBand --detectOpenHandles"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1169.0",
     "argon2": "^0.40.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",

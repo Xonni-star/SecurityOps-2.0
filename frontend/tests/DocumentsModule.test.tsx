@@ -48,6 +48,7 @@ const activeDocument = {
   version: '1',
   status: 'Entwurf',
   scanStatus: 'not_scanned' as const,
+  fileReleased: true,
   contentType: 'application/pdf',
   description: '',
   tags: [],
@@ -110,5 +111,24 @@ describe('DocumentsModule archive view', () => {
     expect(mocks.apiGet).toHaveBeenLastCalledWith(expect.stringContaining('archived=false'));
     expect(container.textContent).toContain('Active policy');
     expect(container.textContent).not.toContain('Archived policy');
+  });
+
+  test('shows quarantine status and hides file actions while a scan is unavailable', async () => {
+    mocks.apiGet.mockImplementation((endpoint: string) => {
+      if (endpoint === '/documents/categories' || endpoint === '/documents/folders') return Promise.resolve([]);
+      return Promise.resolve([{
+        ...activeDocument,
+        scanStatus: 'unavailable',
+        fileReleased: false
+      }]);
+    });
+
+    await act(async () => {
+      root.render(<DocumentsModule />);
+    });
+
+    expect(container.textContent).toContain('Scanner nicht verfügbar · Quarantäne');
+    expect(container.querySelector('button[title="Herunterladen"]')).toBeNull();
+    expect(container.querySelector('button[title="Vorschau"]')).toBeNull();
   });
 });
