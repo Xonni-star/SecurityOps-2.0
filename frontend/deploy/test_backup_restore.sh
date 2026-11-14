@@ -20,9 +20,10 @@ PROJECT="secops-restore-test-$(date +%Y%m%d%H%M%S)-$$"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/${PROJECT}.XXXXXX")"
 ENV_FILE="$TEMP_DIR/.env.restore-test"
 BACKUP_DIR="$TEMP_DIR/backups"
+TEST_DATA_DIR="$TEMP_DIR/test-data"
 STACK_STARTED=0
 
-mkdir -p "$BACKUP_DIR"
+mkdir -p "$BACKUP_DIR" "$TEST_DATA_DIR"
 
 compose() {
     docker compose --env-file "$ENV_FILE" --project-name "$PROJECT" \
@@ -177,6 +178,7 @@ RESTORE_TEST_S3_IMAGE=$RESTORE_TEST_S3_IMAGE
 MINIO_API_PORT=$MINIO_API_PORT
 MINIO_CONSOLE_PORT=$MINIO_CONSOLE_PORT
 RESTORE_TEST_TMPDIR="$RESTORE_TEST_TMPDIR"
+RESTORE_TEST_DATA_DIR="$TEST_DATA_DIR"
 RESTORE_TEST_BACKUP_IMAGE=$RESTORE_TEST_BACKUP_IMAGE
 RESTORE_TEST_MINIO_IMAGE=$RESTORE_TEST_MINIO_IMAGE
 RESTORE_TEST_MC_IMAGE=$RESTORE_TEST_MC_IMAGE
@@ -188,9 +190,27 @@ SOURCE_BUCKET="restore-source-$TEST_SUFFIX"
 SNAPSHOT_BUCKET="restore-snapshot-$TEST_SUFFIX"
 DOCUMENT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 OBJECT_KEY="documents/$DOCUMENT_ID.txt"
-FIXTURE="$TEMP_DIR/document.txt"
+FIXTURE="$TEST_DATA_DIR/document.txt"
 printf 'SecurityOps isolated DMS restore test: %s\n' "$DOCUMENT_ID" > "$FIXTURE"
 EXPECTED_SHA256="$(shasum -a 256 "$FIXTURE" | awk '{print $1}')"
+
+assert_mc_bind_mount_isolation() {
+    local container actual_mount expected_mount
+    container="$(compose ps -q restore-test-mc)"
+    if [ -z "$container" ]; then
+        echo "Fehler: Der Test-MC-Container wurde nicht erstellt." >&2
+        exit 1
+    fi
+    actual_mount="$(docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}|{{.Destination}}|{{.RW}}{{"\n"}}{{end}}{{end}}' "$container")"
+    expected_mount="$TEST_DATA_DIR|/test-data|false"
+    if [ "$actual_mount" != "$expected_mount" ]; then
+        echo "Fehler: Der Test-MC-Container darf nur das schreibgeschützte Testdatenverzeichnis vom Host einbinden." >&2
+        echo "Erwartet: $expected_mount" >&2
+        echo "Erhalten: $actual_mount" >&2
+        exit 1
+    fi
+    echo "[TEST] MC-Mount-Isolation verifiziert: nur das schreibgeschützte Testdatenverzeichnis ist vom Host eingebunden."
+}
 
 export RESTORE_ENV_FILE="$ENV_FILE"
 RESTORE_COMPOSE_FILES="$SCRIPT_DIR/docker-compose.minio.yml
@@ -211,6 +231,7 @@ fi
 STACK_STARTED=1
 if [ "$MODE" = full ]; then
     compose up -d db "$S3_SERVICE" restore-test-mc
+    assert_mc_bind_mount_isolation
 else
     compose up -d db
 fi
@@ -258,7 +279,7 @@ if [ "$MODE" = full ]; then
     fi
     compose exec -T restore-test-mc mc cp \
         --attr "Content-Type=text/plain;X-Amz-Meta-Document-Id=$DOCUMENT_ID;X-Amz-Meta-Checksum=$EXPECTED_SHA256" \
-        /restore-test/document.txt "local/$SOURCE_BUCKET/$OBJECT_KEY"
+        /test-data/document.txt "local/$SOURCE_BUCKET/$OBJECT_KEY"
 fi
 
 compose exec -T db psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<SQL
@@ -326,8 +347,8 @@ if [ "$RESTORED_ROW" != "$EXPECTED_ROW" ]; then
 fi
 
 if [ "$MODE" = full ]; then
-    compose exec -T restore-test-mc mc cp \
-        "local/$SOURCE_BUCKET/$OBJECT_KEY" /restore-test/restored-document.txt
+    compose exec -T restore-test-mc mc cat \
+        "local/$SOURCE_BUCKET/$OBJECT_KEY" > "$TEMP_DIR/restored-document.txt"
     RESTORED_SHA256="$(shasum -a 256 "$TEMP_DIR/restored-document.txt" | awk '{print $1}')"
     if [ "$RESTORED_SHA256" != "$EXPECTED_SHA256" ]; then
         echo "Fehler: SHA-256 des wiederhergestellten DMS-Objekts stimmt nicht überein." >&2
