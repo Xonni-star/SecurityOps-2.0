@@ -187,6 +187,44 @@ Der S3-Schritt prüft MinIO lokal mit `mc mirror --preserve`; er belegt weder An
 
 Für einen isolierten Datenbanktest ohne MinIO kann `./test_backup_restore.sh --database-only` verwendet werden. Dieser Modus prüft nicht die DMS-Objektsicherung.
 
+Die Test-Images können bei Bedarf über `RESTORE_TEST_MINIO_IMAGE`, `RESTORE_TEST_MC_IMAGE` und `RESTORE_TEST_BACKUP_IMAGE` überschrieben werden; die lokalen Standardwerte bleiben die Compose-pinned Images.
+
+Ausgeführter vollständiger Test in der Entwicklungsumgebung:
+
+```bash
+RESTORE_TEST_BACKUP_IMAGE=postgres:16 \
+RESTORE_TEST_MINIO_IMAGE=ghcr.io/disaster37/minio@sha256:282ffcd2e0a3906086ab49cd70765617b20ce5c24ccf7d788043eb9b4ae59e6f \
+RESTORE_TEST_MC_IMAGE=ghcr.io/disaster37/minio@sha256:282ffcd2e0a3906086ab49cd70765617b20ce5c24ccf7d788043eb9b4ae59e6f \
+frontend/deploy/test_backup_restore.sh
+```
+
+Ergebnis: PostgreSQL-Metadaten überstanden Mutation und Restore; das DMS-Objekt wurde aus dem separaten MinIO-Snapshot wiederhergestellt. SHA-256 `462c58bbf396df1ac7d3177f1ac6a6e76fcfe7ac9c30a282a75b210423359ed6` und benutzerdefinierte Objektmetadaten stimmten. Testprojekt `secops-restore-test-20261114142105-17708`: Container `backup-1` (`8df841dda651`), `db-1` (`e96cdf6c318b`), `minio-1` (`f4c6bf2dacc4`) und `restore-test-mc-1` (`1dd9366ba334`), Volumes `secops-restore-test-20261114142105-17708_minio_data` und `secops-restore-test-20261114142105-17708_restore_test_pgdata` sowie Netzwerk `secops-restore-test-20261114142105-17708_default`; alle wurden gezielt entfernt und ihre Abwesenheit verifiziert. Der Image-Digest stammt aus einem GHCR-Build von MinIO-Quellcode (MinIO `RELEASE.2025-10-15T17-29-55Z`, `mc` `RELEASE.2025-08-13T08-35-41Z`); die lokal gepinnten Quay-Images waren in dieser Umgebung wegen `401 UNAUTHORIZED` nicht abrufbar. Dieser Test prüft daher weder genau das gepinnte Container-Image noch einen externen S3-Anbieter, dessen Versionierung/Replikation oder einen Produktions-Restore. Der Datenbank-Sentinel ist Testmetadaten und ersetzt keinen Restore-Test der vollständigen Produktionsmigrationen.
+
+Zusätzlicher S3-kompatibler Test mit SeaweedFS (kein MinIO- oder externer Anbieter-Nachweis):
+
+```bash
+RESTORE_TEST_S3_BACKEND=seaweedfs \
+RESTORE_TEST_S3_IMAGE=chrislusf/seaweedfs:latest \
+RESTORE_TEST_MC_IMAGE=ghcr.io/disaster37/minio@sha256:282ffcd2e0a3906086ab49cd70765617b20ce5c24ccf7d788043eb9b4ae59e6f \
+RESTORE_TEST_BACKUP_IMAGE=postgres:16 \
+frontend/deploy/test_backup_restore.sh
+```
+
+Ergebnis: PostgreSQL-Zeile sowie SeaweedFS-Objekt und benutzerdefinierte Metadaten wurden nach Mutation/Löschung aus dem Snapshot wiederhergestellt. Der Objekt-SHA-256 war `df737b24b8fd1403670b0b4ede48171013ef2e07d3214324a3f3d7a9e24ba7d2`. Getestetes Compose-Projekt `secops-restore-test-20261114141631-15329`: Container `backup-1` (`ee2befa3ea4e`), `db-1` (`7bb96333bba8`), `seaweedfs-1` (`c66bdf3a64e3`) und `restore-test-mc-1` (`ede21175c6c9`), Volume `secops-restore-test-20261114141631-15329_restore_test_pgdata` und Netzwerk `secops-restore-test-20261114141631-15329_default`; alle wurden gezielt entfernt und ihre Abwesenheit verifiziert. Frühere SeaweedFS-Startversuche scheiterten vor dem Restore und bereinigten ihre separat benannten Ressourcen ebenfalls vollständig.
+
+Separater ClamAV-Runtime-Smoke-Test (nicht Teil des DMS-Upload-/Scan-Adapters):
+
+```bash
+docker pull clamav/clamav:1.4.3
+docker run -d --name secops-clamav-smoke-20261114141859-16599 --network none clamav/clamav:1.4.3
+printf '%s' 'X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*' |
+  docker exec -i secops-clamav-smoke-20261114141859-16599 sh -c 'cat > /tmp/eicar.com'
+docker exec secops-clamav-smoke-20261114141859-16599 clamdscan --stream --no-summary /tmp/eicar.com
+docker rm -f secops-clamav-smoke-20261114141859-16599
+```
+
+Ergebnis: `clamdscan` meldete `/tmp/eicar.com: Eicar-Test-Signature FOUND` (erwarteter Exit-Code 1). Der Test-Container wurde entfernt und verifiziert; es wurde kein Netzwerk oder Volume erstellt. Das belegt nur die Erkennung des benignen EICAR-Teststrings über `clamdscan --stream`, nicht die Integration des App-Adapters oder Produktionsbereitschaft.
+
 ---
 
 ## 9. Neustart und Fehlerdiagnose

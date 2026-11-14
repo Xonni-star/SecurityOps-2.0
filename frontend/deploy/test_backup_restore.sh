@@ -9,6 +9,11 @@ fi
 if [ "$#" -eq 1 ]; then
     MODE=database-only
 fi
+S3_BACKEND="${RESTORE_TEST_S3_BACKEND:-minio}"
+if [ "$MODE" = full ] && [ "$S3_BACKEND" != minio ] && [ "$S3_BACKEND" != seaweedfs ]; then
+    echo "Fehler: RESTORE_TEST_S3_BACKEND muss 'minio' oder 'seaweedfs' sein." >&2
+    exit 2
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT="secops-restore-test-$(date +%Y%m%d%H%M%S)-$$"
@@ -41,7 +46,7 @@ project_resources_exist() {
         docker network ls -q --filter "label=com.docker.compose.project=$PROJECT" | grep -q .; then
         return 0
     fi
-    for service in db minio minio-create-bucket restore-test-mc backup clamav; do
+    for service in db minio minio-create-bucket restore-test-mc backup clamav seaweedfs; do
         if docker container inspect "$PROJECT-$service-1" >/dev/null 2>&1; then
             return 0
         fi
@@ -102,16 +107,55 @@ POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 BACKUP_ENCRYPTION_KEY="$(openssl rand -hex 32)"
 MINIO_ROOT_USER=restoretest
 MINIO_ROOT_PASSWORD="$(openssl rand -hex 24)"
+RESTORE_TEST_S3_ACCESS_KEY="$(openssl rand -hex 16)"
+RESTORE_TEST_S3_SECRET_KEY="$(openssl rand -hex 32)"
 DMS_S3_REGION=us-east-1
-DMS_S3_ENDPOINT=http://minio:9000
 DMS_S3_BUCKET="restore-source-${PROJECT#secops-restore-test-}"
-DMS_S3_ACCESS_KEY="$MINIO_ROOT_USER"
-DMS_S3_SECRET_KEY="$MINIO_ROOT_PASSWORD"
 DMS_S3_FORCE_PATH_STYLE=true
 MINIO_API_PORT="$(free_port)"
 MINIO_CONSOLE_PORT="$(free_port)"
 RESTORE_TEST_TMPDIR="$TEMP_DIR"
 RESTORE_TEST_BACKUP_IMAGE="${RESTORE_TEST_BACKUP_IMAGE:-postgres:16-bookworm}"
+RESTORE_TEST_MINIO_IMAGE="${RESTORE_TEST_MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-02-07T23-21-09Z}"
+RESTORE_TEST_MC_IMAGE="${RESTORE_TEST_MC_IMAGE:-quay.io/minio/mc:RELEASE.2025-02-08T19-14-21Z}"
+RESTORE_TEST_S3_IMAGE="${RESTORE_TEST_S3_IMAGE:-chrislusf/seaweedfs:latest}"
+if [ "$S3_BACKEND" = minio ]; then
+    S3_SERVICE=minio
+    DMS_S3_ENDPOINT=http://minio:9000
+    DMS_S3_ACCESS_KEY="$MINIO_ROOT_USER"
+    DMS_S3_SECRET_KEY="$MINIO_ROOT_PASSWORD"
+    RESTORE_TEST_S3_ACCESS_KEY="$MINIO_ROOT_USER"
+    RESTORE_TEST_S3_SECRET_KEY="$MINIO_ROOT_PASSWORD"
+else
+    S3_SERVICE=seaweedfs
+    DMS_S3_ENDPOINT=http://seaweedfs:8333
+    DMS_S3_ACCESS_KEY="$RESTORE_TEST_S3_ACCESS_KEY"
+    DMS_S3_SECRET_KEY="$RESTORE_TEST_S3_SECRET_KEY"
+    python3 - "$TEMP_DIR/seaweedfs-s3.json" "$RESTORE_TEST_S3_ACCESS_KEY" "$RESTORE_TEST_S3_SECRET_KEY" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as config:
+    json.dump(
+        {
+            "identities": [
+                {
+                    "name": "restore-test",
+                    "credentials": [
+                        {
+                            "accessKey": sys.argv[2],
+                            "secretKey": sys.argv[3],
+                        }
+                    ],
+                    "actions": ["Read", "Write", "List", "Tagging", "Admin"],
+                }
+            ]
+        },
+        config,
+    )
+PY
+    chmod 600 "$TEMP_DIR/seaweedfs-s3.json"
+fi
 
 cat > "$ENV_FILE" <<EOF
 POSTGRES_DB=$POSTGRES_DB
@@ -126,10 +170,16 @@ DMS_S3_BUCKET=$DMS_S3_BUCKET
 DMS_S3_ACCESS_KEY=$DMS_S3_ACCESS_KEY
 DMS_S3_SECRET_KEY=$DMS_S3_SECRET_KEY
 DMS_S3_FORCE_PATH_STYLE=$DMS_S3_FORCE_PATH_STYLE
+RESTORE_TEST_S3_BACKEND=$S3_BACKEND
+RESTORE_TEST_S3_ACCESS_KEY=$RESTORE_TEST_S3_ACCESS_KEY
+RESTORE_TEST_S3_SECRET_KEY=$RESTORE_TEST_S3_SECRET_KEY
+RESTORE_TEST_S3_IMAGE=$RESTORE_TEST_S3_IMAGE
 MINIO_API_PORT=$MINIO_API_PORT
 MINIO_CONSOLE_PORT=$MINIO_CONSOLE_PORT
 RESTORE_TEST_TMPDIR="$RESTORE_TEST_TMPDIR"
 RESTORE_TEST_BACKUP_IMAGE=$RESTORE_TEST_BACKUP_IMAGE
+RESTORE_TEST_MINIO_IMAGE=$RESTORE_TEST_MINIO_IMAGE
+RESTORE_TEST_MC_IMAGE=$RESTORE_TEST_MC_IMAGE
 EOF
 chmod 600 "$ENV_FILE"
 
@@ -154,13 +204,13 @@ export RESTORE_RESUME_SERVICES=""
 
 echo "[TEST] Projekt: $PROJECT"
 if [ "$MODE" = full ]; then
-    echo "[TEST] Starte ausschließlich db, minio und den Test-MC-Container; ClamAV bleibt ungestartet."
+    echo "[TEST] Starte ausschließlich db, $S3_SERVICE und den Test-MC-Container; ClamAV bleibt ungestartet."
 else
     echo "[TEST] Starte ausschließlich den PostgreSQL-Container; MinIO und ClamAV bleiben ungestartet."
 fi
 STACK_STARTED=1
 if [ "$MODE" = full ]; then
-    compose up -d db minio restore-test-mc
+    compose up -d db "$S3_SERVICE" restore-test-mc
 else
     compose up -d db
 fi
@@ -183,12 +233,29 @@ if [ "$DB_HEALTH" != healthy ]; then
 fi
 
 if [ "$MODE" = full ]; then
-    compose exec -T restore-test-mc mc alias set local http://minio:9000 \
-        "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
+    S3_READY=0
+    for _ in $(seq 1 60); do
+        if compose exec -T restore-test-mc mc alias set local "$DMS_S3_ENDPOINT" \
+            "$DMS_S3_ACCESS_KEY" "$DMS_S3_SECRET_KEY" >/dev/null 2>&1; then
+            S3_READY=1
+            break
+        fi
+        sleep 2
+    done
+    if [ "$S3_READY" -ne 1 ]; then
+        echo "Fehler: S3-Testdienst '$S3_SERVICE' wurde nicht bereit." >&2
+        S3_CONTAINER="$(compose ps -aq "$S3_SERVICE")"
+        if [ -n "$S3_CONTAINER" ]; then
+            docker logs "$S3_CONTAINER" >&2
+        fi
+        exit 1
+    fi
     compose exec -T restore-test-mc mc mb "local/$SOURCE_BUCKET"
     compose exec -T restore-test-mc mc mb "local/$SNAPSHOT_BUCKET"
-    compose exec -T restore-test-mc mc anonymous set none "local/$SOURCE_BUCKET"
-    compose exec -T restore-test-mc mc anonymous set none "local/$SNAPSHOT_BUCKET"
+    if [ "$S3_BACKEND" = minio ]; then
+        compose exec -T restore-test-mc mc anonymous set none "local/$SOURCE_BUCKET"
+        compose exec -T restore-test-mc mc anonymous set none "local/$SNAPSHOT_BUCKET"
+    fi
     compose exec -T restore-test-mc mc cp \
         --attr "Content-Type=text/plain;X-Amz-Meta-Document-Id=$DOCUMENT_ID;X-Amz-Meta-Checksum=$EXPECTED_SHA256" \
         /restore-test/document.txt "local/$SOURCE_BUCKET/$OBJECT_KEY"
@@ -230,7 +297,7 @@ fi
 BACKUP_ARCHIVE="$(find "$BACKUP_DIR" -type f -name 'secops_backup_*.tar.gz.enc' -print)"
 
 if [ "$MODE" = full ]; then
-    echo "[TEST] Erstelle getrennten MinIO-Snapshot und entferne das Quellobjekt."
+    echo "[TEST] Erstelle getrennten $S3_BACKEND-Snapshot und entferne das Quellobjekt."
     compose exec -T restore-test-mc mc mirror --preserve \
         "local/$SOURCE_BUCKET/" "local/$SNAPSHOT_BUCKET/"
     compose exec -T restore-test-mc mc rm "local/$SOURCE_BUCKET/$OBJECT_KEY"
@@ -283,7 +350,7 @@ missing = [key for key, value in expected.items() if metadata.get(key) != value]
 if missing:
     raise SystemExit(f"Restored object metadata mismatch: {', '.join(missing)}")
 PY
-    echo "[TEST] PASS: DB-Zeile, Objekt-SHA-256 ($RESTORED_SHA256) und S3-Objektmetadaten stimmen."
+    echo "[TEST] PASS: DB-Zeile, Objekt-SHA-256 ($RESTORED_SHA256) und $S3_BACKEND-Objektmetadaten stimmen."
 else
     echo "[TEST] PASS: Verschlüsseltes PostgreSQL-Backup und Datenbankmetadaten wurden wiederhergestellt."
     echo "[TEST] MinIO-Objekte und ClamAV wurden in diesem Modus nicht getestet."
