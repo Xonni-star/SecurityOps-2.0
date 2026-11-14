@@ -18,7 +18,7 @@ Tenant-Administratoren können keine fremden Mandanten verwalten, keine Berechti
 
 ### Passwort-Reset
 
-Die Reset-Vorbereitung erzeugt einen einmaligen, 30 Minuten gültigen Token, speichert ausschließlich dessen SHA-256-Hash, widerruft Sitzungen und protokolliert die Aktion. Es ist kein E-Mail-Provider angebunden. Der Token muss deshalb über einen sicheren, separaten Kanal manuell zugestellt werden; er wird in der Oberfläche nur einmal angezeigt. Der Reset-Endpunkt erfordert Tenant-ID, Token und ein neues Passwort mit mindestens 12 Zeichen. Die Tenant-ID ist dabei kein Autorisierungsnachweis; gültig ist nur der passende unbenutzte Token.
+Die Reset-Vorbereitung sendet einen einmaligen, 30 Minuten gültigen Token über den konfigurierten E-Mail-Provider; gespeichert wird ausschließlich dessen SHA-256-Hash. Der Token erscheint weder in der Oberfläche noch in normalen API-Antworten, Logs oder Auditdetails. Nach erfolgreicher Zustellung werden die Sitzungen widerrufen und die Aktion protokolliert. Ohne Provider schlägt die Aktion mit einer verständlichen Fehlermeldung fehl und gibt keinen Token aus. Es ist keine konkrete E-Mail-Provider-Implementierung oder Zugangsdatenkonfiguration enthalten; das Deployment muss einen Adapter für `PasswordResetDeliveryProvider` registrieren. Der Reset-Endpunkt erfordert Tenant-ID, Token und ein neues Passwort mit mindestens 12 Zeichen. Die Tenant-ID ist dabei kein Autorisierungsnachweis; gültig ist nur der passende unbenutzte Token.
 
 ## Audit
 
