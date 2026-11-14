@@ -58,6 +58,38 @@ describe('Offline outbox retry persistence', () => {
     });
   });
 
+  test('rejects a mutation ID collision without replacing another tenant outbox entry', async () => {
+    const vault = createVault();
+    const original = {
+      id: 'shared-mutation-id',
+      tenantId: 'tenant-a',
+      userId: 'user-a',
+      entityType: 'task' as const,
+      action: 'CREATE' as const,
+      payload: { title: 'Tenant A task' },
+      occurredAt: '2026-11-14T11:59:00.000Z',
+      baseVersion: 1
+    };
+
+    await vault.enqueueMutation(original);
+    await expect(vault.enqueueMutation({
+      ...original,
+      tenantId: 'tenant-b',
+      userId: 'user-b',
+      payload: { title: 'Tenant B task' }
+    })).rejects.toMatchObject({ name: 'ConstraintError' });
+
+    await expect(vault.getOutbox('tenant-a', undefined, 'user-a')).resolves.toMatchObject([
+      expect.objectContaining({
+        id: 'shared-mutation-id',
+        tenantId: 'tenant-a',
+        userId: 'user-a',
+        payload: { title: 'Tenant A task' }
+      })
+    ]);
+    await expect(vault.getOutbox('tenant-b', undefined, 'user-b')).resolves.toEqual([]);
+  });
+
   test('does not automatically replay terminal failures or conflicts', async () => {
     const vault = createVault();
     await vault.enqueueMutation({
