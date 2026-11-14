@@ -1,4 +1,4 @@
-import { describe, test, expect, beforeEach, vi } from 'vitest';
+import { afterEach, describe, test, expect, beforeEach, vi } from 'vitest';
 import { IDBFactory } from 'fake-indexeddb';
 
 vi.mock('../services/apiClient', () => {
@@ -14,9 +14,11 @@ vi.mock('../services/apiClient', () => {
 
   class ApiError extends Error {
     status: number;
-    constructor(status: number, message: string) {
+    isNetworkError: boolean;
+    constructor(status: number, message: string, isNetworkError = false) {
       super(message);
       this.status = status;
+      this.isNetworkError = isNetworkError;
     }
   }
 
@@ -185,6 +187,10 @@ beforeEach(() => {
     syncQueue: [],
     dataLoadError: null
   });
+});
+
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
@@ -393,11 +399,60 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
 
     expect(result).toMatchObject({ success: 0, failed: 1, conflicts: 0 });
     expect(updateStatus).toHaveBeenCalledWith(mutation.id, 'FAILED', {
-      errorMessage: 'HTTP 403: Fehlende Berechtigung'
+      errorMessage: 'HTTP 403: Fehlende Berechtigung',
+      retryable: false
     });
     expect(useSecurityStore.getState().syncQueue).toEqual([
       expect.objectContaining({ id: mutation.id, status: 'failed', errorMessage: 'HTTP 403: Fehlende Berechtigung' })
     ]);
+  });
+
+  test('schedules automatic retries for transient server errors', async () => {
+    vi.useFakeTimers();
+    const now = Date.now();
+    const mutation = {
+      id: 'temporary-server-error-mutation',
+      tenantId: 'tenant-frankfurt',
+      userId: 'user-regression',
+      entityType: 'task',
+      action: 'CREATE',
+      payload: { title: 'Retry after server error' },
+      occurredAt: '2026-11-13T10:00:00.000Z',
+      baseVersion: 1,
+      retryCount: 0,
+      status: 'PENDING'
+    };
+    const updateStatus = vi.spyOn(offlineVault, 'updateMutationStatus').mockResolvedValue(undefined);
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([mutation] as any);
+    vi.spyOn(offlineVault, 'getOutbox')
+      .mockResolvedValueOnce([
+        { ...mutation, status: 'FAILED', retryCount: 1, retryable: true, nextAttemptAt: new Date(now + 1000).toISOString() }
+      ] as any)
+      .mockResolvedValueOnce([]);
+    const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    mockedApi.post
+      .mockRejectedValueOnce(new ApiError(503, 'Temporarily unavailable'))
+      .mockResolvedValueOnce([{ clientUuid: mutation.id, status: 'SYNCED' }]);
+    useSecurityStore.setState({
+      isOnline: true,
+      isAuthenticated: true,
+      currentTenantId: mutation.tenantId,
+      currentUserId: mutation.userId,
+      authUser: {
+        id: mutation.userId, email: '', fullName: '', role: '',
+        tenantId: mutation.tenantId, tenantName: '', permissions: []
+      }
+    });
+
+    await useSecurityStore.getState().triggerManualSync();
+
+    expect(updateStatus).toHaveBeenCalledWith(mutation.id, 'FAILED', {
+      errorMessage: 'HTTP 503: Temporarily unavailable',
+      retryable: true
+    });
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(mockedApi.post).toHaveBeenCalledTimes(2);
+    expect(markSynced).toHaveBeenCalledWith(mutation.id);
   });
 
   test('does not discard a mutation for an unrelated or unmatched server receipt', async () => {

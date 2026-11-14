@@ -604,7 +604,7 @@ interface SecurityOpsStore {
   toggleNetworkSimulation: () => void;
   syncQueue: OfflineQueueItem[];
   enqueueOfflineAction: (item: Omit<OfflineQueueItem, 'id' | 'createdAt' | 'status' | 'retryCount'> & { id?: string }) => Promise<void>;
-  triggerManualSync: () => Promise<{ success: number; failed: number; conflicts: number }>;
+  triggerManualSync: (options?: { retryFailed?: boolean }) => Promise<{ success: number; failed: number; conflicts: number }>;
   resolveConflict: (queueId: string, resolution: 'USE_LOCAL' | 'USE_SERVER' | 'RECORD_AS_EXCEPTION') => Promise<void>;
   clearCompletedSyncs: () => void;
 
@@ -931,6 +931,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
         ...emptyTenantData()
       });
       await get().loadTenantData();
+      void get().triggerManualSync();
     } catch (error: any) {
       apiClient.setCsrfToken(null);
       set({
@@ -992,6 +993,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       });
       apiClient.setTenantId(me.tenantId ?? me.tenant_id ?? '');
       await get().loadTenantData();
+      void get().triggerManualSync();
     } catch {
       apiClient.setCsrfToken(null);
       set({
@@ -1547,7 +1549,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     }
   },
 
-  triggerManualSync: async () => {
+  triggerManualSync: async (options = {}) => {
     const { isOnline, currentTenantId, syncQueue, isAuthenticated, authUser } = get();
     const currentUserId = currentSOPIdentity(get()).userId;
     const isCurrentSyncIdentity = () => isCurrentSOPIdentity(currentTenantId, currentUserId);
@@ -1574,7 +1576,9 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
     let inFlightItems: OutboxMutation[] = [];
 
     try {
-      const pendingItems = (await offlineVault.getPendingOutbox(currentTenantId, currentUserId))
+      const pendingItems = (await (options.retryFailed
+        ? offlineVault.getPendingOutbox(currentTenantId, currentUserId, { includeFailed: true })
+        : offlineVault.getPendingOutbox(currentTenantId, currentUserId)))
         .filter(mutation => mutation.tenantId === currentTenantId && mutation.userId === currentUserId);
       if (!isCurrentSyncIdentity()) return { success: 0, failed: 0, conflicts: 0 };
 
@@ -1586,6 +1590,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           isSyncing: false,
           lastSyncTime: new Date().toLocaleTimeString()
         });
+        scheduleOutboxRetry(allItems);
         isSyncRunningMutex = false;
         return { success: 0, failed: 0, conflicts: 0 };
       }
@@ -1625,6 +1630,13 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
           if (!isCurrentSyncIdentity()) return { success: successCount, failed: failedCount, conflicts: conflictCount };
           const receipts = Array.isArray(serverResponse) ? serverResponse : serverResponse?.data;
           if (!Array.isArray(receipts)) {
+            failedCount += orderedItems.length;
+            for (const item of orderedItems) {
+              await offlineVault.updateMutationStatus(item.id, 'FAILED', {
+                errorMessage: 'Ungültige Synchronisationsquittung vom Server.',
+                retryable: false
+              });
+            }
             inFlightItems = [];
             continue;
           }
@@ -1675,13 +1687,17 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
             ? `Netzwerkfehler: ${networkErr.message}`
             : `HTTP ${networkErr.status}: ${networkErr.message}`
           : errorText(networkErr);
+        const retryable = networkErr instanceof ApiError &&
+          (networkErr.isNetworkError || networkErr.status >= 500);
         console.warn('[SYNC PUSH FAILED] Outbox bleibt erhalten:', networkErr);
         for (const item of failedItems) {
           await offlineVault.updateMutationStatus(item.id, 'FAILED', {
-            errorMessage: message
+            errorMessage: message,
+            retryable
           });
         }
         const remainingOutbox = await offlineVault.getOutbox(currentTenantId, undefined, currentUserId);
+        scheduleOutboxRetry(remainingOutbox);
         if (isCurrentSyncIdentity()) {
           set({
             syncQueue: remainingOutbox.map(offlineOutboxToQueueItem),
@@ -1698,6 +1714,7 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       }
 
       const remainingOutbox = await offlineVault.getOutbox(currentTenantId, undefined, currentUserId);
+      scheduleOutboxRetry(remainingOutbox);
       if (!isCurrentSyncIdentity()) return { success: successCount, failed: failedCount, conflicts: conflictCount };
       set({
         syncQueue: remainingOutbox.map(offlineOutboxToQueueItem),
@@ -2983,6 +3000,26 @@ export const useSecurityStore = create<SecurityOpsStore>((set, get) => ({
       sites: state.sites.map((s) => (s.id === siteId ? { ...s, activeAlarms: 0 } : s))
     }))
 }));
+
+let outboxRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleOutboxRetry(records: OutboxMutation[]): void {
+  if (outboxRetryTimer) clearTimeout(outboxRetryTimer);
+  outboxRetryTimer = null;
+
+  const nextAttempt = records
+    .filter(record => record.status === 'FAILED' && record.retryable && record.nextAttemptAt)
+    .map(record => Date.parse(record.nextAttemptAt!))
+    .filter(Number.isFinite)
+    .sort((a, b) => a - b)[0];
+
+  if (nextAttempt === undefined) return;
+
+  outboxRetryTimer = setTimeout(() => {
+    outboxRetryTimer = null;
+    void useSecurityStore.getState().triggerManualSync();
+  }, Math.max(0, nextAttempt - Date.now()));
+}
 
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
