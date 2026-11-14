@@ -684,6 +684,17 @@ export class IndexedDbService {
     });
   }
 
+  async getStorageEstimates(): Promise<{ usageBytes: number; quotaBytes: number; percentage: number } | null> {
+    if (typeof navigator === 'undefined' || typeof navigator.storage?.estimate !== 'function') return null;
+    const estimate = await navigator.storage.estimate();
+    if (typeof estimate.usage !== 'number' || typeof estimate.quota !== 'number' || estimate.quota <= 0) return null;
+    return {
+      usageBytes: estimate.usage,
+      quotaBytes: estimate.quota,
+      percentage: (estimate.usage / estimate.quota) * 100
+    };
+  }
+
   // --- ANHÄNGE & FOTODOKUMENTATION ---
 
   async saveAttachment(attachment: StoredAttachment): Promise<void> {
