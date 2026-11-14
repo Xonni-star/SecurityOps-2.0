@@ -10,7 +10,7 @@ This report distinguishes implementation in merged code, automated CI, isolated 
 
 ## Pull requests and current main CI
 
-PRs [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25) through [#38](https://github.com/Xonni-star/SecurityOps-2.0/pull/38) are merged. No pull requests were open when checked. The verified merge commits for PRs #25–#34 are:
+PRs [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25) through [#38](https://github.com/Xonni-star/SecurityOps-2.0/pull/38) are merged. No pull requests were open at the time of the mainline check; the subsequent draft PR #39 is not merged and is not included in this mainline snapshot. The verified merge commits for PRs #25–#34 are:
 
 | PR | Merged commit |
 |---|---|
