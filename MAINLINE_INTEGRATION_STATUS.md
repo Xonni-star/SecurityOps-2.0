@@ -6,7 +6,7 @@
 
 **Integration branch:** `xonni-star-phase3-pr-integration`, based on `main` at `b94e21d0aab727eadabedd69995956edaa39a44f`.
 
-**Integration pull request:** [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25), open against `main`; integration CI pending.
+**Integration pull request:** [#25](https://github.com/Xonni-star/SecurityOps-2.0/pull/25), open against `main`; all four CI jobs passed in [run `43590112438`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43590112438).
 
 ## What is already in `main`
 
@@ -31,6 +31,8 @@ The integrated migration sequence ends at `033_tenant_user_role_administration.s
 
 PR #24's current [GitHub CI run `43584490453`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43584490453) passed all four jobs: root smoke checks, frontend tests/build, backend PostgreSQL/migration/build/Jest, and production Docker configuration/image builds.
 
+The integration PR's [GitHub CI run `43590112438`](https://github.com/Xonni-star/SecurityOps-2.0/actions/runs/43590112438) also passed the same four jobs on the published integration branch.
+
 ## Local verification
 
 | Check | Result |
@@ -43,4 +45,4 @@ PR #24's current [GitHub CI run `43584490453`](https://github.com/Xonni-star/Sec
 | Production backend and frontend Docker image builds | Passed |
 | Full backend Jest suite | 27 suites, 274 tests passed on rerun |
 
-The first full backend run and an isolated default-timeout run each hit the patrol integration test's 5-second timeout; a second full run passed all 274 tests without changing the timeout. Jest still reports an existing open `TCPWRAP` handle from the patrol integration setup. The source PR #24 CI run is green; the integration branch still needs its own CI run.
+The first full backend run and an isolated default-timeout run each hit the patrol integration test's 5-second timeout; a second full run passed all 274 tests without changing the timeout. Jest still reports an existing open `TCPWRAP` handle from the patrol integration setup.
