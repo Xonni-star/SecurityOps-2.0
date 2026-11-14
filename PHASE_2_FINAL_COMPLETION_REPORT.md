@@ -16,7 +16,7 @@ There is no general claim that the planning module enforces working-time, rest-p
 
 ## Open planning change: PR #33
 
-[PR #33](https://github.com/Xonni-star/SecurityOps-2.0/pull/33), which adds an optional `maximum_daily_minutes` rule for active, approved profiles, remains **open and unmerged**. Its four standard CI jobs passed. On the PR revision, local backend/frontend builds, 26 roster tests, and focused PostgreSQL 16 integration checks for over-limit rejection and an exact-limit overnight assignment with breaks passed.
+[PR #33](https://github.com/Xonni-star/SecurityOps-2.0/pull/33), which adds an optional `maximum_daily_minutes` rule for active, approved profiles, remains **open and unmerged** at head `7ec3fb694bbc2e741c69d19ea8a05c311b284c41`. Its four standard CI jobs passed. Local backend/frontend builds and 26 roster tests passed. Two focused PostgreSQL 16 DST tests passed: Berlin spring-forward 00:00–04:00 counted as 180 elapsed minutes and was accepted at the limit; fall-back 00:00–04:00 counted as 300 minutes and was rejected. The test restores the site's IANA time zone in `finally`.
 
 A separate clean-main comparison on fresh PostgreSQL 16 databases found the same 21 failing assertions in `sync_and_roles.test.ts` on baseline and feature (feature: 21 failed/10 passed; baseline: 21 failed/9 passed). The new daily-limit test passes. These are pre-existing baseline failures, not evidence that PR #33 introduced them.
 

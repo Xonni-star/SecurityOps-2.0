@@ -93,7 +93,7 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Benutzer/Rechte | in `main` integriert | Tenant-scoped Benutzerverwaltung, Rollen/Grants, Passwort-Reset-Zustellungsschnittstelle und standortbezogene Autorisierung; Online-Adminfunktionen, keine Produktionsfreigabe |
 | API-Rate-Limit | in `main` integriert | Per-IP-Limit mit gemeinsamem Redis-Store; Redis ist im Produktionsmodus erforderlich |
 | Offline-Sync | teilweise integriert; Retry-Backoff aus PR [#32](https://github.com/Xonni-star/SecurityOps-2.0/pull/32) ist offen und nicht gemergt | IndexedDB-Outbox und modulbezogene Sync-Pfade; nicht jede Funktion und jedes Binärartefakt ist offline verfügbar |
-| Dienstplanung | Backend/UI und weitergehende Workflows in `main` integriert; konfigurierbares tägliches Arbeitszeitlimit aus PR [#33](https://github.com/Xonni-star/SecurityOps-2.0/pull/33) ist offen und nicht gemergt | API-gestützte Kalender- und Planungsabläufe; keine Rechtskonformitätsaussage. Aktueller Integrationsstatus: [Mainline-Integrationsbericht](./MAINLINE_INTEGRATION_STATUS.md) |
+| Dienstplanung | Backend/UI und weitergehende Workflows in `main` integriert; konfigurierbares tägliches Arbeitszeitlimit aus offenem PR [#33](https://github.com/Xonni-star/SecurityOps-2.0/pull/33) ist nicht gemergt; fokussierte PostgreSQL-Tests decken auch DST-Übergänge in Berlin ab | API-gestützte Kalender- und Planungsabläufe; keine Rechtskonformitätsaussage. Aktueller Integrationsstatus: [Mainline-Integrationsbericht](./MAINLINE_INTEGRATION_STATUS.md) |
 
 ---
 
