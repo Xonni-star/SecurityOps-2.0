@@ -1182,6 +1182,145 @@ describe('SecurityOps 2.0 - Schritt 5R.2.7: Idempotenz zwischen Sync-Push und Ko
     expect(reactivated.body.data.active).toBe(true);
   });
 
+  test('PostgreSQL planning preserves shift timezone across DST transitions and rejects invalid local times', async () => {
+    await withTenantTransaction(testTenantA, tx => tx.query(
+      'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+      ['Europe/Berlin', testTenantA, siteAId]
+    ));
+
+    try {
+      const profile = await request(app).post('/api/v1/planning/rule-profiles')
+        .set(authHeaders(testTokenA)).send({
+          name: `DST report ${Date.now()}`,
+          scope: { siteId: siteAId },
+          effectiveFrom: '2026-03-01',
+          effectiveUntil: '2026-10-31',
+          sourceName: 'Test-approved-DST-calendar',
+          sourceReference: 'fixture:dst-report',
+          rules: [
+            {
+              code: 'holiday_dates', value: ['2026-03-28', '2026-10-24'],
+              source: 'fixture:dst-holidays', severity: 'warning'
+            },
+            { code: 'night_window_start_minute', value: 1320, source: 'fixture:dst-night-window' },
+            { code: 'night_window_end_minute', value: 360, source: 'fixture:dst-night-window' }
+          ]
+        });
+      expect(profile.status).toBe(201);
+      const approved = await request(app)
+        .post(`/api/v1/planning/rule-profiles/${profile.body.data.profile.id}/versions/${profile.body.data.version.id}/approve`)
+        .set(authHeaders(planningApproverToken)).send({});
+      expect(approved.status).toBe(200);
+
+      const springShift = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId, employeeId: guardAId, date: '2026-03-28',
+          startTime: '22:00', endTime: '06:00', requiredQualification: 'Sachkunde',
+          clientMutationId: `dst-spring-${Date.now()}`
+        });
+      expect(springShift.status).toBe(201);
+      const fallShift = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId, employeeId: guardAId, date: '2026-10-24',
+          startTime: '22:00', endTime: '06:00', requiredQualification: 'Sachkunde',
+          clientMutationId: `dst-fall-${Date.now()}`
+        });
+      expect(fallShift.status).toBe(201);
+
+      const persistedShifts = await withTenantTransaction(testTenantA, tx => tx.query(
+        `SELECT id,starts_at,ends_at,time_zone FROM shifts
+          WHERE tenant_id=$1 AND id=ANY($2::uuid[])`,
+        [testTenantA, [springShift.body.data.shift.id, fallShift.body.data.shift.id]]
+      ));
+      expect(persistedShifts.rows).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          id: springShift.body.data.shift.id,
+          starts_at: new Date('2026-03-28T21:00:00.000Z'),
+          ends_at: new Date('2026-03-29T04:00:00.000Z'),
+          time_zone: 'Europe/Berlin'
+        }),
+        expect.objectContaining({
+          id: fallShift.body.data.shift.id,
+          starts_at: new Date('2026-10-24T20:00:00.000Z'),
+          ends_at: new Date('2026-10-25T05:00:00.000Z'),
+          time_zone: 'Europe/Berlin'
+        })
+      ]));
+
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        ['Pacific/Auckland', testTenantA, siteAId]
+      ));
+      const springReport = await request(app)
+        .get('/api/v1/planning/reports/work-hours?from=2026-03-28&to=2026-03-28')
+        .set(authHeaders(testTokenA));
+      expect(springReport.status).toBe(200);
+      expect(springReport.body.data).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          employee_id: guardAId, planned_hours: 7,
+          planned_holiday_shifts: 1, planned_night_shifts: 1
+        })
+      ]));
+      const fallReport = await request(app)
+        .get('/api/v1/planning/reports/work-hours?from=2026-10-24&to=2026-10-24')
+        .set(authHeaders(testTokenA));
+      expect(fallReport.status).toBe(200);
+      expect(fallReport.body.data).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          employee_id: guardAId, planned_hours: 9,
+          planned_holiday_shifts: 1, planned_night_shifts: 1
+        })
+      ]));
+
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        ['Europe/Berlin', testTenantA, siteAId]
+      ));
+      const invalidZone = await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        ['Mars/Olympus', testTenantA, siteAId]
+      ));
+      expect(invalidZone.rowCount).toBe(1);
+      const invalidZoneShift = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId, date: '2026-11-02', startTime: '08:00', endTime: '09:00',
+          requiredQualification: 'Sachkunde'
+        });
+      expect(invalidZoneShift.status).toBe(400);
+
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        ['Europe/Berlin', testTenantA, siteAId]
+      ));
+      const ambiguousTime = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId, date: '2026-10-25', startTime: '02:30', endTime: '03:30',
+          requiredQualification: 'Sachkunde'
+        });
+      expect(ambiguousTime.status).toBe(400);
+      const selectedAmbiguousTime = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId, date: '2026-10-25', startTime: '02:30', endTime: '03:30',
+          startOffsetMinutes: 60, requiredQualification: 'Sachkunde'
+        });
+      expect(selectedAmbiguousTime.status).toBe(201);
+      expect(new Date(selectedAmbiguousTime.body.data.shift.starts_at).toISOString())
+        .toBe('2026-10-25T01:30:00.000Z');
+
+      const nonexistentTime = await request(app).post('/api/v1/planning/shifts')
+        .set(authHeaders(testTokenA)).send({
+          siteId: siteAId, date: '2026-03-29', startTime: '02:30', endTime: '04:00',
+          requiredQualification: 'Sachkunde'
+        });
+      expect(nonexistentTime.status).toBe(400);
+    } finally {
+      await withTenantTransaction(testTenantA, tx => tx.query(
+        'UPDATE sites SET time_zone=$1 WHERE tenant_id=$2 AND id=$3',
+        ['UTC', testTenantA, siteAId]
+      ));
+    }
+  });
+
   // 2. Wachbuch: UPDATE mit ursprünglicher entryId
   test('2. Wachbuch: UPDATE identifiziert Eintrag über entryId und hängt Revision an', async () => {
     const entryId = await withTenantTransaction(testTenantA, async (tx) => {
