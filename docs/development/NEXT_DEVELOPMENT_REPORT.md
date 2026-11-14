@@ -4,6 +4,8 @@
 
 **Project status:** In development; not approved for production.
 
+> **Historical snapshot:** This report describes the tenant-administration implementation at the PR #20 stage. Its `main` SHA, PR states, and feature scope predate the later PR #21–#24 changes and the PR #16 merge to `main`; they are not current mainline status. See the [current integration report](../../MAINLINE_INTEGRATION_STATUS.md).
+
 **Change status:** Implemented in the current PR worktree; not integrated in `main`.
 **Verification status:** Local backend, frontend, PostgreSQL 16, and Docker checks passed.
 

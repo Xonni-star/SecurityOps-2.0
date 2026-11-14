@@ -6,6 +6,7 @@ Mandantenfähige Verwaltungssoftware für Sicherheitsunternehmen mit Prozessbezu
 > Die Backend- und Frontend-Funktionen werden durch lokale Tests und CI geprüft. Das ist kein Nachweis eines Produktions-Rollouts, einer fachlichen Abnahme oder der Rechtskonformität im konkreten Einsatz.
 > Der aktuelle quellcodebasierte Stand, Befunde und Prüfgrenzen stehen im [Phase-1-Abschlussbericht](./PHASE_1_INTEGRATION_COMPLETION_REPORT.md). Frühere Umsetzungsberichte sind historische Snapshots.
 > Alarmmanagement (#12), Übergaben (#13) und Kontrollgänge (#14) sind in `main` integriert. Details: [Handovers-API](./frontend/HANDOVERS_API.md), [Alarm-API](./frontend/ALARM_EMERGENCY_API.md) und [Kontrollgang-Modul](./frontend/PATROL_MANAGEMENT.md).
+> **Mainline-Status:** `main` steht auf `b94e21d` (PR #16); PRs #17 und #18 sind ebenfalls Vorfahren von `main`. PRs #19–#24 wurden in Feature-Branches zusammengeführt, sind aber noch nicht in `main`. Der aktuelle Integrationsstand und seine Prüfung sind im [Mainline-Integrationsbericht](./MAINLINE_INTEGRATION_STATUS.md) dokumentiert.
 
 ---
 
@@ -89,9 +90,10 @@ Das Backend verweigert den Start bei fehlenden, ungültigen oder offensichtlich 
 | Alarme/Notfallpläne | implementiert, nicht deployed | Versionierte Pläne, Vorfälle, Ereignisse, Offline-Queue und Eskalationsworker; externe E-Mail-/Push-Zustellung ist nicht konfiguriert |
 | Übergaben | in `main` integriert, nicht deployed | Tenant-scoped Protokolle, getrennte Bestätigungen, Ereignisse, übernommene Aufgaben, DMS-Links und Offline-Sync |
 | Kontrollgänge | in `main` integriert, nicht deployed | RLS, QR/NFC/manuelle Scans, versionierte Routen, Gruppen, Termin-Vorkommen, Abweichungen und Offline-Sync; externe Benachrichtigung und Offline-Binäranhänge fehlen |
-| Benutzer/Rechte | Tenant-scoped Administration im aktuellen PR-Arbeitsstand | Bestehende Auth/RBAC erweitert um Benutzerverwaltung, konfigurierbare tenant-eigene Rollen, Site-Grants, Audit und Passwort-Reset-Vorbereitung; Online-Adminfunktionen, serverseitige Prüfung; noch nicht in `main` |
-| Offline-Sync | teilweise integriert | IndexedDB-Outbox und modulbezogene Sync-Pfade; nicht jede Funktion und jedes Binärartefakt ist offline verfügbar |
-| Dienstplanung | Phase-2-Backend/UI in offenen PRs [#16](https://github.com/Xonni-star/SecurityOps-2.0/pull/16) und [#19](https://github.com/Xonni-star/SecurityOps-2.0/pull/19), nicht deployed | API-gestützte Kalender- und Planungsabläufe; keine Rechtskonformitätsaussage. Status, CI-Köpfe, Audit-Ergebnis und verbleibende Grenzen: [Phase-2-Abschlussbericht](./PHASE_2_FINAL_COMPLETION_REPORT.md) |
+| Benutzer/Rechte | Integration von PRs [#20](https://github.com/Xonni-star/SecurityOps-2.0/pull/20), [#22](https://github.com/Xonni-star/SecurityOps-2.0/pull/22) und [#24](https://github.com/Xonni-star/SecurityOps-2.0/pull/24) vorgeschlagen; noch nicht in `main` | Tenant-scoped Benutzerverwaltung, Rollen/Grants, Passwort-Reset-Zustellungsschnittstelle und standortbezogene Autorisierung; Online-Adminfunktionen, keine Produktionsfreigabe |
+| API-Rate-Limit | Integration von PR [#21](https://github.com/Xonni-star/SecurityOps-2.0/pull/21) vorgeschlagen; noch nicht in `main` | Per-IP-Limit mit gemeinsamem Redis-Store; Redis ist im Produktionsmodus erforderlich |
+| Offline-Sync | teilweise integriert; Verbesserungen aus PR [#23](https://github.com/Xonni-star/SecurityOps-2.0/pull/23) im Integrationsvorschlag | IndexedDB-Outbox und modulbezogene Sync-Pfade; nicht jede Funktion und jedes Binärartefakt ist offline verfügbar |
+| Dienstplanung | Backend/UI aus PRs [#16](https://github.com/Xonni-star/SecurityOps-2.0/pull/16), [#17](https://github.com/Xonni-star/SecurityOps-2.0/pull/17) und [#18](https://github.com/Xonni-star/SecurityOps-2.0/pull/18) in `main`; weitergehende Workflows aus PR [#19](https://github.com/Xonni-star/SecurityOps-2.0/pull/19) im Integrationsvorschlag | API-gestützte Kalender- und Planungsabläufe; nicht deployed und keine Rechtskonformitätsaussage. Aktueller Integrationsstatus: [Mainline-Integrationsbericht](./MAINLINE_INTEGRATION_STATUS.md) |
 
 ---
 
@@ -122,7 +124,7 @@ Audit snapshot (2026-11-14): `npm --prefix frontend audit` found 0 vulnerabiliti
 
 * **Mandantenisolation:** RLS und `FORCE ROW LEVEL SECURITY` sind für ausgewählte tenantgebundene Tabellen konfiguriert; dies gilt nicht pauschal für jede historische Tabelle. Tenant-scoped API-Zugriffe setzen ihren Datenbankkontext aus der authentifizierten Sitzung. Bekannte modulbezogene Grenzen stehen in den jeweiligen API-/Sicherheitsdokumenten.
 * **Least Privilege:** Der operative Benutzer `secops_app_user` besitzt weder Superuser- noch `BYPASSRLS`-Rechte; die Rolle wird beim Serverstart verifiziert.
-* **Authentifizierung:** Argon2id-Passworthashes, opake zufällige `HttpOnly`-Sitzungscookies, Datenbank-Widerruf, CSRF-Schutz und kontoabhängiger Lockout nach Fehlversuchen. Ein globales IP-basiertes Limit ist aktiv; der In-Memory-Zähler wird nicht zwischen Replikas geteilt, weshalb Multi-Instance-Deployments ein zusätzliches Gateway-Limit benötigen.
+* **Authentifizierung:** Argon2id-Passworthashes, opake zufällige `HttpOnly`-Sitzungscookies, Datenbank-Widerruf, CSRF-Schutz und kontoabhängiger Lockout nach Fehlversuchen. Ein per-IP-API-Limit kann einen gemeinsamen Redis-Store verwenden; im Produktionsmodus ist Redis erforderlich. Ohne Redis im Entwicklungsmodus bleibt der Zähler pro Prozess.
 * **Offline-Sync:** Idempotente Mutationen über `POST /api/v1/sync/push`; Übergaben verwenden zusätzlich `POST /api/v1/handovers/sync`, Advisory Locks und persistente Quittungen. Lokale Erfassung bleibt bis zur API-Quittung ausstehend; Konflikte überschreiben keine bestätigten Protokolle.
 
 ---
@@ -134,12 +136,13 @@ Audit snapshot (2026-11-14): `npm --prefix frontend audit` found 0 vulnerabiliti
 * [frontend/SYSTEM_OVERVIEW.md](./frontend/SYSTEM_OVERVIEW.md) — Systemüberblick
 * [frontend/HANDOVERS_API.md](./frontend/HANDOVERS_API.md) — Übergabe-API, Statusmodell und Offline-Synchronisierung
 * [frontend/USER_ADMINISTRATION_API.md](./frontend/USER_ADMINISTRATION_API.md) — Benutzer-/Rollen-API, Berechtigungsgrenzen und Reset-Ablauf
+* [MAINLINE_INTEGRATION_STATUS.md](./MAINLINE_INTEGRATION_STATUS.md) — bestätigte Mainline-Ancestry, integrierte PR-Deltas und Validierungsstatus
 * [frontend/SECURITY_AUDIT.md](./frontend/SECURITY_AUDIT.md) — historischer Sicherheitsaudit-Snapshot und aktueller Verweis
 * [frontend/KNOWN_ISSUES.md](./frontend/KNOWN_ISSUES.md) — bekannte Einschränkungen
-* [docs/development/NEXT_DEVELOPMENT_REPORT.md](./docs/development/NEXT_DEVELOPMENT_REPORT.md) — aktueller Bericht zu Benutzer-/Rechteverwaltung und Verifikation
+* [docs/development/NEXT_DEVELOPMENT_REPORT.md](./docs/development/NEXT_DEVELOPMENT_REPORT.md) — historischer Implementierungsbericht zu Benutzer-/Rechteverwaltung
 * [PHASE_1_INTEGRATION_COMPLETION_REPORT.md](./PHASE_1_INTEGRATION_COMPLETION_REPORT.md) — aktueller quellcodebasierter Umsetzungsstand, Befunde und Prüfgrenzen
 * [frontend/SERVICE_PLANNING_SPECIFICATION.md](./frontend/SERVICE_PLANNING_SPECIFICATION.md) — Dienstplanungs-Spezifikation und Phase-2-Implementierungsstand
-* [PHASE_2_FINAL_COMPLETION_REPORT.md](./PHASE_2_FINAL_COMPLETION_REPORT.md) — verifizierte Phase-2-PR-/CI-Stände, Tests, npm audit und verbleibende Grenzen
+* [PHASE_2_FINAL_COMPLETION_REPORT.md](./PHASE_2_FINAL_COMPLETION_REPORT.md) — Phase-2-Implementierungssnapshot; aktuelle PR-/Mainline-Status siehe Integrationsbericht
 * [PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md](./PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md) — historischer Backend-/Frontend-Implementierungsbericht
 * [FINAL_COMPLETION_REPORT.md](./FINAL_COMPLETION_REPORT.md) — historischer Umsetzungsstand
 * [DMS_IMPLEMENTATION_REPORT.md](./DMS_IMPLEMENTATION_REPORT.md) — DMS-Umfang, Sicherheitsmodell, Tests und offene Einschränkungen

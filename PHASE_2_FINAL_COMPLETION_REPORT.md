@@ -2,6 +2,8 @@
 
 **Status snapshot:** 2026-11-13. This report records verified implementation and CI evidence; it does not declare Phase 2 complete, production-ready, or legally compliant.
 
+> **Historical snapshot:** The PR states and mainline description below were accurate for 2026-11-13, before the subsequent merges. As of 2026-11-14, PR #16 is merged into `main` at `b94e21d0`; PRs #17 and #18 are also ancestors of `main`. PR #19 is merged into a feature branch, not `main`. See the [current integration status](./MAINLINE_INTEGRATION_STATUS.md) for the verified ancestry and proposed PR #19–#24 integration.
+
 ## Pull requests and stack
 
 | PR | State | Base | Verified head | CI |
