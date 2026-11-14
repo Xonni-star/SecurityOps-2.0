@@ -29,6 +29,7 @@ describe('DMS malware scanner', () => {
   test('distinguishes clean and infected ClamAV responses', async () => {
     await expect(scanThroughFakeClamAv('stream: OK')).resolves.toBe('clean');
     await expect(scanThroughFakeClamAv('stream: Eicar-Test-Signature FOUND')).resolves.toBe('infected');
+    await expect(scanThroughFakeClamAv('ERROR OK')).rejects.toThrow('Scanner returned an invalid response.');
   });
 
   test('reports an unconfigured scanner as unavailable, never clean', async () => {
