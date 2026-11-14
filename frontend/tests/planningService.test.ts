@@ -95,6 +95,7 @@ describe('service planning helpers', () => {
   test('uses the documented rule-profile list, version, and approval contracts', async () => {
     const get = vi.spyOn(apiClient, 'get').mockResolvedValue([]);
     const post = vi.spyOn(apiClient, 'post').mockResolvedValue({});
+    const patch = vi.spyOn(apiClient, 'patch').mockResolvedValue({});
     const rule = {
       code: 'minimum_rest_minutes' as const,
       value: 720,
@@ -118,6 +119,7 @@ describe('service planning helpers', () => {
       rules: [rule]
     });
     await planningApi.approveRuleProfileVersion('profile/a', 'version a');
+    await planningApi.setRuleProfileActive('profile/a', false);
 
     expect(get).toHaveBeenCalledWith('/planning/rule-profiles?page=1&pageSize=200');
     expect(post).toHaveBeenNthCalledWith(1, '/planning/rule-profiles', expect.objectContaining({ name: 'Profile A', rules: [rule] }));
@@ -128,5 +130,83 @@ describe('service planning helpers', () => {
       rules: [rule]
     });
     expect(post).toHaveBeenNthCalledWith(3, '/planning/rule-profiles/profile%2Fa/versions/version%20a/approve', {});
+    expect(patch).toHaveBeenCalledWith('/planning/rule-profiles/profile%2Fa', { active: false });
+  });
+
+  test('uses documented templates, cover, actual-time, and report endpoints', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue([]);
+    const post = vi.spyOn(apiClient, 'post').mockResolvedValue({});
+    const patch = vi.spyOn(apiClient, 'patch').mockResolvedValue({});
+    await planningApi.listTemplates('site/a');
+    await planningApi.listTemplates(undefined, true);
+    await planningApi.createTemplate({
+      siteId: 'site-a',
+      name: 'Weekly',
+      startTime: '08:00',
+      endTime: '16:00',
+      requiredQualification: 'Sachkunde',
+      frequency: 'WEEKLY',
+      interval: 1,
+      weekdays: [1, 2]
+    });
+    await planningApi.updateTemplate('template/a', {
+      expectedVersion: 3,
+      name: 'Updated',
+      active: false
+    });
+    await planningApi.applyTemplate('template/a', {
+      dateFrom: '2026-11-01',
+      dateTo: '2026-11-30',
+      schedulePeriodId: 'period-a'
+    });
+    await planningApi.staffingSuggestions('shift/a');
+    await planningApi.createCoverRequest('shift/a', {
+      expectedShiftVersion: 4, clientMutationId: 'cover-mutation', reason: 'Ausfall'
+    });
+    await planningApi.coverRequests('pending', 'shift/a');
+    await planningApi.decideCoverRequest('request/a', {
+      decision: 'approved', expectedVersion: 1, employeeId: 'employee-a', clientMutationId: 'decision-mutation'
+    });
+    await planningApi.recordActualTime('shift/a', {
+      employeeId: 'employee-a',
+      actualStartAt: '2026-11-13T08:03:00+01:00',
+      actualEndAt: '2026-11-13T16:05:00+01:00',
+      breakMinutes: 30,
+      expectedVersion: 0,
+      clientMutationId: 'actual-mutation'
+    });
+    await planningApi.getActualTime('shift/a', 'employee/a');
+    await planningApi.approveActualTime('shift/a', { employeeId: 'employee/a', expectedVersion: 2 });
+    await planningApi.planningNotifications();
+    await planningApi.markPlanningNotificationRead('notification/a');
+    await planningApi.workHours('2026-11-01', '2026-11-30');
+    await planningApi.coverage('2026-11-01', '2026-11-30');
+    await planningApi.qualifications('2026-11-01', '2026-11-30');
+    await planningApi.absences('2026-11-01', '2026-11-30');
+
+    expect(get).toHaveBeenCalledWith('/planning/templates?siteId=site%2Fa&page=1&pageSize=200');
+    expect(get).toHaveBeenCalledWith('/planning/templates?includeInactive=true&page=1&pageSize=200');
+    expect(get).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/staffing-suggestions');
+    expect(get).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/actual-time?employeeId=employee%2Fa');
+    expect(get).toHaveBeenCalledWith('/planning/notifications?page=1&pageSize=100');
+    expect(get).toHaveBeenCalledWith('/planning/cover-requests?status=pending&shiftId=shift%2Fa&page=1&pageSize=200');
+    expect(get).toHaveBeenCalledWith('/planning/reports/qualifications?from=2026-11-01&to=2026-11-30');
+    expect(get).toHaveBeenCalledWith('/planning/reports/absences?from=2026-11-01&to=2026-11-30');
+    expect(post).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/cover-requests', expect.objectContaining({ expectedShiftVersion: 4 }));
+    expect(post).toHaveBeenCalledWith('/planning/cover-requests/request%2Fa/decision', expect.objectContaining({ expectedVersion: 1 }));
+    expect(post).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/actual-time', expect.objectContaining({
+      expectedVersion: 0,
+      actualStartAt: '2026-11-13T08:03:00+01:00'
+    }));
+    expect(post).toHaveBeenCalledWith('/planning/shifts/shift%2Fa/actual-time/approve', {
+      employeeId: 'employee/a',
+      expectedVersion: 2
+    });
+    expect(post).toHaveBeenCalledWith('/planning/notifications/notification%2Fa/read', {});
+    expect(patch).toHaveBeenCalledWith('/planning/templates/template%2Fa', {
+      expectedVersion: 3,
+      name: 'Updated',
+      active: false
+    });
   });
 });

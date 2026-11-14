@@ -27,6 +27,9 @@ interface SyncManagerModalProps {
 export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onClose }) => {
   const {
     isOnline,
+    currentTenantId,
+    currentUserId,
+    authUser,
     toggleNetworkSimulation,
     syncQueue,
     triggerManualSync,
@@ -47,8 +50,14 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
   const [selectedConflict, setSelectedConflict] = useState<any | null>(null);
   const [resolutionError, setResolutionError] = useState('');
   const [isResolvingConflict, setIsResolvingConflict] = useState(false);
+  const identityKey = `${currentTenantId}:${authUser?.id || currentUserId}`;
 
   const tenant = getCurrentTenant();
+
+  useEffect(() => {
+    setSelectedConflict(null);
+    setResolutionError('');
+  }, [identityKey]);
 
   useEffect(() => {
     if (isOpen) {
@@ -70,6 +79,11 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
   const selectedConflictPayload = selectedConflict?.entityType === 'patrol'
     ? Object.fromEntries(Object.entries(selectedConflict.payload || {}).filter(([key]) => !/token/i.test(key)))
     : selectedConflict?.payload;
+  const hasShiftServerSnapshot = selectedConflict?.entityType !== 'shift' ||
+    Boolean(selectedConflict.conflictDetails?.serverPayload &&
+      typeof selectedConflict.conflictDetails.serverPayload === 'object' &&
+      !Array.isArray(selectedConflict.conflictDetails.serverPayload) &&
+      selectedConflict.conflictDetails.serverPayload.id);
 
   const handleRunSync = async () => {
     setIsSyncing(true);
@@ -275,7 +289,7 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                       <pre>{JSON.stringify(selectedConflictPayload, null, 2)}</pre>
                     </div>
                     <button
-                      disabled={isResolvingConflict}
+                      disabled={isResolvingConflict || !hasShiftServerSnapshot}
                       onClick={() => void handleResolveDecision(
                         selectedConflict.entityType === 'patrol' ? 'RECORD_AS_EXCEPTION' : 'USE_LOCAL'
                       )}
@@ -303,7 +317,7 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                     </div>
                     {selectedConflict.entityType === 'patrol' ? (
                       <button
-                        disabled={isResolvingConflict}
+                        disabled={isResolvingConflict || !hasShiftServerSnapshot}
                         onClick={() => void handleResolveDecision('USE_SERVER')}
                         className="w-full py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition disabled:opacity-50"
                       >
@@ -311,7 +325,7 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                       </button>
                     ) : (
                       <button
-                        disabled={isResolvingConflict}
+                        disabled={isResolvingConflict || !hasShiftServerSnapshot}
                         onClick={() => void handleResolveDecision('USE_SERVER')}
                         className="w-full py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold transition disabled:opacity-50"
                       >
@@ -320,6 +334,11 @@ export const SyncManagerModal: React.FC<SyncManagerModalProps> = ({ isOpen, onCl
                     )}
                   </div>
                 </div>
+                {selectedConflict.entityType === 'shift' && !hasShiftServerSnapshot && (
+                  <p role="alert" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-amber-200">
+                    Der Server hat noch keinen aktuellen Schicht-Snapshot geliefert. Die Konfliktauflösung ist gesperrt, damit keine Änderung ohne sichtbaren Serverstand überschrieben wird.
+                  </p>
+                )}
                 {resolutionError && (
                   <p role="alert" className="p-2 rounded-lg bg-rose-500/10 border border-rose-500/30 text-rose-300">
                     {resolutionError} Der Eintrag bleibt in der lokalen Outbox erhalten.

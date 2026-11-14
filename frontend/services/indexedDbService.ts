@@ -96,6 +96,8 @@ export interface StoredPlanningCache {
   userId: string;
   shifts: any[];
   periods: any[];
+  rangeFrom?: string;
+  rangeTo?: string;
   cachedAt: string;
 }
 
@@ -275,7 +277,8 @@ export class IndexedDbService {
     });
   }
 
-  async getPendingOutbox(tenantId: string): Promise<OutboxMutation[]> {
+  async getPendingOutbox(tenantId: string, userId: string): Promise<OutboxMutation[]> {
+    if (!userId) return [];
     const db = await this.init();
 
     return new Promise((resolve, reject) => {
@@ -285,9 +288,10 @@ export class IndexedDbService {
 
       req.onsuccess = () => {
         const records = (req.result as OutboxMutation[]) || [];
-        // Nur Einträge des jeweiligen Mandanten zurückliefern, die PENDING oder FAILED sind
+        // Never replay mutations without an exact tenant and user owner.
         resolve(records
-          .filter((r) => r.tenantId === tenantId && (r.status === 'PENDING' || r.status === 'FAILED'))
+          .filter((r) => r.tenantId === tenantId && r.userId === userId &&
+            (r.status === 'PENDING' || r.status === 'FAILED'))
           .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt) || patrolMutationOrder(a) - patrolMutationOrder(b)));
       };
 
@@ -297,7 +301,11 @@ export class IndexedDbService {
     });
   }
 
-  async getOutbox(tenantId: string, entityType?: OutboxMutation['entityType']): Promise<OutboxMutation[]> {
+  async getOutbox(
+    tenantId: string,
+    entityType?: OutboxMutation['entityType'],
+    userId?: string
+  ): Promise<OutboxMutation[]> {
     const db = await this.init();
 
     return new Promise((resolve, reject) => {
@@ -305,7 +313,9 @@ export class IndexedDbService {
       const request = tx.objectStore('outbox').getAll();
       request.onsuccess = () => {
         const records = (request.result as OutboxMutation[]) || [];
-        resolve(records.filter(record => record.tenantId === tenantId && (!entityType || record.entityType === entityType)));
+        resolve(records.filter(record => record.tenantId === tenantId &&
+          (!entityType || record.entityType === entityType) &&
+          (!userId || record.userId === userId)));
       };
       request.onerror = () => reject(request.error || new Error('[INDEXEDDB FEHLER] Lesen der Outbox fehlgeschlagen'));
     });
@@ -640,7 +650,8 @@ export class IndexedDbService {
     tenantId: string,
     userId: string,
     shifts: any[],
-    periods: any[]
+    periods: any[],
+    range?: { from: string; to: string }
   ): Promise<void> {
     const db = await this.init();
     const cache: StoredPlanningCache = {
@@ -649,6 +660,8 @@ export class IndexedDbService {
       userId,
       shifts,
       periods,
+      rangeFrom: range?.from,
+      rangeTo: range?.to,
       cachedAt: new Date().toISOString()
     };
 

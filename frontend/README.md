@@ -12,11 +12,13 @@ SecurityOps 2.0 ist eine mandantenfähige, offline-fähige Enterprise-Software f
 
 ## Dienst- und Einsatzplanung (Phase 2)
 
-`components/RosterModule.tsx` ist unter der bestehenden Route `roster` eingebunden. Die Oberfläche bietet Monats-, Wochen- und Tageskalender, Zeit-/Mitarbeiter-/Objekt-/Kundenansichten, Suche und Filter, Entwürfe, periodengebundene Planung, Wiederholung/Vorlagen, Zuweisungen, Tauschanträge, serverseitige Befunde, Veröffentlichung, Coverage-/Arbeitszeitberichte sowie CSV- und Druckausgabe. Planung, Revisionen, Befunde und Freigaben werden über die Planning-API und die vorhandene Berechtigungsprüfung abgewickelt; lokale Eingaben gelten nicht als Freigabe.
+`components/RosterModule.tsx` ist unter der bestehenden Route `roster` eingebunden. Die Oberfläche bietet Monats-, Wochen- und Tageskalender, Zeit-/Mitarbeiter-/Objekt-/Kundenansichten, Suche und Filter, Entwürfe, periodengebundene Planung, revisionierte Vorlagen, nicht bindende Besetzungsvorschläge, Zuweisungen, Cover-/Tauschanträge, Ist-Zeit samt Korrekturverlauf, serverseitige Befunde, Veröffentlichung, Arbeitszeit-/Coverage-/Qualifikations-/Abwesenheitsberichte sowie CSV- und Druckausgabe. Planung, Revisionen, Befunde und Entscheidungen werden über dokumentierte Planning-API-Endpunkte und konkrete Berechtigungen abgewickelt; lokale Eingaben gelten nicht als Freigabe.
 
 Der Offline-Cache ist nach Mandant und Benutzer getrennt. Die Outbox unterstützt einzelne, unbesetzte Entwurfsanlagen ohne Periode (Besetzungsbedarf 1) sowie Draft-Änderungen mit Server-ID und Basisrevision. Offline-Updates ändern weder Periodenzuordnung noch Mindestbesetzung; Mutation und Folgeänderung bleiben sichtbar ausstehend und ungeprüft, bis der Server synchronisiert. Zuweisung, Tauschentscheidung und Veröffentlichung benötigen Online-Serverprüfung. Konflikte und Ablehnungen bleiben in der Outbox sichtbar.
 
-Die aktuelle Backend-API bietet keinen Vorlagen-Listenendpunkt und keine Rule-Profile-Verwaltung im Frontend. Berichte enthalten geplante Stunden/Wochenenddienste und Coverage, aber keine Abrechnung von Ist-/Überstunden sowie keine vollständigen Qualifikations-, Abwesenheits-, Feiertags- oder Nachtarbeitsauswertungen. Es gibt keine automatische Einsatzempfehlung und keine Rechtskonformitätsbestätigung. Browser-/Gerätekompatibilität, produktiver Rollout und fachliche/rechtliche Abnahme sind nicht durch Frontend-Tests belegt. Details und Prüfumfang: [Phase-2-Abschlussbericht](../PHASE_2_SERVICE_PLANNING_COMPLETION_REPORT.md) und [API-Vertrag](./backend/SERVICE_PLANNING_API.md).
+Vorlagen können revisioniert bearbeitet und aktiviert/deaktiviert, aber nicht hart gelöscht oder über einen eigenen Copy-Endpunkt dupliziert werden. Besetzungsvorschläge sind erklärend und unverbindlich; die Zuweisung erfolgt erst nach separater Bestätigung und Serverprüfung. Ist-Zeit besitzt keine unabhängige Freigabe; Regelprofile unterstützen derzeit nur mandantenweiten oder Objekt-Scope. Es gibt keine Benutzerbenachrichtigungen. Browser-/Gerätekompatibilität, produktiver Rollout und fachliche/rechtliche Abnahme sind nicht durch Frontend-Tests belegt. PR-/CI-Stand und weitere Grenzen: [Phase-2-Abschlussbericht](../PHASE_2_FINAL_COMPLETION_REPORT.md); API-Vertrag: [SERVICE_PLANNING_API.md](./backend/SERVICE_PLANNING_API.md).
+
+Nach erfolgreicher Authentifizierung startet die Outbox-Wiedergabe auch dann, wenn die App bereits online wiederhergestellt wird. Jede Mutation wird nur für die exakte aktuelle Mandanten-/Benutzerkombination wiedergegeben; Einträge ohne bekannten Benutzerbesitzer bleiben aus Sicherheitsgründen ungepushed. Der Planungscache speichert nur den zuletzt geladenen Datumsbereich je Mandant und Benutzer und weist in der Oberfläche auf diese Grenze hin; außerhalb des Bereichs warnt sie, damit leere Offline-Zeiträume nicht als bestätigte Schichtfreiheit missverstanden werden. Schichtkonfliktentscheidungen zeigen den tenant-validierten aktuellen Feld-Snapshot aus der Sync-API. Ist-Zeit kann mit Revisionserwartung von einer anderen berechtigten Person genehmigt werden, und Planungsbenachrichtigungen sind als In-App-Eingang mit Als-gelesen-Aktion verfügbar. Die vollständige Test- und Auditdokumentation steht im [Offline-Testbericht](./OFFLINE_TEST_REPORT.md) und im [Phase-2-Abschlussbericht](../PHASE_2_FINAL_COMPLETION_REPORT.md).
 
 ## Alarm- und Notfallmanagement
 
@@ -67,7 +69,12 @@ npm test
 
 # Frontend TypeScript- und Vite-Build
 npm run build
+
+# Frontend dependency audit
+npm audit
 ```
+
+Audit snapshot (2026-11-13): frontend `npm audit` — 0 vulnerabilities. Backend `npm --prefix frontend/backend audit` — 7 low findings in the Jest/`ts-jest` development-test toolchain, including `deepmerge` GHSA-gcqx-w48m-w2h4; `npm --prefix frontend/backend audit --omit=dev` — 0 vulnerabilities. The suggested forced fix is a breaking Jest downgrade, so no unrelated dependency change was applied. The Phase 2 test/build/audit results and exact CI heads are recorded in the [final status report](../PHASE_2_FINAL_COMPLETION_REPORT.md).
 
 ---
 

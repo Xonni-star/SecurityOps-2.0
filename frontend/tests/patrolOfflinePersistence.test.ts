@@ -87,12 +87,32 @@ describe('Patrol offline outbox persistence', () => {
         baseVersion: 1
       });
     }
+    await beforeRestart.enqueueMutation({
+      id: 'other-user-pending',
+      tenantId: 'tenant-patrol-test',
+      userId: 'different-user',
+      entityType: 'patrol',
+      action: 'CREATE',
+      payload: { recordType: 'scan' },
+      occurredAt,
+      baseVersion: 1
+    });
+    await beforeRestart.enqueueMutation({
+      id: 'unknown-owner-pending',
+      tenantId: 'tenant-patrol-test',
+      userId: '',
+      entityType: 'patrol',
+      action: 'CREATE',
+      payload: { recordType: 'scan' },
+      occurredAt,
+      baseVersion: 1
+    });
 
     const afterRestart = new IndexedDbService();
     services.push(afterRestart);
     const cached = await afterRestart.getPatrolCheckpointCache('tenant-patrol-test', 'user-patrol-test');
     const rounds = await afterRestart.getPatrolRounds('tenant-patrol-test', 'user-patrol-test');
-    const pending = await afterRestart.getPendingOutbox('tenant-patrol-test');
+    const pending = await afterRestart.getPendingOutbox('tenant-patrol-test', 'user-patrol-test');
 
     expect(cached?.routes).toEqual([
       { id: 'route-patrol-test', siteId: 'site-patrol-test', currentVersion: 3, checkpoints: ['checkpoint-patrol-test'] }

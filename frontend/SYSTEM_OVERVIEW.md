@@ -14,7 +14,9 @@
 | **Kunden & Verträge** | `ClientsModule.tsx` | `/api/v1/customers` | `customers` | Ja | Nein (Read-Only) |
 | **Objektverwaltung** | `SitesModule.tsx` | `/api/v1/objects` | `objects`, `control_points` | Ja | Ja (Inbox Cache) |
 | **Personal & § 34a** | `EmployeesModule.tsx` | `/api/v1/employees` | `employees`, `qualifications` | Ja | Ja |
-| **Dienstplanung** | `RosterModule.tsx` | `/api/v1/shifts` | `shifts` | Ja | Ja |
+| **Dienstplanung** | `RosterModule.tsx` | `/api/v1/planning/*` (Schichten, Perioden, revisionierte Vorlagen, nicht bindende Besetzungsvorschläge, Vertretungen, Ist-Zeit samt Verlauf, Berichte, Regelprofile) | `shifts`, staffing assignments, periods, templates, cover requests, actual times, rule profiles | Ja | Nur Schichtentwürfe/-änderungen über die bestehende Outbox; Zuweisungen, Vorlagen, Vertretungen, Ist-Zeiten, Berichte, Regelprofile und Veröffentlichung online-only |
+
+Vorlagen können revisioniert bearbeitet und aktiviert/deaktiviert, aber nicht hart gelöscht oder über einen eigenen Kopier-Endpunkt dupliziert werden. Ist-Zeitkorrekturen laden die gespeicherte Revision und Audit-Historie; eine separate Ist-Zeitfreigabe wird nicht angeboten. Besetzungsvorschläge sind erklärend und führen ohne separate Zuweisungsbestätigung keine Mutation aus.
 | **Digitales Wachbuch** | `GuardBookModule.tsx` | `/api/v1/logbook` | `logbook_entries`, `revisions` | Ja | Ja (Append-Only) |
 | **Schlüssel & Zutritt** | `KeysModule.tsx` | `/api/v1/keys` | `keys` | Ja | Ja |
 | **QM & Anweisungen** | `SOPModule.tsx` | `/api/v1/sops` | `sop_instructions`, `sop_versions`, `sop_events`, `sop_assignments` | Ja | Teilweise (lokale Vormerkung) |

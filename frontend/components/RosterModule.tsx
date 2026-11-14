@@ -1,16 +1,18 @@
-import React, { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import React, { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, CalendarDays, ChevronLeft, ChevronRight, Copy, Download,
+  AlertTriangle, Bell, CalendarDays, ChevronLeft, ChevronRight, Copy, Download,
   FileText, LoaderCircle, Plus, Printer, RefreshCw, ShieldCheck, Users, X
 } from 'lucide-react';
 import { useSecurityStore } from '../store';
 import { Employee, Shift, Site } from '../types';
-import { apiClient } from '../services/apiClient';
+import { ApiError, apiClient } from '../services/apiClient';
 import { offlineVault, OutboxMutation } from '../services/indexedDbService';
 import {
-  calendarRange, CoverageRow, mapPlanningShift, mergeOutboxShifts, PlanningFinding,
-  planningApi, planningErrorDetails, PlanningShift, SchedulePeriod, ShiftAssignment,
-  PlanningRule, PlanningRuleCode, RuleProfileRow, ShiftSwap, shiftCalendarDate
+  AbsenceReportRow, calendarRange, CoverRequest, CoverageRow, mapPlanningShift, mergeOutboxShifts,
+  PlanningFinding, planningApi, planningErrorDetails, PlanningShift, QualificationReportRow,
+  RuleProfileRow, SchedulePeriod, ShiftAssignment, ShiftSwap, ShiftTemplate, shiftCalendarDate,
+  PlanningRule, PlanningRuleCode, WorkHoursRow, StaffingSuggestion, ActualTimeRecord, ActualTimeHistoryEntry,
+  PlanningNotification
 } from '../services/planningService';
 
 type CalendarView = 'month' | 'week' | 'day';
@@ -48,13 +50,30 @@ interface RuleProfileInput extends RuleVersionInput {
   scope: Record<string, unknown>;
 }
 
+interface TemplateFormState {
+  siteId: string;
+  name: string;
+  startTime: string;
+  endTime: string;
+  breakMinutes: number;
+  requiredStaffCount: number;
+  requiredQualification: string;
+  effectiveFrom: string;
+  effectiveUntil: string;
+  frequency: 'DAILY' | 'WEEKLY';
+  interval: number;
+  weekdays: number[];
+}
+
 const ruleCodeLabels: Record<PlanningRuleCode, string> = {
   minimum_rest_minutes: 'Mindest-Ruhezeit (Minuten)',
   maximum_shift_minutes: 'Maximale Schichtdauer (Minuten)',
   maximum_weekly_minutes: 'Maximale Wochenarbeitszeit (Minuten)',
+  overtime_threshold_weekly_minutes: 'Überstundenschwelle je Woche (Minuten)',
   minimum_break_minutes: 'Mindestpause (Minuten)',
   break_after_minutes: 'Pause spätestens nach (Minuten)',
   disallowed_weekdays: 'Nicht erlaubte Wochentage (0=So bis 6=Sa)',
+  weekend_weekdays: 'Wochenendtage (0=So bis 6=Sa)',
   sunday_work_allowed: 'Sonntagsarbeit erlaubt',
   holiday_dates: 'Feiertage (lokale Datumswerte)',
   night_window_start_minute: 'Beginn Nachtzeit (Minuten ab Mitternacht)',
@@ -66,6 +85,7 @@ const numericRuleCodes = new Set<PlanningRuleCode>([
   'minimum_rest_minutes',
   'maximum_shift_minutes',
   'maximum_weekly_minutes',
+  'overtime_threshold_weekly_minutes',
   'minimum_break_minutes',
   'break_after_minutes',
   'night_window_start_minute',
@@ -129,9 +149,43 @@ function toShiftFormPayload(form: ShiftFormState): Record<string, unknown> {
   };
 }
 
+function newClientMutationId(): string {
+  if (!globalThis.crypto?.randomUUID) throw new Error('Der Browser kann keine sichere Mutations-ID erzeugen.');
+  return globalThis.crypto.randomUUID();
+}
+
+function reportValue(value: number | null | undefined, status?: string): string {
+  if (value == null) return `Nicht verfügbar${status ? ` (${status})` : ''}`;
+  return `${value}${status ? ` (${status})` : ''}`;
+}
+
+function reportVariance(value: number | null | undefined, status?: string): string {
+  if (value == null) return reportValue(null, status);
+  return `${value > 0 ? '+' : ''}${value}${status ? ` (${status})` : ''}`;
+}
+
+function reportSources(sources: unknown[] | undefined): string {
+  return sources?.length ? sources.map(source => typeof source === 'string' ? source : JSON.stringify(source)).join('; ') : 'Keine Quelle gemeldet';
+}
+
+function planningCacheRangeWarning(
+  cached: { rangeFrom?: string; rangeTo?: string },
+  requested: { from: string; to: string }
+): string {
+  if (!cached.rangeFrom || !cached.rangeTo) {
+    return 'Der Offline-Cache enthält keinen gespeicherten Datumsbereich. Eine leere Ansicht bestätigt nicht, dass im angeforderten Zeitraum keine Schichten bestehen.';
+  }
+  if (requested.from >= cached.rangeFrom && requested.to <= cached.rangeTo) return '';
+  return `Der Offline-Cache enthält nur den zuletzt geladenen Bereich ${cached.rangeFrom} bis ${cached.rangeTo}; ${requested.from} bis ${requested.to} ist nicht vollständig enthalten. Leere Bereiche außerhalb des Caches bestätigen nicht, dass dort keine Schichten bestehen.`;
+}
+
 export const RosterModule: React.FC = () => {
   const store = useSecurityStore();
   const { currentTenantId, currentUserId, authUser, sites, clients, employees, isOnline, syncQueue, isSyncing, lastSyncTime } = store;
+  const identityKey = JSON.stringify([currentTenantId, currentUserId]);
+  const identityKeyRef = useRef(identityKey);
+  const detailsRequestIdRef = useRef(0);
+  const isCurrentIdentity = (requestIdentity: string) => identityKeyRef.current === requestIdentity;
   const permissions = authUser?.permissions ?? [];
   const canRead = permissions.includes('planning:read');
   const canManage = permissions.includes('planning:manage');
@@ -139,6 +193,10 @@ export const RosterModule: React.FC = () => {
   const canReport = permissions.includes('planning:reports:read');
   const canRequestSwap = permissions.includes('planning:swaps:manage');
   const canDecideSwap = permissions.includes('planning:swaps:approve');
+  const canRequestCover = permissions.includes('planning:covers:manage');
+  const canDecideCover = permissions.includes('planning:covers:approve');
+  const canManageActuals = permissions.includes('planning:actuals:manage');
+  const canApproveActuals = permissions.includes('planning:actuals:approve');
   const canManageRules = permissions.includes('planning:rules:manage');
   const canApproveRules = permissions.includes('planning:rules:approve');
 
@@ -174,27 +232,65 @@ export const RosterModule: React.FC = () => {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Berlin'
   });
   const [templateOpen, setTemplateOpen] = useState(false);
+  const [templates, setTemplates] = useState<ShiftTemplate[]>([]);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState('');
+  const [showInactiveTemplates, setShowInactiveTemplates] = useState(false);
+  const [templateEditingId, setTemplateEditingId] = useState('');
+  const [templateEditForm, setTemplateEditForm] = useState<TemplateFormState | null>(null);
   const [templateForm, setTemplateForm] = useState({
-    name: 'Wiederkehrender Dienst',
+    name: '',
     frequency: 'WEEKLY' as 'DAILY' | 'WEEKLY',
     interval: 1,
     weekdays: [1, 2, 3, 4, 5],
     siteId: '',
-    startTime: '08:00',
-    endTime: '16:00',
-    requiredQualification: 'Unterrichtung § 34a GewO'
+    startTime: '',
+    endTime: '',
+    breakMinutes: 0,
+    requiredStaffCount: 1,
+    effectiveFrom: '',
+    effectiveUntil: '',
+    requiredQualification: ''
   });
   const [detailsShift, setDetailsShift] = useState<PlanningShift | null>(null);
+  const [staffingSuggestions, setStaffingSuggestions] = useState<StaffingSuggestion | null>(null);
+  const [actualCurrent, setActualCurrent] = useState<ActualTimeRecord | null>(null);
+  const [actualHistory, setActualHistory] = useState<ActualTimeHistoryEntry[]>([]);
+  const [actualLoading, setActualLoading] = useState(false);
   const [assignments, setAssignments] = useState<ShiftAssignment[]>([]);
   const [findings, setFindings] = useState<PlanningFinding[]>([]);
   const [swaps, setSwaps] = useState<ShiftSwap[]>([]);
+  const [shiftCoverRequests, setShiftCoverRequests] = useState<CoverRequest[]>([]);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [assignmentEmployeeId, setAssignmentEmployeeId] = useState('');
   const [swapEmployeeId, setSwapEmployeeId] = useState('');
   const [swapReason, setSwapReason] = useState('');
+  const [coverEmployeeId, setCoverEmployeeId] = useState('');
+  const [coverReason, setCoverReason] = useState('');
+  const [coverDecisionEmployeeIds, setCoverDecisionEmployeeIds] = useState<Record<string, string>>({});
+  const [coverRequestMutationIds, setCoverRequestMutationIds] = useState<Record<string, string>>({});
+  const [coverDecisionMutationIds, setCoverDecisionMutationIds] = useState<Record<string, string>>({});
+  const [coverListOpen, setCoverListOpen] = useState(false);
+  const [allCoverRequests, setAllCoverRequests] = useState<CoverRequest[]>([]);
+  const [coverListLoading, setCoverListLoading] = useState(false);
+  const [actualForm, setActualForm] = useState({
+    employeeId: '',
+    actualStartAt: '',
+    actualEndAt: '',
+    breakMinutes: 0,
+    expectedVersion: 0,
+    notes: ''
+  });
+  const [actualSavedRevision, setActualSavedRevision] = useState<number | null>(null);
+  const [actualMutationIds, setActualMutationIds] = useState<Record<string, string>>({});
+  const [planningNotifications, setPlanningNotifications] = useState<PlanningNotification[]>([]);
+  const [planningNotificationsOpen, setPlanningNotificationsOpen] = useState(false);
+  const [planningNotificationsLoading, setPlanningNotificationsLoading] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
-  const [workHours, setWorkHours] = useState<Record<string, any>[]>([]);
+  const [workHours, setWorkHours] = useState<WorkHoursRow[]>([]);
   const [reportCoverage, setReportCoverage] = useState<CoverageRow[]>([]);
+  const [reportQualifications, setReportQualifications] = useState<QualificationReportRow[]>([]);
+  const [reportAbsences, setReportAbsences] = useState<AbsenceReportRow[]>([]);
   const [reportLoading, setReportLoading] = useState(false);
   const [ruleProfilesOpen, setRuleProfilesOpen] = useState(false);
   const [ruleProfiles, setRuleProfiles] = useState<RuleProfileRow[]>([]);
@@ -202,14 +298,112 @@ export const RosterModule: React.FC = () => {
   const [ruleProfilesError, setRuleProfilesError] = useState('');
   const [ruleProfilesMessage, setRuleProfilesMessage] = useState('');
 
+  useLayoutEffect(() => {
+    identityKeyRef.current = identityKey;
+    detailsRequestIdRef.current += 1;
+    setShifts([]);
+    setPeriods([]);
+    setCoverage([]);
+    setOutbox([]);
+    setUsingCache(false);
+    setCachedAt(undefined);
+    setLoadError('');
+    setCacheWarning('');
+    setActionError('');
+    setActionMessage('');
+    setSelectedPeriodId('');
+    setFilterSiteId('');
+    setFilterClientId('');
+    setFilterEmployeeId('');
+    setFilterStatus('');
+    setSearch('');
+    setEditor(null);
+    setForm(defaultForm(localDate(new Date())));
+    setSaving(false);
+    setPeriodFormOpen(false);
+    setPeriodForm({
+      name: '',
+      dateFrom: range.from,
+      dateTo: range.to,
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Berlin'
+    });
+    setTemplateOpen(false);
+    setTemplates([]);
+    setTemplatesLoading(false);
+    setSelectedTemplateId('');
+    setShowInactiveTemplates(false);
+    setTemplateEditingId('');
+    setTemplateEditForm(null);
+    setTemplateForm({
+      name: '',
+      frequency: 'WEEKLY',
+      interval: 1,
+      weekdays: [1, 2, 3, 4, 5],
+      siteId: '',
+      startTime: '',
+      endTime: '',
+      breakMinutes: 0,
+      requiredStaffCount: 1,
+      effectiveFrom: '',
+      effectiveUntil: '',
+      requiredQualification: ''
+    });
+    setDetailsShift(null);
+    setStaffingSuggestions(null);
+    setActualCurrent(null);
+    setActualHistory([]);
+    setActualLoading(false);
+    setAssignments([]);
+    setFindings([]);
+    setSwaps([]);
+    setShiftCoverRequests([]);
+    setDetailsLoading(false);
+    setAssignmentEmployeeId('');
+    setSwapEmployeeId('');
+    setSwapReason('');
+    setCoverEmployeeId('');
+    setCoverReason('');
+    setCoverDecisionEmployeeIds({});
+    setCoverRequestMutationIds({});
+    setCoverDecisionMutationIds({});
+    setCoverListOpen(false);
+    setAllCoverRequests([]);
+    setCoverListLoading(false);
+    setActualForm({
+      employeeId: '',
+      actualStartAt: '',
+      actualEndAt: '',
+      breakMinutes: 0,
+      expectedVersion: 0,
+      notes: ''
+    });
+    setActualSavedRevision(null);
+    setActualMutationIds({});
+    setPlanningNotifications([]);
+    setPlanningNotificationsOpen(false);
+    setPlanningNotificationsLoading(false);
+    setReportOpen(false);
+    setWorkHours([]);
+    setReportCoverage([]);
+    setReportQualifications([]);
+    setReportAbsences([]);
+    setReportLoading(false);
+    setRuleProfilesOpen(false);
+    setRuleProfiles([]);
+    setRuleProfilesLoading(false);
+    setRuleProfilesError('');
+    setRuleProfilesMessage('');
+  }, [identityKey]);
+
   const loadOutbox = useCallback(async () => {
     const items = await offlineVault.getOutbox(currentTenantId, 'shift');
     const userItems = items.filter(item => item.userId === currentUserId);
-    setOutbox(userItems);
+    if (identityKeyRef.current === identityKey) setOutbox(userItems);
     return userItems;
-  }, [currentTenantId, currentUserId]);
+  }, [currentTenantId, currentUserId, identityKey]);
 
   const refresh = useCallback(async () => {
+    const requestIdentity = identityKey;
     if (!canRead) {
       setLoadError('Für die Dienstplanung fehlt die Berechtigung „planning:read“.');
       setShifts([]);
@@ -228,11 +422,14 @@ export const RosterModule: React.FC = () => {
           planningApi.listShifts(range.from, range.to),
           planningApi.listPeriods()
         ]);
+        if (!isCurrentIdentity(requestIdentity)) return;
         if (canReport) {
           try {
             const report = await planningApi.coverage(range.from, range.to);
+            if (!isCurrentIdentity(requestIdentity)) return;
             setCoverage(report);
           } catch (error) {
+            if (!isCurrentIdentity(requestIdentity)) return;
             setCoverage([]);
             setCacheWarning(`Besetzungsbedarf konnte über coverage nicht geladen werden: ${error instanceof Error ? error.message : 'unbekannter Fehler'}`);
           }
@@ -241,25 +438,31 @@ export const RosterModule: React.FC = () => {
         }
         const mapped = rawShifts.map(row => mapPlanningShift(row, currentTenantId, employees));
         try {
-          await offlineVault.savePlanningCache(currentTenantId, currentUserId, mapped, loadedPeriods);
+          await offlineVault.savePlanningCache(currentTenantId, currentUserId, mapped, loadedPeriods, range);
+          if (!isCurrentIdentity(requestIdentity)) return;
           setCachedAt(new Date().toISOString());
         } catch (error) {
+          if (!isCurrentIdentity(requestIdentity)) return;
           setCacheWarning(`Der Onlineplan ist geladen, konnte aber nicht offline gespeichert werden: ${error instanceof Error ? error.message : 'Speicherfehler'}`);
         }
+        if (!isCurrentIdentity(requestIdentity)) return;
         setPeriods(loadedPeriods);
         setUsingCache(false);
       } else {
         const cached = await offlineVault.getPlanningCache(currentTenantId, currentUserId);
+        if (!isCurrentIdentity(requestIdentity)) return;
         if (!cached) throw new Error('Für diesen Benutzer und Mandanten ist noch kein Dienstplancache vorhanden.');
         rawShifts = cached.shifts;
         loadedPeriods = cached.periods;
         setPeriods(loadedPeriods);
         setCachedAt(cached.cachedAt);
+        setCacheWarning(planningCacheRangeWarning(cached, range));
         setUsingCache(true);
         cacheIsActive = true;
       }
 
       const queued = await loadOutbox();
+      if (!isCurrentIdentity(requestIdentity)) return;
       const mapped = rawShifts.map(row =>
         'planningStatus' in row ? row as PlanningShift : mapPlanningShift(row, currentTenantId, employees)
       );
@@ -280,32 +483,37 @@ export const RosterModule: React.FC = () => {
       }
       setLoadError('');
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       if (isOnline) {
         try {
           const cached = await offlineVault.getPlanningCache(currentTenantId, currentUserId);
+          if (!isCurrentIdentity(requestIdentity)) return;
           if (cached) {
             const mapped = cached.shifts.map(row =>
               'planningStatus' in row ? row as PlanningShift : mapPlanningShift(row, currentTenantId, employees)
             ).filter(shift => shift.date >= range.from && shift.date <= range.to);
             const queued = await loadOutbox();
+            if (!isCurrentIdentity(requestIdentity)) return;
             setShifts(mergeOutboxShifts(mapped, queued, currentTenantId, employees, sites));
             setPeriods(cached.periods);
             setCachedAt(cached.cachedAt);
+            setCacheWarning(planningCacheRangeWarning(cached, range));
             setUsingCache(true);
             setLoadError(`Serverdaten konnten nicht aktualisiert werden. Offline-Cache vom ${new Date(cached.cachedAt).toLocaleString()} wird angezeigt.`);
           } else {
             setLoadError(error instanceof Error ? error.message : 'Dienstplandaten konnten nicht geladen werden.');
           }
         } catch (cacheError) {
+          if (!isCurrentIdentity(requestIdentity)) return;
           setLoadError(`${error instanceof Error ? error.message : 'Dienstplandaten konnten nicht geladen werden.'} Offline-Cache: ${cacheError instanceof Error ? cacheError.message : 'Lesefehler'}`);
         }
       } else {
         setLoadError(error instanceof Error ? error.message : 'Dienstplan-Cache konnte nicht geladen werden.');
       }
     } finally {
-      setLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setLoading(false);
     }
-  }, [canRead, canReport, currentTenantId, currentUserId, employees, isOnline, loadOutbox, range.from, range.to, selectedPeriodId, sites]);
+  }, [canRead, canReport, currentTenantId, currentUserId, employees, identityKey, isOnline, loadOutbox, range.from, range.to, selectedPeriodId, sites]);
 
   useEffect(() => {
     void refresh();
@@ -316,6 +524,7 @@ export const RosterModule: React.FC = () => {
   }, [isOnline]);
 
   const loadRuleProfiles = async () => {
+    const requestIdentity = identityKey;
     if (!canRead) return;
     if (!isOnline) {
       setRuleProfilesError('Regelprofile werden aus Sicherheitsgründen nicht offline gespeichert oder freigegeben.');
@@ -324,11 +533,14 @@ export const RosterModule: React.FC = () => {
     setRuleProfilesLoading(true);
     setRuleProfilesError('');
     try {
-      setRuleProfiles(await planningApi.listRuleProfiles());
+      const profiles = await planningApi.listRuleProfiles();
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setRuleProfiles(profiles);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setRuleProfilesError(planningErrorDetails(error).message);
     } finally {
-      setRuleProfilesLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setRuleProfilesLoading(false);
     }
   };
 
@@ -362,6 +574,22 @@ export const RosterModule: React.FC = () => {
     try {
       await planningApi.approveRuleProfileVersion(profile.id, versionId);
       setRuleProfilesMessage('Regelprofilrevision serverseitig freigegeben.');
+      await loadRuleProfiles();
+      return true;
+    } catch (error) {
+      const detail = planningErrorDetails(error);
+      setRuleProfilesError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+      return false;
+    }
+  };
+
+  const setRuleProfileActive = async (profile: RuleProfileRow): Promise<boolean> => {
+    if (!canManageRules || !isOnline) return false;
+    setRuleProfilesError('');
+    setRuleProfilesMessage('');
+    try {
+      await planningApi.setRuleProfileActive(profile.id, !profile.active);
+      setRuleProfilesMessage(`Regelprofil ${profile.active ? 'deaktiviert' : 'aktiviert'}.`);
       await loadRuleProfiles();
       return true;
     } catch (error) {
@@ -407,6 +635,7 @@ export const RosterModule: React.FC = () => {
   const handleSaveShift = async (event: FormEvent) => {
     event.preventDefault();
     if (!canManage || !editor) return;
+    const requestIdentity = identityKey;
     setSaving(true);
     setActionError('');
     setActionMessage('');
@@ -451,6 +680,7 @@ export const RosterModule: React.FC = () => {
             payload,
             baseVersion: shift.revisionVersion ?? 1
           });
+          if (!isCurrentIdentity(requestIdentity)) return;
           const updatedShift: PlanningShift = {
             ...shift,
             siteId: form.siteId,
@@ -469,6 +699,7 @@ export const RosterModule: React.FC = () => {
             shifts: state.shifts.map(item => item.id === shift.id ? updatedShift : item)
           }));
           await loadOutbox();
+          if (!isCurrentIdentity(requestIdentity)) return;
           setActionMessage('Änderung lokal vorgemerkt. Sie ist noch nicht servergeprüft oder veröffentlicht.');
           setEditor(null);
           return;
@@ -494,6 +725,7 @@ export const RosterModule: React.FC = () => {
           payload,
           baseVersion: 1
         });
+        if (!isCurrentIdentity(requestIdentity)) return;
         const site = sites.find(item => item.id === form.siteId);
         const localShift: PlanningShift = {
           id: mutationId,
@@ -516,6 +748,7 @@ export const RosterModule: React.FC = () => {
         setShifts(current => [...current.filter(shift => shift.id !== mutationId), localShift]);
         useSecurityStore.setState(state => ({ shifts: [localShift, ...state.shifts] }));
         await loadOutbox();
+        if (!isCurrentIdentity(requestIdentity)) return;
         setActionMessage('Entwurf lokal vorgemerkt. Noch nicht servergeprüft, zugewiesen oder veröffentlicht.');
         setEditor(null);
         return;
@@ -533,6 +766,7 @@ export const RosterModule: React.FC = () => {
             employeeId: form.employeeId || undefined,
             clientMutationId: crypto.randomUUID()
           });
+          if (!isCurrentIdentity(requestIdentity)) return;
           const mapped = mapPlanningShift(result.shift, currentTenantId, employees);
           const site = sites.find(item => item.id === mapped.siteId);
           created.push({ ...mapped, siteName: site?.name ?? mapped.siteName });
@@ -545,6 +779,7 @@ export const RosterModule: React.FC = () => {
           ...toShiftFormPayload(form),
           revisionVersion: editor.shift.revisionVersion ?? 1
         });
+        if (!isCurrentIdentity(requestIdentity)) return;
         const updated = mapPlanningShift(result.shift, currentTenantId, employees);
         setShifts(current => current.map(shift => shift.id === updated.id ? updated : shift));
         useSecurityStore.setState(state => ({ shifts: state.shifts.map(shift => shift.id === updated.id ? updated : shift) }));
@@ -553,25 +788,29 @@ export const RosterModule: React.FC = () => {
       setEditor(null);
       void refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setFindings(detail.findings);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
   const deleteShift = async (shift: PlanningShift) => {
     if (!canManage || !isOnline || shift.planningStatus === 'published') return;
+    const requestIdentity = identityKey;
     if (!window.confirm(`Schicht ${shift.date} ${shift.startTime}–${shift.endTime} endgültig löschen?`)) return;
     setActionError('');
     try {
       await planningApi.deleteShift(shift.id, shift.revisionVersion ?? 1);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setShifts(current => current.filter(item => item.id !== shift.id));
       useSecurityStore.setState(state => ({ shifts: state.shifts.filter(item => item.id !== shift.id) }));
       setActionMessage('Schicht wurde gelöscht.');
       void refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
     }
@@ -580,80 +819,260 @@ export const RosterModule: React.FC = () => {
   const createPeriod = async (event: FormEvent) => {
     event.preventDefault();
     if (!canManage || !isOnline) return;
+    const requestIdentity = identityKey;
     setSaving(true);
     setActionError('');
     try {
       const period = await planningApi.createPeriod(periodForm);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setPeriods(current => [period, ...current]);
       setSelectedPeriodId(period.id);
       setPeriodFormOpen(false);
       setActionMessage('Dienstplanperiode als Entwurf angelegt.');
       void refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
   const publishPeriod = async () => {
     if (!canPublish || !activePeriod || !isOnline) return;
+    const requestIdentity = identityKey;
     if (!window.confirm(`Periode „${activePeriod.name}“ serverseitig neu prüfen und veröffentlichen? Die Veröffentlichung ist verbindlich und nicht offline verfügbar.`)) return;
     setActionError('');
     setFindings([]);
     setSaving(true);
     try {
       await planningApi.publishPeriod(activePeriod.id, activePeriod.revision_version);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionMessage('Periode wurde serverseitig validiert und veröffentlicht.');
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
     }
   };
 
-  const applyTemplate = async (event: FormEvent) => {
+  const loadTemplates = async (includeInactive = showInactiveTemplates) => {
+    const requestIdentity = identityKey;
+    if (!canRead || !isOnline) {
+      setTemplates([]);
+      return;
+    }
+    setTemplatesLoading(true);
+    setActionError('');
+    try {
+      const rows = await planningApi.listTemplates(undefined, includeInactive);
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setTemplates(rows);
+      setSelectedTemplateId(current => current && rows.some(template => template.id === current)
+        ? current : rows[0]?.id ?? '');
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionError(planningErrorDetails(error).message);
+    } finally {
+      if (isCurrentIdentity(requestIdentity)) setTemplatesLoading(false);
+    }
+  };
+
+  const beginTemplateEdit = (template: ShiftTemplate) => {
+    setTemplateEditingId(template.id);
+    setTemplateEditForm({
+      siteId: template.site_id,
+      name: template.name,
+      startTime: template.local_start_time.slice(0, 5),
+      endTime: template.local_end_time.slice(0, 5),
+      breakMinutes: template.break_minutes,
+      requiredStaffCount: template.required_staff_count,
+      effectiveFrom: template.effective_from?.slice(0, 10) ?? '',
+      effectiveUntil: template.effective_until?.slice(0, 10) ?? '',
+      requiredQualification: template.required_qualification,
+      frequency: template.recurrence.frequency,
+      interval: template.recurrence.interval,
+      weekdays: template.recurrence.weekdays ?? []
+    });
+  };
+
+  const saveTemplateEdit = async (event: FormEvent, template: ShiftTemplate) => {
     event.preventDefault();
-    if (!canManage || !isOnline || !activePeriod || !templateForm.siteId) return;
+    if (!templateEditForm || !canManage || !isOnline) return;
+    if (templateEditForm.frequency === 'WEEKLY' && templateEditForm.weekdays.length === 0) {
+      setActionError('Wöchentliche Vorlagen benötigen mindestens einen Wochentag.');
+      return;
+    }
+    const requestIdentity = identityKey;
     setSaving(true);
     setActionError('');
     try {
-      const template = await planningApi.createTemplate({
+      await planningApi.updateTemplate(template.id, {
+        expectedVersion: template.revision_version,
+        ...templateEditForm,
+        effectiveFrom: templateEditForm.effectiveFrom || null,
+        effectiveUntil: templateEditForm.effectiveUntil || null,
+        weekdays: templateEditForm.frequency === 'WEEKLY' ? templateEditForm.weekdays : undefined
+      });
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setTemplateEditingId('');
+      setTemplateEditForm(null);
+      setActionMessage('Vorlage mit ihrer aktuellen Revision gespeichert.');
+      await loadTemplates(showInactiveTemplates);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    } finally {
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
+    }
+  };
+
+  const toggleTemplateActive = async (template: ShiftTemplate) => {
+    if (!canManage || !isOnline) return;
+    const requestIdentity = identityKey;
+    setSaving(true);
+    setActionError('');
+    try {
+      await planningApi.updateTemplate(template.id, {
+        expectedVersion: template.revision_version,
+        active: !template.active
+      });
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionMessage(`Vorlage ${template.active ? 'deaktiviert' : 'aktiviert'}.`);
+      await loadTemplates(showInactiveTemplates);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    } finally {
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
+    }
+  };
+
+  const createTemplate = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!canManage || !isOnline || !templateForm.siteId) return;
+    const requestIdentity = identityKey;
+    if (templateForm.frequency === 'WEEKLY' && templateForm.weekdays.length === 0) {
+      setActionError('Wöchentliche Vorlagen benötigen mindestens einen Wochentag.');
+      return;
+    }
+    setSaving(true);
+    setActionError('');
+    try {
+      await planningApi.createTemplate({
         siteId: templateForm.siteId,
         name: templateForm.name,
         startTime: templateForm.startTime,
         endTime: templateForm.endTime,
+        breakMinutes: templateForm.breakMinutes,
+        requiredStaffCount: templateForm.requiredStaffCount,
+        effectiveFrom: templateForm.effectiveFrom || undefined,
+        effectiveUntil: templateForm.effectiveUntil || undefined,
         requiredQualification: templateForm.requiredQualification,
         frequency: templateForm.frequency,
         interval: templateForm.interval,
         weekdays: templateForm.frequency === 'WEEKLY' ? templateForm.weekdays : undefined
       });
-      const applied = await planningApi.applyTemplate(template.id, {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionMessage('Vorlage serverseitig erstellt. Wählen Sie eine Vorlage aus der Liste aus, um sie auf eine Entwurfsperiode anzuwenden.');
+      await loadTemplates(showInactiveTemplates);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    } finally {
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
+    }
+  };
+
+  const applyTemplateById = async (templateId: string) => {
+    if (!canManage || !isOnline || !activePeriod || !templateId) return;
+    const requestIdentity = identityKey;
+    setSaving(true);
+    setActionError('');
+    try {
+      const applied = await planningApi.applyTemplate(templateId, {
         dateFrom: activePeriod.date_from.slice(0, 10),
         dateTo: activePeriod.date_to.slice(0, 10),
         schedulePeriodId: activePeriod.id
       });
-      setTemplateOpen(false);
-      setActionMessage(`${applied.occurrences.filter((item: any) => item.shiftId).length} Entwürfe (mit Mindestbesetzung 1) anhand der Vorlage erstellt. Die endgültige Prüfung bleibt der Veröffentlichung vorbehalten.`);
+      if (!isCurrentIdentity(requestIdentity)) return;
+      const created = applied.occurrences.filter(item => item.shiftId).length;
+      const rejected = applied.occurrences.filter(item => item.status === 'REJECTED').length;
+      setActionMessage(`${created} Schichtentwurf/Entwürfe erstellt; ${rejected} Vorkommen serverseitig abgelehnt. Die endgültige Prüfung bleibt der Veröffentlichung vorbehalten.`);
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
     } finally {
-      setSaving(false);
+      if (isCurrentIdentity(requestIdentity)) setSaving(false);
+    }
+  };
+
+  const loadActualTimeForEmployee = async (shiftId: string, employeeId: string, requestId: number) => {
+    if (!employeeId) {
+      setActualCurrent(null);
+      setActualHistory([]);
+      setActualLoading(false);
+      return;
+    }
+    const requestIdentity = identityKey;
+    setActualLoading(true);
+    try {
+      const result = await planningApi.getActualTime(shiftId, employeeId);
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== requestId) return;
+      setActualCurrent(result.current);
+      setActualHistory(result.history);
+      setActualForm(current => ({
+        ...current,
+        employeeId,
+        actualStartAt: result.current?.actual_start_at ?? '',
+        actualEndAt: result.current?.actual_end_at ?? '',
+        breakMinutes: result.current?.break_minutes ?? current.breakMinutes,
+        expectedVersion: result.current?.revision_version ?? 0,
+        notes: result.current?.notes ?? ''
+      }));
+      setActualSavedRevision(result.current?.revision_version ?? null);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== requestId) return;
+      setActionError(planningErrorDetails(error).message);
+    } finally {
+      if (isCurrentIdentity(requestIdentity) && detailsRequestIdRef.current === requestId) setActualLoading(false);
     }
   };
 
   const openDetails = async (shift: PlanningShift) => {
+    const requestIdentity = identityKey;
+    const detailsRequestId = ++detailsRequestIdRef.current;
     setDetailsShift(shift);
+    setStaffingSuggestions(null);
+    setActualCurrent(null);
+    setActualHistory([]);
+    setActualLoading(false);
     setAssignments([]);
     setFindings([]);
     setSwaps([]);
+    setShiftCoverRequests([]);
     setAssignmentEmployeeId('');
     setSwapEmployeeId('');
+    setCoverEmployeeId('');
+    setCoverReason('');
+    setActualSavedRevision(null);
+    setActualForm({
+      employeeId: shift.employeeId ?? '',
+      actualStartAt: '',
+      actualEndAt: '',
+      breakMinutes: shift.breakMinutes,
+      expectedVersion: 0,
+      notes: ''
+    });
     setActionError('');
     setActionMessage('');
     setDetailsLoading(true);
@@ -662,31 +1081,45 @@ export const RosterModule: React.FC = () => {
         setActionMessage('Lokaler Entwurf: Serverzuweisungen und Regelbefunde sind offline nicht verfügbar.');
         return;
       }
-      const [assignmentRows, findingRows, swapRows] = await Promise.all([
+      const [assignmentRows, findingRows, swapRows, coverRows, suggestions] = await Promise.all([
         planningApi.listAssignments(shift.id),
         planningApi.listFindings(shift.id),
-        planningApi.listSwaps()
+        planningApi.listSwaps(),
+        planningApi.coverRequests(undefined, shift.id),
+        planningApi.staffingSuggestions(shift.id)
       ]);
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
       setAssignments(assignmentRows);
+      const currentActualEmployee = assignmentRows.some(item =>
+        item.status === 'assigned' && item.employee_id === shift.employeeId
+      ) ? shift.employeeId : assignmentRows.find(item => item.status === 'assigned')?.employee_id ?? '';
+      setActualForm(current => ({ ...current, employeeId: currentActualEmployee }));
       setFindings(findingRows);
       setSwaps(swapRows.filter(item => item.shift_id === shift.id));
+      setShiftCoverRequests(coverRows);
+      setStaffingSuggestions(suggestions);
+      await loadActualTimeForEmployee(shift.id, currentActualEmployee, detailsRequestId);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setDetailsLoading(false);
+      if (isCurrentIdentity(requestIdentity) && detailsRequestIdRef.current === detailsRequestId) setDetailsLoading(false);
     }
   };
 
   const assignEmployee = async (employeeId: string) => {
     if (!detailsShift || !canManage || !isOnline) return;
+    const requestIdentity = identityKey;
     setActionError('');
     setFindings([]);
     try {
       const result = await planningApi.assignEmployee(detailsShift.id, employeeId, detailsShift.revisionVersion ?? 1);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionMessage('Zuweisung serverseitig geprüft und gespeichert.');
       await openDetails({ ...detailsShift, revisionVersion: result.revisionVersion });
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
@@ -696,6 +1129,7 @@ export const RosterModule: React.FC = () => {
   const requestSwap = async (event: FormEvent) => {
     event.preventDefault();
     if (!detailsShift || !canRequestSwap || !isOnline || !swapEmployeeId) return;
+    const requestIdentity = identityKey;
     const requesterId = detailsShift.employeeId || assignments.find(item => item.status === 'assigned')?.employee_id;
     if (!requesterId) {
       setActionError('Ein Diensttausch setzt eine bestehende Zuweisung voraus.');
@@ -708,11 +1142,13 @@ export const RosterModule: React.FC = () => {
         expectedShiftVersion: detailsShift.revisionVersion ?? 1,
         reason: swapReason
       });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setSwapReason('');
       setSwapEmployeeId('');
       setActionMessage('Diensttausch wurde zur Entscheidung eingereicht.');
       await openDetails(detailsShift);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
@@ -721,35 +1157,248 @@ export const RosterModule: React.FC = () => {
 
   const decideSwap = async (swap: ShiftSwap, decision: 'approved' | 'rejected') => {
     if (!canDecideSwap || !isOnline) return;
+    const requestIdentity = identityKey;
     if (!window.confirm(`Diensttausch ${decision === 'approved' ? 'genehmigen' : 'ablehnen'}?`)) return;
     try {
       await planningApi.decideSwap(swap.id, { decision, expectedVersion: swap.revision_version });
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionMessage(`Diensttausch ${decision === 'approved' ? 'genehmigt' : 'abgelehnt'}.`);
       if (detailsShift) await openDetails(detailsShift);
       await refresh();
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       const detail = planningErrorDetails(error);
       setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
       setFindings(detail.findings);
     }
   };
 
+  const requestCover = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!detailsShift || !canRequestCover || !isOnline) return;
+    const requestIdentity = identityKey;
+    const shiftId = detailsShift.id;
+    setActionError('');
+    try {
+      const mutationId = coverRequestMutationIds[shiftId] ?? newClientMutationId();
+      setCoverRequestMutationIds(current => ({ ...current, [shiftId]: mutationId }));
+      await planningApi.createCoverRequest(shiftId, {
+        requestedEmployeeId: coverEmployeeId || undefined,
+        expectedShiftVersion: detailsShift.revisionVersion ?? 1,
+        clientMutationId: mutationId,
+        reason: coverReason.trim()
+      });
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setCoverRequestMutationIds(current => {
+        const next = { ...current };
+        delete next[shiftId];
+        return next;
+      });
+      setCoverEmployeeId('');
+      setCoverReason('');
+      setActionMessage('Vertretungsbedarf wurde serverseitig eingereicht.');
+      await openDetails(detailsShift);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      if (!(error instanceof ApiError) || !error.isNetworkError) {
+        setCoverRequestMutationIds(current => {
+          const next = { ...current };
+          delete next[shiftId];
+          return next;
+        });
+      }
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    }
+  };
+
+  const decideCover = async (request: CoverRequest, decision: 'approved' | 'rejected') => {
+    if (!canDecideCover || !isOnline) return;
+    const requestIdentity = identityKey;
+    const employeeId = request.requested_employee_id ?? coverDecisionEmployeeIds[request.id];
+    if (decision === 'approved' && !employeeId) {
+      setActionError('Für die Genehmigung muss eine Vertretung ausgewählt werden.');
+      return;
+    }
+    setActionError('');
+    try {
+      const mutationId = coverDecisionMutationIds[request.id] ?? newClientMutationId();
+      setCoverDecisionMutationIds(current => ({ ...current, [request.id]: mutationId }));
+      await planningApi.decideCoverRequest(request.id, {
+        decision,
+        expectedVersion: request.revision_version,
+        employeeId: decision === 'approved' ? employeeId : undefined,
+        clientMutationId: mutationId
+      });
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setCoverDecisionMutationIds(current => {
+        const next = { ...current };
+        delete next[request.id];
+        return next;
+      });
+      setActionMessage(`Vertretungsantrag ${decision === 'approved' ? 'genehmigt' : 'abgelehnt'}.`);
+      const refreshed = await planningApi.coverRequests();
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setAllCoverRequests(refreshed);
+      if (detailsShift?.id === request.shift_id) await openDetails(detailsShift);
+      await refresh();
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      if (!(error instanceof ApiError) || !error.isNetworkError) {
+        setCoverDecisionMutationIds(current => {
+          const next = { ...current };
+          delete next[request.id];
+          return next;
+        });
+      }
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    }
+  };
+
+  const loadCoverRequests = async () => {
+    const requestIdentity = identityKey;
+    if (!canRead || !isOnline) return;
+    setCoverListLoading(true);
+    setActionError('');
+    try {
+      const requests = await planningApi.coverRequests();
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setAllCoverRequests(requests);
+      setCoverListOpen(true);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionError(planningErrorDetails(error).message);
+    } finally {
+      if (isCurrentIdentity(requestIdentity)) setCoverListLoading(false);
+    }
+  };
+
+  const recordActualTime = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!detailsShift || !canManageActuals || !isOnline) return;
+    const requestIdentity = identityKey;
+    const detailsRequestId = detailsRequestIdRef.current;
+    const shiftId = detailsShift.id;
+    const employeeId = actualForm.employeeId;
+    setActionError('');
+    try {
+      const actualKey = `${shiftId}:${employeeId}`;
+      const mutationId = actualMutationIds[actualKey] ?? newClientMutationId();
+      setActualMutationIds(current => ({ ...current, [actualKey]: mutationId }));
+      const saved = await planningApi.recordActualTime(shiftId, {
+        employeeId,
+        actualStartAt: actualForm.actualStartAt,
+        actualEndAt: actualForm.actualEndAt,
+        breakMinutes: actualForm.breakMinutes,
+        expectedVersion: actualForm.expectedVersion,
+        clientMutationId: mutationId,
+        notes: actualForm.notes.trim() || undefined
+      });
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
+      setActualSavedRevision(saved.revision_version);
+      setActualMutationIds(current => {
+        const next = { ...current };
+        delete next[actualKey];
+        return next;
+      });
+      setActualForm(current => ({ ...current, expectedVersion: saved.revision_version }));
+      await loadActualTimeForEmployee(shiftId, employeeId, detailsRequestId);
+      if (isCurrentIdentity(requestIdentity) && detailsRequestIdRef.current === detailsRequestId) {
+        setActionMessage(`Ist-Zeit gespeichert (Revision ${saved.revision_version}). Weitere Korrekturen verwenden die geladene Serverrevision.`);
+      }
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
+      if (!(error instanceof ApiError) || !error.isNetworkError) {
+        const actualKey = `${shiftId}:${employeeId}`;
+        setActualMutationIds(current => {
+          const next = { ...current };
+          delete next[actualKey];
+          return next;
+        });
+      }
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    }
+  };
+
+  const approveActualTime = async () => {
+    if (!detailsShift || !actualCurrent || !canApproveActuals || !isOnline ||
+        actualCurrent.approval_status !== 'pending' || actualCurrent.recorded_by === currentUserId) return;
+    const requestIdentity = identityKey;
+    const detailsRequestId = detailsRequestIdRef.current;
+    try {
+      const approved = await planningApi.approveActualTime(detailsShift.id, {
+        employeeId: actualCurrent.employee_id,
+        expectedVersion: actualCurrent.revision_version
+      });
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
+      setActualCurrent(approved);
+      await loadActualTimeForEmployee(detailsShift.id, approved.employee_id, detailsRequestId);
+      if (isCurrentIdentity(requestIdentity) && detailsRequestIdRef.current === detailsRequestId) {
+        setActionMessage(`Ist-Zeit-Revision ${approved.revision_version} unabhängig genehmigt.`);
+      }
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity) || detailsRequestIdRef.current !== detailsRequestId) return;
+      const detail = planningErrorDetails(error);
+      setActionError(`${detail.code ? `${detail.code}: ` : ''}${detail.message}`);
+    }
+  };
+
+  const loadPlanningNotifications = async () => {
+    if (!canRead || !isOnline) return;
+    const requestIdentity = identityKey;
+    setPlanningNotificationsLoading(true);
+    setActionError('');
+    try {
+      const rows = await planningApi.planningNotifications();
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setPlanningNotifications(rows);
+      setPlanningNotificationsOpen(true);
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionError(planningErrorDetails(error).message);
+    } finally {
+      if (isCurrentIdentity(requestIdentity)) setPlanningNotificationsLoading(false);
+    }
+  };
+
+  const markPlanningNotificationRead = async (notification: PlanningNotification) => {
+    if (!isOnline || notification.read_at) return;
+    const requestIdentity = identityKey;
+    try {
+      const updated = await planningApi.markPlanningNotificationRead(notification.id);
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setPlanningNotifications(current => current.map(item => item.id === updated.id ? updated : item));
+    } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
+      setActionError(planningErrorDetails(error).message);
+    }
+  };
+
   const loadReports = async () => {
+    const requestIdentity = identityKey;
     if (!canReport || !isOnline) return;
     setReportLoading(true);
     setActionError('');
     try {
-      const [hours, cover] = await Promise.all([
+      const [hours, cover, qualifications, absences] = await Promise.all([
         planningApi.workHours(range.from, range.to),
-        planningApi.coverage(range.from, range.to)
+        planningApi.coverage(range.from, range.to),
+        planningApi.qualifications(range.from, range.to),
+        planningApi.absences(range.from, range.to)
       ]);
+      if (!isCurrentIdentity(requestIdentity)) return;
       setWorkHours(hours);
       setReportCoverage(cover);
+      setReportQualifications(qualifications);
+      setReportAbsences(absences);
       setReportOpen(true);
     } catch (error) {
+      if (!isCurrentIdentity(requestIdentity)) return;
       setActionError(planningErrorDetails(error).message);
     } finally {
-      setReportLoading(false);
+      if (isCurrentIdentity(requestIdentity)) setReportLoading(false);
     }
   };
 
@@ -826,7 +1475,12 @@ export const RosterModule: React.FC = () => {
         <div className="flex flex-wrap gap-2">
           {canManage && <button className={primaryButtonClass} onClick={() => openEditor('create')}><Plus size={14} /> Schicht anlegen</button>}
           {canManage && isOnline && <button className={buttonClass} onClick={() => { setPeriodForm(current => ({ ...current, dateFrom: range.from, dateTo: range.to })); setPeriodFormOpen(open => !open); }}>Periode anlegen</button>}
-          {canManage && isOnline && activePeriod?.status === 'draft' && <button className={buttonClass} onClick={() => setTemplateOpen(open => !open)}>Vorlage anwenden</button>}
+          {canRead && <button className={buttonClass} disabled={!isOnline || templatesLoading} onClick={() => { setTemplateOpen(open => !open); if (!templateOpen) void loadTemplates(); }}>Vorlagen</button>}
+          {canRead && <button className={buttonClass} disabled={!isOnline || coverListLoading} onClick={() => void loadCoverRequests()}>{coverListLoading ? 'Vertretungen…' : 'Vertretungsanträge'}</button>}
+          {canRead && <button className={buttonClass} disabled={!isOnline || planningNotificationsLoading} onClick={() => void loadPlanningNotifications()}>
+            {planningNotificationsLoading ? <LoaderCircle className="animate-spin" size={14} /> : <Bell size={14} />}
+            Benachrichtigungen{planningNotifications.some(item => !item.read_at) ? ` (${planningNotifications.filter(item => !item.read_at).length})` : ''}
+          </button>}
           {canPublish && activePeriod?.status === 'draft' && (
             <button className={primaryButtonClass} disabled={!isOnline || saving} onClick={() => void publishPeriod()}>
               <ShieldCheck size={14} /> Veröffentlichen
@@ -851,6 +1505,7 @@ export const RosterModule: React.FC = () => {
         {outbox.length > 0 && <span className="ml-2 font-semibold">{outbox.length} ausstehende/fehlerhafte Schichtmutation(en)</span>}
         {isSyncing && <span className="ml-2">Synchronisierung läuft…</span>}
       </div>
+      <p className="text-[11px] text-slate-500">Offline ist nur der zuletzt geladene Datumsbereich je Mandant und Benutzer zwischengespeichert; andere Zeiträume sind offline nicht vollständig verfügbar.</p>
       {loadError && <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" role="status">{loadError}</div>}
       {cacheWarning && <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200" role="status">{cacheWarning}</div>}
       {actionError && <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-200" role="alert">{actionError}</div>}
@@ -867,19 +1522,64 @@ export const RosterModule: React.FC = () => {
         </form>
       )}
 
-      {templateOpen && activePeriod && (
-        <form onSubmit={event => void applyTemplate(event)} className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-900 p-4 sm:grid-cols-2 lg:grid-cols-4">
-          <label className="text-xs text-slate-300">Vorlagenname<input required minLength={2} className={`${fieldClass} mt-1`} value={templateForm.name} onChange={event => setTemplateForm({ ...templateForm, name: event.target.value })} /></label>
-          <label className="text-xs text-slate-300">Objekt<select required className={`${fieldClass} mt-1`} value={templateForm.siteId} onChange={event => setTemplateForm({ ...templateForm, siteId: event.target.value })}><option value="">Objekt auswählen</option>{sites.filter(site => !site.archivedAt).map(site => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
-          <label className="text-xs text-slate-300">Beginn<input required type="time" className={`${fieldClass} mt-1`} value={templateForm.startTime} onChange={event => setTemplateForm({ ...templateForm, startTime: event.target.value })} /></label>
-          <label className="text-xs text-slate-300">Ende<input required type="time" className={`${fieldClass} mt-1`} value={templateForm.endTime} onChange={event => setTemplateForm({ ...templateForm, endTime: event.target.value })} /></label>
-          <label className="text-xs text-slate-300">Qualifikation<input required minLength={2} className={`${fieldClass} mt-1`} value={templateForm.requiredQualification} onChange={event => setTemplateForm({ ...templateForm, requiredQualification: event.target.value })} /></label>
-          <label className="text-xs text-slate-300">Wiederholung<select className={`${fieldClass} mt-1`} value={templateForm.frequency} onChange={event => setTemplateForm({ ...templateForm, frequency: event.target.value as 'DAILY' | 'WEEKLY' })}><option value="WEEKLY">Wöchentlich</option><option value="DAILY">Täglich</option></select></label>
-          <label className="text-xs text-slate-300">Intervall (Wochen/Tage)<input type="number" min={1} max={52} className={`${fieldClass} mt-1`} value={templateForm.interval} onChange={event => setTemplateForm({ ...templateForm, interval: Number(event.target.value) })} /></label>
-          {templateForm.frequency === 'WEEKLY' && <fieldset className="text-xs text-slate-300"><legend>Wochentage</legend><div className="mt-2 flex flex-wrap gap-2">{['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'].map((day, index) => <label key={day} className="flex items-center gap-1"><input type="checkbox" checked={templateForm.weekdays.includes(index)} onChange={event => setTemplateForm(current => ({ ...current, weekdays: event.target.checked ? [...current.weekdays, index] : current.weekdays.filter(value => value !== index) }))} />{day}</label>)}</div></fieldset>}
-          <div className="flex items-end gap-2"><button className={primaryButtonClass} disabled={saving || !isOnline}>Vorlage erstellen und anwenden</button><button type="button" className={buttonClass} onClick={() => setTemplateOpen(false)}>Schließen</button></div>
-          <p className="text-xs text-amber-300 sm:col-span-2 lg:col-span-4">Vorlagenanwendung erzeugt nur Entwürfe. Der Backend-Vertrag bietet keine Vorlagenliste; die eben erstellte Vorlage wird direkt auf die ausgewählte Entwurfsperiode angewendet.</p>
-        </form>
+      {templateOpen && (
+        <section className="space-y-3 rounded-2xl border border-slate-800 bg-slate-900 p-4">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-bold text-slate-100">Schichtvorlagen</h2>
+            <div className="flex gap-2">
+              <button type="button" className={buttonClass} disabled={!isOnline || templatesLoading} onClick={() => { const next = !showInactiveTemplates; setShowInactiveTemplates(next); void loadTemplates(next); }}>{showInactiveTemplates ? 'Nur aktive' : 'Inaktive einblenden'}</button>
+              <button type="button" className={buttonClass} disabled={!isOnline || templatesLoading} onClick={() => void loadTemplates()}>{templatesLoading ? 'Laden…' : 'Aktualisieren'}</button>
+            </div>
+          </div>
+          {templatesLoading && templates.length === 0
+            ? <p className="text-xs text-slate-400" role="status">Vorlagen werden geladen…</p>
+            : templates.length === 0
+              ? <p className="text-xs text-slate-400">Keine aktiven Vorlagen verfügbar.</p>
+              : <div className="space-y-2">{templates.map(template => (
+                <article key={template.id} className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3 ${selectedTemplateId === template.id ? 'border-blue-500/60 bg-blue-500/5' : 'border-slate-800 bg-slate-950'}`}>
+                  <label className="flex min-w-0 flex-1 items-start gap-2 text-xs text-slate-200">
+                    <input type="radio" name="selected-template" checked={selectedTemplateId === template.id} onChange={() => setSelectedTemplateId(template.id)} />
+                    <span><strong>{template.name}</strong> · {template.site_name ?? sites.find(site => site.id === template.site_id)?.name ?? template.site_id} · {template.local_start_time.slice(0, 5)}–{template.local_end_time.slice(0, 5)} · {template.required_qualification}<span className="block text-slate-500">Bedarf {template.required_staff_count} · Pause {template.break_minutes} min · gültig {template.effective_from?.slice(0, 10) ?? 'ab unbegrenzt'} bis {template.effective_until?.slice(0, 10) ?? 'unbegrenzt'} · {template.recurrence.frequency === 'WEEKLY' ? 'Wöchentlich' : 'Täglich'}, Intervall {template.recurrence.interval}{template.recurrence.weekdays?.length ? ` · Wochentage: ${template.recurrence.weekdays.join(', ')}` : ''} · {template.time_zone} · Revision {template.revision_version} · {template.active ? 'aktiv' : 'inaktiv'}</span></span>
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    {canManage && <button type="button" className={buttonClass} disabled={!isOnline || !template.active || activePeriod?.status !== 'draft' || saving} onClick={() => { setSelectedTemplateId(template.id); void applyTemplateById(template.id); }}>Auf Entwurfsperiode anwenden</button>}
+                    {canManage && <button type="button" className={buttonClass} disabled={!isOnline || saving} onClick={() => beginTemplateEdit(template)}>Bearbeiten</button>}
+                    {canManage && <button type="button" className={buttonClass} disabled={!isOnline || saving} onClick={() => void toggleTemplateActive(template)}>{template.active ? 'Deaktivieren' : 'Aktivieren'}</button>}
+                  </div>
+                  {templateEditingId === template.id && templateEditForm && <form className="grid w-full gap-2 border-t border-slate-800 pt-3 sm:grid-cols-2 lg:grid-cols-4" onSubmit={event => void saveTemplateEdit(event, template)}>
+                    <label className="text-xs text-slate-400">Vorlagenname<input required minLength={2} className={`${fieldClass} mt-1`} value={templateEditForm.name} onChange={event => setTemplateEditForm(current => current ? { ...current, name: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Objekt<select required className={`${fieldClass} mt-1`} value={templateEditForm.siteId} onChange={event => setTemplateEditForm(current => current ? { ...current, siteId: event.target.value } : current)}>{sites.filter(site => !site.archivedAt).map(site => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
+                    <label className="text-xs text-slate-400">Beginn<input required type="time" className={`${fieldClass} mt-1`} value={templateEditForm.startTime} onChange={event => setTemplateEditForm(current => current ? { ...current, startTime: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Ende<input required type="time" className={`${fieldClass} mt-1`} value={templateEditForm.endTime} onChange={event => setTemplateEditForm(current => current ? { ...current, endTime: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Pause (Minuten)<input aria-label="Vorlagenpause" required type="number" min={0} max={1440} className={`${fieldClass} mt-1`} value={templateEditForm.breakMinutes} onChange={event => setTemplateEditForm(current => current ? { ...current, breakMinutes: Number(event.target.value) } : current)} /></label>
+                    <label className="text-xs text-slate-400">Personalbedarf<input aria-label="Vorlagenbedarf" required type="number" min={1} max={500} className={`${fieldClass} mt-1`} value={templateEditForm.requiredStaffCount} onChange={event => setTemplateEditForm(current => current ? { ...current, requiredStaffCount: Number(event.target.value) } : current)} /></label>
+                    <label className="text-xs text-slate-400">Gültig ab<input aria-label="Vorlage gültig ab" type="date" className={`${fieldClass} mt-1`} value={templateEditForm.effectiveFrom} onChange={event => setTemplateEditForm(current => current ? { ...current, effectiveFrom: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Gültig bis<input aria-label="Vorlage gültig bis" type="date" className={`${fieldClass} mt-1`} value={templateEditForm.effectiveUntil} onChange={event => setTemplateEditForm(current => current ? { ...current, effectiveUntil: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Qualifikation<input required minLength={2} className={`${fieldClass} mt-1`} value={templateEditForm.requiredQualification} onChange={event => setTemplateEditForm(current => current ? { ...current, requiredQualification: event.target.value } : current)} /></label>
+                    <label className="text-xs text-slate-400">Wiederholung<select className={`${fieldClass} mt-1`} value={templateEditForm.frequency} onChange={event => setTemplateEditForm(current => current ? { ...current, frequency: event.target.value as 'DAILY' | 'WEEKLY' } : current)}><option value="WEEKLY">Wöchentlich</option><option value="DAILY">Täglich</option></select></label>
+                    <label className="text-xs text-slate-400">Intervall<input required type="number" min={1} max={52} className={`${fieldClass} mt-1`} value={templateEditForm.interval} onChange={event => setTemplateEditForm(current => current ? { ...current, interval: Number(event.target.value) } : current)} /></label>
+                    {templateEditForm.frequency === 'WEEKLY' && <fieldset className="text-xs text-slate-400"><legend>Wochentage</legend><div className="mt-2 flex flex-wrap gap-2">{['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'].map((day, index) => <label key={day} className="flex items-center gap-1"><input type="checkbox" checked={templateEditForm.weekdays.includes(index)} onChange={event => setTemplateEditForm(current => current ? { ...current, weekdays: event.target.checked ? [...current.weekdays, index] : current.weekdays.filter(value => value !== index) } : current)} />{day}</label>)}</div></fieldset>}
+                    <div className="flex items-end gap-2"><button className={primaryButtonClass} disabled={saving || !isOnline}>Änderungen speichern</button><button type="button" className={buttonClass} onClick={() => { setTemplateEditingId(''); setTemplateEditForm(null); }}>Abbrechen</button></div>
+                  </form>}
+                </article>
+              ))}</div>}
+          {canManage && <form onSubmit={event => void createTemplate(event)} className="grid gap-3 border-t border-slate-800 pt-3 sm:grid-cols-2 lg:grid-cols-4">
+            <label className="text-xs text-slate-300">Vorlagenname<input aria-label="Vorlagenname" required minLength={2} className={`${fieldClass} mt-1`} value={templateForm.name} onChange={event => setTemplateForm({ ...templateForm, name: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Objekt<select aria-label="Vorlagenobjekt" required className={`${fieldClass} mt-1`} value={templateForm.siteId} onChange={event => setTemplateForm({ ...templateForm, siteId: event.target.value })}><option value="">Objekt auswählen</option>{sites.filter(site => !site.archivedAt).map(site => <option key={site.id} value={site.id}>{site.name}</option>)}</select></label>
+            <label className="text-xs text-slate-300">Beginn<input required type="time" className={`${fieldClass} mt-1`} value={templateForm.startTime} onChange={event => setTemplateForm({ ...templateForm, startTime: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Ende<input required type="time" className={`${fieldClass} mt-1`} value={templateForm.endTime} onChange={event => setTemplateForm({ ...templateForm, endTime: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Pause (Minuten)<input aria-label="Vorlagenpause" required type="number" min={0} max={1440} className={`${fieldClass} mt-1`} value={templateForm.breakMinutes} onChange={event => setTemplateForm({ ...templateForm, breakMinutes: Number(event.target.value) })} /></label>
+            <label className="text-xs text-slate-300">Personalbedarf<input aria-label="Vorlagenbedarf" required type="number" min={1} max={500} className={`${fieldClass} mt-1`} value={templateForm.requiredStaffCount} onChange={event => setTemplateForm({ ...templateForm, requiredStaffCount: Number(event.target.value) })} /></label>
+            <label className="text-xs text-slate-300">Gültig ab<input aria-label="Vorlage gültig ab" type="date" className={`${fieldClass} mt-1`} value={templateForm.effectiveFrom} onChange={event => setTemplateForm({ ...templateForm, effectiveFrom: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Gültig bis<input aria-label="Vorlage gültig bis" type="date" className={`${fieldClass} mt-1`} value={templateForm.effectiveUntil} onChange={event => setTemplateForm({ ...templateForm, effectiveUntil: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Qualifikation<input aria-label="Vorlagenqualifikation" required minLength={2} className={`${fieldClass} mt-1`} value={templateForm.requiredQualification} onChange={event => setTemplateForm({ ...templateForm, requiredQualification: event.target.value })} /></label>
+            <label className="text-xs text-slate-300">Wiederholung<select className={`${fieldClass} mt-1`} value={templateForm.frequency} onChange={event => setTemplateForm({ ...templateForm, frequency: event.target.value as 'DAILY' | 'WEEKLY' })}><option value="WEEKLY">Wöchentlich</option><option value="DAILY">Täglich</option></select></label>
+            <label className="text-xs text-slate-300">Intervall (Wochen/Tage)<input required type="number" min={1} max={52} step={1} className={`${fieldClass} mt-1`} value={templateForm.interval} onChange={event => setTemplateForm({ ...templateForm, interval: Number(event.target.value) })} /></label>
+            {templateForm.frequency === 'WEEKLY' && <fieldset className="text-xs text-slate-300"><legend>Wochentage</legend><div className="mt-2 flex flex-wrap gap-2">{['So', 'Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa'].map((day, index) => <label key={day} className="flex items-center gap-1"><input type="checkbox" checked={templateForm.weekdays.includes(index)} onChange={event => setTemplateForm(current => ({ ...current, weekdays: event.target.checked ? [...current.weekdays, index] : current.weekdays.filter(value => value !== index) }))} />{day}</label>)}</div></fieldset>}
+            <div className="flex items-end gap-2"><button className={primaryButtonClass} disabled={saving || !isOnline}>Vorlage erstellen</button><button type="button" className={buttonClass} onClick={() => setTemplateOpen(false)}>Schließen</button></div>
+          </form>}
+          <p className="text-xs text-amber-300">Vorlagenänderungen und Aktivierung werden mit der aktuellen Revision online gespeichert. Vorlagenanwendung erzeugt ausschließlich Entwürfe in der ausgewählten offenen Dienstplanperiode; es gibt keinen Hard-Delete- oder separaten Kopier-Endpunkt.</p>
+        </section>
       )}
 
       <div className="grid gap-3 rounded-2xl border border-slate-800 bg-slate-900/80 p-3 lg:grid-cols-[auto_1fr]">
@@ -1019,9 +1719,79 @@ export const RosterModule: React.FC = () => {
               {assignments.length === 0 ? <p className="text-xs text-slate-500">Keine serverseitigen Zuweisungen geladen.</p> : <ul className="space-y-1 text-xs">{assignments.filter(item => item.status === 'assigned').map(item => <li key={item.id} className="rounded-lg bg-slate-800 px-3 py-2">{item.first_name} {item.last_name} · Revision {item.revision_version}</li>)}</ul>}
               {canManage && isOnline && detailsShift.planningStatus !== 'published' && <div className="mt-2 flex gap-2"><select aria-label="Mitarbeiter zuweisen" className={fieldClass} value={assignmentEmployeeId} onChange={event => setAssignmentEmployeeId(event.target.value)}><option value="">Mitarbeiter auswählen</option>{employees.map(employee => <option key={employee.id} value={employee.id}>{employee.firstName} {employee.lastName}</option>)}</select><button className={buttonClass} disabled={!assignmentEmployeeId} onClick={() => void assignEmployee(assignmentEmployeeId)}><Users size={14} /> Zuweisen</button></div>}
             </section>
+            <section><h3 className="mb-2 text-xs font-bold uppercase text-slate-400">Qualifizierte Besetzungsvorschläge</h3>
+              {!isOnline ? <p className="text-xs text-amber-300">Besetzungsvorschläge sind online-only.</p>
+                : !staffingSuggestions ? <p className="text-xs text-slate-500">{detailsLoading ? 'Vorschläge werden geladen…' : 'Keine Vorschläge verfügbar.'}</p>
+                  : <div className="space-y-3">
+                    <p className="text-[11px] text-amber-300">Nicht bindende Hinweise. Die API prüft aktive Zuordnung, Qualifikation und Verfügbarkeit; eine Zuweisung erfolgt erst nach separater Bestätigung und erneuter Serverprüfung.</p>
+                    {staffingSuggestions.requirements.map(requirement => <div key={requirement.qualificationType} className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+                      <div className="text-xs font-semibold text-slate-200">{requirement.qualificationType} · Bedarf {requirement.requiredCount}, qualifiziert zugewiesen {requirement.assignedCount}, offen {requirement.shortfall}</div>
+                      {requirement.candidates.length === 0 ? <p className="mt-2 text-xs text-slate-500">Keine Kandidaten gemeldet.</p>
+                        : <ul className="mt-2 space-y-2">{requirement.candidates.map(candidate => <li key={candidate.employeeId} className="flex flex-wrap items-start justify-between gap-2 rounded-md bg-slate-900 p-2 text-xs">
+                          <div><strong>{candidate.firstName} {candidate.lastName}</strong> · {candidate.eligible ? 'geeignet' : 'nicht geeignet'} · {candidate.scheduledMinutesThisWeek} geplante Minuten diese Woche
+                            <div className="mt-1 text-[10px] text-slate-500">Gründe: {candidate.reasons.join(', ') || 'Keine Gründe gemeldet'}</div>
+                            {candidate.findings.length > 0 && <div className="mt-1 text-[10px] text-amber-300">{candidate.findings.map(finding => finding.message).join(' · ')}</div>}
+                          </div>
+                          {candidate.eligible && canManage && detailsShift.planningStatus !== 'published' && <button type="button" className={buttonClass} onClick={() => setAssignmentEmployeeId(candidate.employeeId)}>Für Zuweisung auswählen</button>}
+                        </li>)}</ul>}
+                      {(requirement.excludedCandidates?.length ?? 0) > 0 && <details className="mt-2 text-[10px] text-slate-400">
+                        <summary className="cursor-pointer">Vorfilter-Ausschlüsse ({requirement.excludedCandidateCount}){requirement.excludedCandidatesTruncated ? ' · Liste gekürzt auf 50' : ''}</summary>
+                        <ul className="mt-1 space-y-1">{(requirement.excludedCandidates ?? []).map(candidate => <li key={candidate.employeeId}>{candidate.employeeId}: {candidate.reasons.join(', ')}</li>)}</ul>
+                      </details>}
+                    </div>)}
+                  </div>}
+            </section>
             <section><h3 className="mb-2 text-xs font-bold uppercase text-slate-400">Diensttausch</h3>
               {swaps.length === 0 ? <p className="text-xs text-slate-500">Keine Tauschanträge.</p> : <ul className="space-y-2">{swaps.map(swap => <li key={swap.id} className="rounded-lg border border-slate-800 bg-slate-950 p-2 text-xs"><div>{employeeName(swap.requester_employee_id, employees)} → {employeeName(swap.proposed_employee_id, employees)} · {swap.status}</div>{swap.decision_note && <div className="mt-1 text-slate-400">{swap.decision_note}</div>}{swap.status === 'pending' && canDecideSwap && isOnline && <div className="mt-2 flex gap-2"><button className={primaryButtonClass} onClick={() => void decideSwap(swap, 'approved')}>Genehmigen</button><button className={buttonClass} onClick={() => void decideSwap(swap, 'rejected')}>Ablehnen</button></div>}</li>)}</ul>}
               {canRequestSwap && isOnline && assignments.some(item => item.status === 'assigned') && <form className="mt-3 space-y-2" onSubmit={event => void requestSwap(event)}><label className="block text-xs text-slate-400">Vorgeschlagene Vertretung<select required className={`${fieldClass} mt-1`} value={swapEmployeeId} onChange={event => setSwapEmployeeId(event.target.value)}><option value="">Mitarbeiter auswählen</option>{employees.filter(employee => !assignments.some(item => item.employee_id === employee.id && item.status === 'assigned')).map(employee => <option key={employee.id} value={employee.id}>{employee.firstName} {employee.lastName}</option>)}</select></label><label className="block text-xs text-slate-400">Begründung<input required minLength={2} maxLength={1000} className={`${fieldClass} mt-1`} value={swapReason} onChange={event => setSwapReason(event.target.value)} /></label><button className={buttonClass} disabled={!swapEmployeeId}>Diensttausch beantragen</button></form>}
+            </section>
+            <section><h3 className="mb-2 text-xs font-bold uppercase text-slate-400">Vertretungsbedarf</h3>
+              {shiftCoverRequests.length === 0 ? <p className="text-xs text-slate-500">Keine Vertretungsanträge für diese Schicht.</p> : <ul className="space-y-2">{shiftCoverRequests.map(request => <li key={request.id} className="rounded-lg border border-slate-800 bg-slate-950 p-2 text-xs">
+                <div className="font-semibold text-slate-200">{request.status} · {request.requested_employee_id ? `${request.requested_first_name ?? ''} ${request.requested_last_name ?? ''}`.trim() || employeeName(request.requested_employee_id, employees) : 'Vertretung noch nicht festgelegt'}</div>
+                <p className="mt-1 text-slate-400">{request.reason}</p>
+                {request.decision_note && <p className="mt-1 text-slate-500">Entscheidung: {request.decision_note}</p>}
+                {request.status === 'pending' && canDecideCover && isOnline && <div className="mt-2 flex flex-wrap gap-2">
+                  {!request.requested_employee_id && <select aria-label={`Vertretung für Antrag ${request.id}`} className={`${fieldClass} min-w-48 flex-1`} value={coverDecisionEmployeeIds[request.id] ?? ''} onChange={event => setCoverDecisionEmployeeIds(current => ({ ...current, [request.id]: event.target.value }))}><option value="">Vertretung auswählen</option>{employees.filter(employee => !assignments.some(item => item.employee_id === employee.id && item.status === 'assigned')).map(employee => <option key={employee.id} value={employee.id}>{employee.firstName} {employee.lastName}</option>)}</select>}
+                  <button className={primaryButtonClass} disabled={!request.requested_employee_id && !coverDecisionEmployeeIds[request.id]} onClick={() => void decideCover(request, 'approved')}>Genehmigen</button>
+                  <button className={buttonClass} onClick={() => void decideCover(request, 'rejected')}>Ablehnen</button>
+                </div>}
+              </li>)}</ul>}
+              {canRequestCover && isOnline && detailsShift.assignedCount < (detailsShift.requiredStaffCount ?? 1) && <form className="mt-3 space-y-2" onSubmit={event => void requestCover(event)}>
+                <label className="block text-xs text-slate-400">Gewünschte Vertretung (optional)<select className={`${fieldClass} mt-1`} value={coverEmployeeId} onChange={event => setCoverEmployeeId(event.target.value)}><option value="">Noch nicht festlegen</option>{employees.filter(employee => !assignments.some(item => item.employee_id === employee.id && item.status === 'assigned')).map(employee => <option key={employee.id} value={employee.id}>{employee.firstName} {employee.lastName}</option>)}</select></label>
+                <label className="block text-xs text-slate-400">Begründung<input required minLength={1} maxLength={1000} className={`${fieldClass} mt-1`} value={coverReason} onChange={event => setCoverReason(event.target.value)} /></label>
+                <button className={buttonClass} disabled={!detailsShift.revisionVersion}>Vertretungsbedarf einreichen</button>
+              </form>}
+            </section>
+            <section><h3 className="mb-2 text-xs font-bold uppercase text-slate-400">Ist-Zeit erfassen / korrigieren</h3>
+              {!isOnline && <p className="text-xs text-amber-300">Ist-Zeiten bleiben online-only und werden nicht in die Offline-Warteschlange aufgenommen.</p>}
+              {isOnline && actualLoading && <p role="status" className="text-xs text-slate-400">Gespeicherte Ist-Zeit und Verlauf werden geladen…</p>}
+              {isOnline && !actualLoading && actualForm.employeeId && actualCurrent && <p className="text-xs text-slate-300">Gespeicherter Nachweis, Revision {actualCurrent.revision_version} · {actualCurrent.actual_start_at} – {actualCurrent.actual_end_at} · Pause {actualCurrent.break_minutes} min · Status {actualCurrent.approval_status} · aufgezeichnet {new Date(actualCurrent.recorded_at).toLocaleString()}{actualCurrent.approved_at ? ` · genehmigt ${new Date(actualCurrent.approved_at).toLocaleString()}` : ''}</p>}
+              {isOnline && actualCurrent?.approval_status === 'pending' && canApproveActuals && actualCurrent.recorded_by !== currentUserId && <button type="button" className={primaryButtonClass} disabled={actualLoading || detailsLoading} onClick={() => void approveActualTime()}>Ist-Zeit unabhängig genehmigen · Revision {actualCurrent.revision_version}</button>}
+              {isOnline && actualCurrent?.approval_status === 'pending' && canApproveActuals && actualCurrent.recorded_by === currentUserId && <p className="text-xs text-amber-300">Eigene Ist-Zeit kann nicht genehmigt werden. Eine andere berechtigte Person muss die aktuelle Revision prüfen.</p>}
+              {isOnline && !detailsLoading && !actualLoading && actualForm.employeeId && !actualCurrent && assignments.some(item => item.status === 'assigned') && <p className="text-xs text-slate-500">Für diese Person liegt noch kein gespeicherter Ist-Zeitnachweis vor.</p>}
+              {isOnline && actualHistory.length > 0 && <details className="rounded-lg border border-slate-800 p-2 text-xs"><summary className="cursor-pointer text-slate-300">Änderungsverlauf ({actualHistory.length})</summary><ul className="mt-2 space-y-2">{actualHistory.map(entry => <li key={entry.id} className="border-t border-slate-800 pt-2"><div>{entry.event_type} · {new Date(entry.created_at).toLocaleString()} · Nutzer {entry.actor_user_id}</div><pre className="mt-1 whitespace-pre-wrap break-words text-[10px] text-slate-500">{JSON.stringify(entry.details)}</pre></li>)}</ul></details>}
+              {actualForm.employeeId && <p className="text-[11px] text-amber-300">Korrekturen setzen den Freigabestatus auf ausstehend zurück. Nur unabhängig genehmigte Ist-Zeiten fließen in Ist-Soll-Abweichungen und Berichte ein; dies ist keine Aussage zur rechtlichen oder abrechnungstechnischen Anerkennung.</p>}
+              {canManageActuals && isOnline && assignments.some(item => item.status === 'assigned') && <form className="space-y-2" onSubmit={event => void recordActualTime(event)}>
+                <label className="block text-xs text-slate-400">Zugewiesene Person<select required className={`${fieldClass} mt-1`} value={actualForm.employeeId} onChange={event => {
+                  const employeeId = event.target.value;
+                  const requestId = ++detailsRequestIdRef.current;
+                  setActualCurrent(null);
+                  setActualHistory([]);
+                  setActualSavedRevision(null);
+                  setActualForm(current => ({ ...current, employeeId, actualStartAt: '', actualEndAt: '', expectedVersion: 0, notes: '' }));
+                  void loadActualTimeForEmployee(detailsShift.id, employeeId, requestId);
+                }}><option value="">Mitarbeiter auswählen</option>{assignments.filter(item => item.status === 'assigned').map(item => <option key={item.employee_id} value={item.employee_id}>{item.first_name} {item.last_name}</option>)}</select></label>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="text-xs text-slate-400">Tatsächlicher Beginn (RFC 3339 mit Offset)<input required pattern="\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})" placeholder="2027-01-10T08:03:00+01:00" className={`${fieldClass} mt-1`} value={actualForm.actualStartAt} onChange={event => setActualForm(current => ({ ...current, actualStartAt: event.target.value }))} /></label>
+                  <label className="text-xs text-slate-400">Tatsächliches Ende (RFC 3339 mit Offset)<input required pattern="\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})" placeholder="2027-01-10T16:05:00+01:00" className={`${fieldClass} mt-1`} value={actualForm.actualEndAt} onChange={event => setActualForm(current => ({ ...current, actualEndAt: event.target.value }))} /></label>
+                  <label className="text-xs text-slate-400">Pause (Minuten)<input type="number" min={0} max={1440} required className={`${fieldClass} mt-1`} value={actualForm.breakMinutes} onChange={event => setActualForm(current => ({ ...current, breakMinutes: Number(event.target.value) }))} /></label>
+                  <div className="text-xs text-slate-400">Erwartete Serverrevision<div className={`${fieldClass} mt-1`}>{actualCurrent?.revision_version ?? 0}</div></div>
+                </div>
+                <label className="block text-xs text-slate-400">Notiz (optional)<input maxLength={1000} className={`${fieldClass} mt-1`} value={actualForm.notes} onChange={event => setActualForm(current => ({ ...current, notes: event.target.value }))} /></label>
+                <p className="text-[11px] text-slate-400">Revision 0 legt den ersten Nachweis an; Korrekturen verwenden die aktuell geladene Serverrevision.</p>
+                <button className={buttonClass} disabled={!actualForm.employeeId || !actualForm.actualStartAt || !actualForm.actualEndAt || actualLoading || detailsLoading}>Ist-Zeit serverseitig speichern</button>
+              </form>}
+              {canManageActuals && isOnline && !assignments.some(item => item.status === 'assigned') && <p className="text-xs text-slate-500">Ist-Zeit ist erst nach einer serverseitigen Mitarbeiterzuweisung verfügbar.</p>}
             </section>
             <div className="flex flex-wrap justify-end gap-2">
               {canManage && detailsShift.planningStatus !== 'published' && <button className={buttonClass} disabled={!!detailsShift.syncStatus && detailsShift.syncStatus !== 'synced'} onClick={() => { setDetailsShift(null); openEditor('edit', detailsShift); }}>Bearbeiten</button>}
@@ -1032,17 +1802,87 @@ export const RosterModule: React.FC = () => {
         </Dialog>
       )}
 
+      {coverListOpen && <Dialog title="Vertretungsanträge" onClose={() => setCoverListOpen(false)}>
+        <div className="space-y-3">
+          <div className="flex justify-end"><button className={buttonClass} disabled={!isOnline || coverListLoading} onClick={() => void loadCoverRequests()}>{coverListLoading ? 'Laden…' : 'Aktualisieren'}</button></div>
+          {!isOnline && <p className="text-xs text-amber-300">Vertretungsanträge und Entscheidungen sind nur online verfügbar.</p>}
+          {allCoverRequests.length === 0
+            ? <p className="rounded-lg border border-dashed border-slate-700 p-5 text-center text-xs text-slate-400">Keine Vertretungsanträge geladen.</p>
+            : <ul className="space-y-2">{allCoverRequests.map(request => {
+              const shift = shifts.find(item => item.id === request.shift_id);
+              const requestedName = request.requested_employee_id
+                ? `${request.requested_first_name ?? ''} ${request.requested_last_name ?? ''}`.trim() || employeeName(request.requested_employee_id, employees)
+                : 'Nicht festgelegt';
+              return <li key={request.id} className="rounded-xl border border-slate-800 bg-slate-950 p-3 text-xs">
+                <div className="flex flex-wrap justify-between gap-2"><strong className="text-slate-100">{shift ? `${shift.date} · ${shift.siteName}` : `Schicht ${request.shift_id}`} · {request.status}</strong><span className="text-slate-500">{new Date(request.requested_at).toLocaleString()}</span></div>
+                <p className="mt-1 text-slate-300">Gewünschte Vertretung: {requestedName}</p>
+                <p className="mt-1 text-slate-400">{request.reason}</p>
+                {request.status === 'pending' && canDecideCover && isOnline && <div className="mt-2 flex flex-wrap gap-2">
+                  {!request.requested_employee_id && <select aria-label={`Vertretung für Antrag ${request.id}`} className={`${fieldClass} min-w-48 flex-1`} value={coverDecisionEmployeeIds[request.id] ?? ''} onChange={event => setCoverDecisionEmployeeIds(current => ({ ...current, [request.id]: event.target.value }))}><option value="">Vertretung auswählen</option>{employees.map(employee => <option key={employee.id} value={employee.id}>{employee.firstName} {employee.lastName}</option>)}</select>}
+                  <button className={primaryButtonClass} disabled={!request.requested_employee_id && !coverDecisionEmployeeIds[request.id]} onClick={() => void decideCover(request, 'approved')}>Genehmigen</button>
+                  <button className={buttonClass} onClick={() => void decideCover(request, 'rejected')}>Ablehnen</button>
+                </div>}
+                {request.decision_note && <p className="mt-1 text-slate-500">Entscheidungsnotiz: {request.decision_note}</p>}
+              </li>;
+            })}</ul>}
+          {!canDecideCover && <p className="text-[11px] text-slate-500">Für Entscheidungen wird planning:covers:approve benötigt.</p>}
+        </div>
+      </Dialog>}
+
+      {planningNotificationsOpen && <Dialog title="Planungsbenachrichtigungen" onClose={() => setPlanningNotificationsOpen(false)}>
+        <div className="space-y-3">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs text-slate-400">Mandanten- und benutzerspezifischer In-App-Eingang. Keine E-Mail- oder Push-Zustellung.</p>
+            <button type="button" className={buttonClass} disabled={!isOnline || planningNotificationsLoading} onClick={() => void loadPlanningNotifications()}>
+              {planningNotificationsLoading ? 'Laden…' : 'Aktualisieren'}
+            </button>
+          </div>
+          {!isOnline && <p className="text-xs text-amber-300">Benachrichtigungen sind online-only.</p>}
+          {planningNotifications.length === 0
+            ? <p className="rounded-lg border border-dashed border-slate-700 p-5 text-center text-xs text-slate-400">Keine Planungsbenachrichtigungen geladen.</p>
+            : <ul className="space-y-2">{planningNotifications.map(notification => <li key={notification.id} className={`rounded-xl border p-3 text-xs ${notification.read_at ? 'border-slate-800 bg-slate-950 text-slate-400' : 'border-blue-500/30 bg-blue-500/5 text-slate-200'}`}>
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div><strong>{notification.event_type}</strong><div className="mt-1 text-slate-400">{notification.entity_type} · {notification.entity_id} · {new Date(notification.created_at).toLocaleString()}</div></div>
+                {!notification.read_at && <button type="button" className={buttonClass} disabled={!isOnline} onClick={() => void markPlanningNotificationRead(notification)}>Als gelesen markieren</button>}
+              </div>
+              <pre className="mt-2 whitespace-pre-wrap break-words text-[10px] text-slate-500">{JSON.stringify(notification.details)}</pre>
+              {notification.read_at && <div className="mt-1 text-[10px]">Gelesen {new Date(notification.read_at).toLocaleString()}</div>}
+            </li>)}</ul>}
+        </div>
+      </Dialog>}
+
       {reportOpen && <Dialog title={`Planungsberichte · ${range.from} – ${range.to}`} onClose={() => setReportOpen(false)}>
         <div className="space-y-4">
           <div className="flex justify-end"><button className={buttonClass} onClick={() => window.print()}><Printer size={14} /> Drucken</button><button className={`${buttonClass} ml-2`} onClick={() => void downloadHoursCsv()}><Download size={14} /> Arbeitsstunden-CSV</button></div>
           <section>
-            <h3 className="mb-2 text-xs font-bold text-slate-300">Geplante Stunden</h3>
+            <h3 className="mb-2 text-xs font-bold text-slate-300">Geplante und tatsächliche Arbeitszeit</h3>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Stunden</th><th className="p-2">Wochenenddienste</th></tr></thead>
+                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Schichten</th><th className="p-2">Soll-Stunden</th><th className="p-2">Erfasste Ist-Stunden / Status</th><th className="p-2">Genehmigte Ist-Stunden / Status</th><th className="p-2">Ist-Soll-Abweichung / Status / Quelle</th><th className="p-2">Minusstunden / Status</th><th className="p-2">Überstunden / Status</th><th className="p-2">Überstundenquelle</th></tr></thead>
+                <tbody>{workHours.length === 0
+                  ? <tr><td colSpan={9} className="p-3 text-center text-slate-500">Keine Berichtsdaten für diesen Zeitraum.</td></tr>
+                  : workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800 align-top"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{reportValue(row.planned_hours)}</td><td className="p-2">{reportValue(row.captured_actual_hours, row.captured_actual_status)}</td><td className="p-2">{reportValue(row.actual_hours, row.actual_status)}<span className="mt-1 block text-[10px] text-slate-500">Freigabe: {row.actual_approval_status ?? 'Nicht gemeldet'}</span></td><td className="p-2">{reportVariance(row.hours_variance, row.hours_variance_status)}<span className="mt-1 block break-words text-[10px] text-slate-500">{row.hours_variance_source ?? 'Quelle nicht gemeldet'}</span></td><td className="p-2">{reportValue(row.minus_hours, row.hours_variance_status)}</td><td className="p-2">{reportValue(row.overtime_hours, row.overtime_status)}</td><td className="max-w-72 break-words p-2 text-slate-400">{reportSources(row.overtime_sources)}</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-1 text-[10px] text-slate-500">Ist-Soll-Abweichung und Minusstunden stammen aus der API und basieren nur auf vollständig genehmigten Ist-Zeiten. Erfasste, aber nicht genehmigte Werte bleiben getrennt. Überstunden sind eine separate, konfigurationsabhängige Kennzahl.</p>
+          </section>
+          <section>
+            <h3 className="mb-2 text-xs font-bold text-slate-300">Wochenend-, Feiertags- und Nachtarbeit</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-slate-500"><tr><th className="p-2">Mitarbeiter</th><th className="p-2">Wochenende Soll / Ist</th><th className="p-2">Feiertag Soll / Ist</th><th className="p-2">Nacht Soll / Ist</th></tr></thead>
                 <tbody>{workHours.length === 0
                   ? <tr><td colSpan={4} className="p-3 text-center text-slate-500">Keine Berichtsdaten für diesen Zeitraum.</td></tr>
-                  : workHours.map(row => <tr key={row.employee_id} className="border-t border-slate-800"><td className="p-2">{row.first_name} {row.last_name}</td><td className="p-2">{row.assigned_shifts}</td><td className="p-2">{row.planned_hours}</td><td className="p-2">{row.weekend_shifts}</td></tr>)}
+                  : workHours.map(row => {
+                    const weekend = row.calendar?.weekend;
+                    const holiday = row.calendar?.holiday;
+                    const night = row.calendar?.night;
+                    const metric = (value: typeof weekend) => value
+                      ? `${reportValue(value.plannedShifts, value.plannedStatus)} / ${reportValue(value.actualShifts, value.actualStatus)} · Quellen: ${reportSources(value.sources)}`
+                      : 'Nicht verfügbar';
+                    return <tr key={row.employee_id} className="border-t border-slate-800 align-top"><td className="p-2">{row.first_name} {row.last_name}</td><td className="max-w-72 p-2">{metric(weekend)}</td><td className="max-w-72 p-2">{metric(holiday)}</td><td className="max-w-72 p-2">{metric(night)}</td></tr>;
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1051,23 +1891,43 @@ export const RosterModule: React.FC = () => {
             <h3 className="mb-2 text-xs font-bold text-slate-300">Besetzung / Personalbedarf</h3>
             <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="text-slate-500"><tr><th className="p-2">Datum</th><th className="p-2">Objekt</th><th className="p-2">Besetzt</th><th className="p-2">Bedarf</th><th className="p-2">Offen</th></tr></thead>
+                <thead className="text-slate-500"><tr><th className="p-2">Datum</th><th className="p-2">Objekt</th><th className="p-2">Qualifikation</th><th className="p-2">Besetzt (qualifiziert)</th><th className="p-2">Bedarf</th><th className="p-2">Offen</th></tr></thead>
                 <tbody>{reportCoverage.length === 0
-                  ? <tr><td colSpan={5} className="p-3 text-center text-slate-500">Keine Besetzungsdaten für diesen Zeitraum.</td></tr>
-                  : reportCoverage.map(row => <tr key={row.shift_id} className="border-t border-slate-800"><td className="p-2">{String(row.shift_date).slice(0, 10)}</td><td className="p-2">{row.site_name}</td><td className="p-2">{row.assigned_count}</td><td className="p-2">{row.required_count ?? 'n. v.'}</td><td className="p-2">{row.shortfall ?? 'n. v.'}</td></tr>)}
+                  ? <tr><td colSpan={6} className="p-3 text-center text-slate-500">Keine Besetzungsdaten für diesen Zeitraum.</td></tr>
+                  : reportCoverage.map((row, index) => <tr key={`${row.shift_id}-${row.qualification_type ?? index}`} className="border-t border-slate-800"><td className="p-2">{String(row.shift_date).slice(0, 10)}</td><td className="p-2">{row.site_name}</td><td className="p-2">{row.qualification_type ?? 'Nicht angegeben'}</td><td className="p-2">{row.assigned_count}</td><td className="p-2">{row.required_count ?? 'Nicht verfügbar'}</td><td className="p-2">{row.shortfall ?? 'Nicht verfügbar'}</td></tr>)}
                 </tbody>
               </table>
             </div>
           </section>
+          <section>
+            <h3 className="mb-2 text-xs font-bold text-slate-300">Qualifikationsangebot und -bedarf</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-slate-500"><tr><th className="p-2">Qualifikation</th><th className="p-2">Aktiv und gültig</th><th className="p-2">Datensatz</th><th className="p-2">Bedarf</th><th className="p-2">Qualifiziert besetzt</th><th className="p-2">Offen</th></tr></thead>
+                <tbody>{reportQualifications.length === 0
+                  ? <tr><td colSpan={6} className="p-3 text-center text-slate-500">Keine Qualifikationsdaten für diesen Zeitraum.</td></tr>
+                  : reportQualifications.map(row => <tr key={row.qualification_type} className="border-t border-slate-800"><td className="p-2">{row.qualification_type}</td><td className="p-2">{row.active_qualified_employees}</td><td className="p-2">{row.employees_with_record}</td><td className="p-2">{row.required_slots}</td><td className="p-2">{row.assigned_qualified_slots}</td><td className="p-2">{row.shortfall}</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-1 text-[10px] text-slate-500">Als einsatzfähig gezählt werden nur verifizierte, gültige und am Periodenende nicht abgelaufene Qualifikationen.</p>
+          </section>
+          <section>
+            <h3 className="mb-2 text-xs font-bold text-slate-300">Abwesenheiten</h3>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead className="text-slate-500"><tr><th className="p-2">Art</th><th className="p-2">Status</th><th className="p-2">Datensätze</th><th className="p-2">Betroffene Personen (Gruppe)</th><th className="p-2">Überlappende Kalendertage</th></tr></thead>
+                <tbody>{reportAbsences.length === 0
+                  ? <tr><td colSpan={5} className="p-3 text-center text-slate-500">Keine Abwesenheitsdaten für diesen Zeitraum.</td></tr>
+                  : reportAbsences.map(row => <tr key={`${row.absence_type}-${row.status}`} className="border-t border-slate-800"><td className="p-2">{row.absence_type}</td><td className="p-2">{row.status}</td><td className="p-2">{row.absence_records}</td><td className="p-2">{row.affected_employees}</td><td className="p-2">{row.overlapping_calendar_days}</td></tr>)}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-1 text-[10px] text-slate-500">Betroffenenzahlen werden je Art und Status gruppiert und sind nicht additiv.</p>
+          </section>
           <section role="status" aria-label="Berichtsabdeckung" className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[11px] text-amber-200">
-            <h3 className="mb-1 font-bold">Teilbericht — nicht freigegeben oder vollständig</h3>
-            <p>Der aktuelle Serververtrag liefert geplante Stunden, Wochenend-Schichtanzahl und Besetzungsdeckung. Nicht bereitgestellt sind:</p>
-            <ul className="mt-1 list-inside list-disc">
-              <li>Ist-Stunden und Überstunden</li>
-              <li>Nacht- und Feiertagsauswertung</li>
-              <li>Qualifikations- und Abwesenheitsauswertung</li>
-            </ul>
-            <p className="mt-1">Nicht verfügbare Werte werden nicht als null oder 0 interpretiert. Dies ist keine Rechtskonformitätsaussage.</p>
+            <h3 className="mb-1 font-bold">Datenverfügbarkeit und Quellen</h3>
+            <p>Nicht erfasste Ist-Zeiten und nicht konfigurierte bzw. mehrdeutige Kalender- oder Überstundenwerte bleiben als „Nicht verfügbar“ mit API-Status dargestellt; sie werden nicht zu null/0 umgedeutet. Berichtswerte sind keine Rechtskonformitätsaussage.</p>
           </section>
         </div>
       </Dialog>}
@@ -1084,6 +1944,7 @@ export const RosterModule: React.FC = () => {
           onReload={() => void loadRuleProfiles()}
           onSave={saveRuleProfile}
           onApprove={approveRuleProfileVersion}
+          onToggleActive={setRuleProfileActive}
         />
       </Dialog>}
     </section>
@@ -1091,7 +1952,7 @@ export const RosterModule: React.FC = () => {
 };
 
 function RuleProfileManager({
-  profiles, loading, error, message, canManage, canApprove, isOnline, onReload, onSave, onApprove
+  profiles, loading, error, message, canManage, canApprove, isOnline, onReload, onSave, onApprove, onToggleActive
 }: {
   profiles: RuleProfileRow[];
   loading: boolean;
@@ -1103,6 +1964,7 @@ function RuleProfileManager({
   onReload: () => void;
   onSave: (input: RuleProfileInput, profileId?: string) => Promise<boolean>;
   onApprove: (profile: RuleProfileRow, versionId: string) => Promise<boolean>;
+  onToggleActive: (profile: RuleProfileRow) => Promise<boolean>;
 }) {
   const [target, setTarget] = useState<{ mode: 'create' } | { mode: 'version'; profileId: string } | null>(null);
   const [name, setName] = useState('');
@@ -1189,7 +2051,7 @@ function RuleProfileManager({
         setValidationError('Bitte mindestens einen Listenwert eingeben.');
         return;
       }
-      if (ruleCode === 'disallowed_weekdays') {
+      if (ruleCode === 'disallowed_weekdays' || ruleCode === 'weekend_weekdays') {
         const weekdays = entries.map(Number);
         if (weekdays.some(day => !Number.isInteger(day) || day < 0 || day > 6)) {
           setValidationError('Wochentage müssen ganze Zahlen von 0 bis 6 sein (0 = Sonntag).');
@@ -1302,7 +2164,7 @@ function RuleProfileManager({
                   <h3 className="text-sm font-bold text-slate-100">{profile.name}</h3>
                   <p className="text-[11px] text-slate-500">Geltungsbereich: {JSON.stringify(profile.scope ?? {})} · {profile.active ? 'Aktiv' : 'Inaktiv'}</p>
                 </div>
-                {canManage && <button type="button" className={buttonClass} disabled={!isOnline} onClick={() => startVersion(profile.id)}>Neue Revision</button>}
+                {canManage && <div className="flex gap-2"><button type="button" className={buttonClass} disabled={!isOnline} onClick={() => void onToggleActive(profile)}>{profile.active ? 'Deaktivieren' : 'Aktivieren'}</button><button type="button" className={buttonClass} disabled={!isOnline} onClick={() => startVersion(profile.id)}>Neue Revision</button></div>}
               </div>
               {versions.length === 0
                 ? <p className="mt-2 text-xs text-slate-500">Keine Revision verfügbar.</p>
@@ -1339,7 +2201,7 @@ function RuleProfileManager({
           <label className="block text-xs text-slate-400">Regeltyp<select className={`${fieldClass} mt-1`} value={ruleCode} onChange={event => { setRuleCode(event.target.value as PlanningRuleCode); setRuleValue(''); }}><option value="minimum_rest_minutes">{ruleCodeLabels.minimum_rest_minutes}</option>{(Object.keys(ruleCodeLabels) as PlanningRuleCode[]).filter(code => code !== 'minimum_rest_minutes').map(code => <option key={code} value={code}>{ruleCodeLabels[code]}</option>)}</select></label>
           {booleanRuleCodes.has(ruleCode)
             ? <label className="block text-xs text-slate-400">Wert<select className={`${fieldClass} mt-1`} value={ruleValue} onChange={event => setRuleValue(event.target.value)}><option value="">Wert auswählen</option><option value="true">Ja</option><option value="false">Nein</option></select></label>
-            : <label className="block text-xs text-slate-400">{numericRuleCodes.has(ruleCode) ? 'Wert (Zahl)' : ruleCode === 'disallowed_weekdays' ? 'Wochentage, kommasepariert (0–6)' : 'Lokale Datumswerte, kommasepariert (JJJJ-MM-TT)'}<input aria-label="Regelwert" type={numericRuleCodes.has(ruleCode) ? 'number' : 'text'} min={numericRuleCodes.has(ruleCode) ? 0 : undefined} step={numericRuleCodes.has(ruleCode) ? 'any' : undefined} className={`${fieldClass} mt-1`} value={ruleValue} onChange={event => setRuleValue(event.target.value)} /></label>}
+            : <label className="block text-xs text-slate-400">{numericRuleCodes.has(ruleCode) ? 'Wert (Zahl)' : ruleCode === 'disallowed_weekdays' || ruleCode === 'weekend_weekdays' ? 'Wochentage, kommasepariert (0–6)' : 'Lokale Datumswerte, kommasepariert (JJJJ-MM-TT)'}<input aria-label="Regelwert" type={numericRuleCodes.has(ruleCode) ? 'number' : 'text'} min={numericRuleCodes.has(ruleCode) ? 0 : undefined} step={numericRuleCodes.has(ruleCode) ? 'any' : undefined} className={`${fieldClass} mt-1`} value={ruleValue} onChange={event => setRuleValue(event.target.value)} /></label>}
           <label className="block text-xs text-slate-400">Quelle dieser Regel<input aria-label="Quelle der Regel" minLength={2} maxLength={255} className={`${fieldClass} mt-1`} value={ruleSource} onChange={event => setRuleSource(event.target.value)} /></label>
           <div className="flex flex-wrap items-end justify-between gap-2">
             <label className="text-xs text-slate-400">Schweregrad<select className={`${fieldClass} mt-1`} value={ruleSeverity} onChange={event => setRuleSeverity(event.target.value as 'warning' | 'blocking')}><option value="blocking">Blockierend</option><option value="warning">Hinweis</option></select></label>

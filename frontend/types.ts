@@ -447,6 +447,7 @@ export type SyncStatus = 'synced' | 'pending' | 'conflict' | 'failed';
 export interface OfflineQueueItem {
   id: string;
   tenantId: string;
+  userId?: string;
   entityType: 'guardbook' | 'shift' | 'task' | 'key' | 'employee' | 'document' | 'patrol' | 'handover' | 'site' | 'client';
   action: 'CREATE' | 'UPDATE' | 'DELETE' | 'RESTORE' | 'QUALIFICATION_CREATE' | 'QUALIFICATION_UPDATE' | 'ABSENCE_CREATE' | 'ABSENCE_REVIEW';
   payload: any;

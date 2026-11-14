@@ -217,9 +217,94 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
 
     expect(state.guardBook[0].title).toBe('API Wachbucheintrag');
     expect(state.guardBook[0].siteId).toBe(siteRow.id);
-
     expect(state.isLoadingData).toBe(false);
     expect(state.dataLoadError).toBeNull();
+  });
+
+  test('replays the authenticated outbox after restoring a session while already online', async () => {
+    mockReadEndpoints();
+    const readEndpoint = mockedApi.get.getMockImplementation();
+    mockedApi.get.mockImplementation((endpoint: string) => endpoint === '/auth/me'
+      ? Promise.resolve({
+        id: 'restored-user',
+        tenantId: 'tenant-frankfurt',
+        permissions: ['shifts:manage']
+      })
+      : readEndpoint!(endpoint));
+    const queued = {
+      id: 'restored-shift-mutation',
+      tenantId: 'tenant-frankfurt',
+      userId: 'restored-user',
+      entityType: 'shift',
+      action: 'CREATE',
+      payload: { siteId: siteRow.id, date: '2026-11-13' },
+      occurredAt: '2026-11-13T10:00:00.000Z',
+      baseVersion: 1,
+      retryCount: 0,
+      status: 'PENDING'
+    };
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([queued] as any);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
+    vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    mockedApi.post.mockResolvedValueOnce([{
+      clientUuid: queued.id,
+      serverId: 'server-shift',
+      status: 'SYNCED',
+      serverVersion: 1
+    }]);
+
+    await useSecurityStore.getState().restoreSession();
+    await vi.waitFor(() => expect(mockedApi.post).toHaveBeenCalledWith('/sync/push', expect.objectContaining({
+      mutations: [expect.objectContaining({ clientUuid: queued.id })]
+    })));
+
+    expect(useSecurityStore.getState().currentUserId).toBe('restored-user');
+    expect(offlineVault.getPendingOutbox).toHaveBeenCalledWith('tenant-frankfurt', 'restored-user');
+    expect(offlineVault.markSynced).toHaveBeenCalledWith(queued.id);
+  });
+
+  test('replays only exact current-user ownership in a same-tenant outbox and quarantines unknown owners', async () => {
+    const ownerA = {
+      id: 'owner-a-mutation', tenantId: 'tenant-frankfurt', userId: 'user-a',
+      entityType: 'shift', action: 'CREATE', payload: { date: '2026-11-13' },
+      occurredAt: '2026-11-13T10:00:00.000Z', baseVersion: 1, retryCount: 0, status: 'PENDING'
+    };
+    const ownerB = {
+      ...ownerA, id: 'owner-b-mutation', userId: 'user-b', entityType: 'handover'
+    };
+    const unknownOwner = {
+      ...ownerA, id: 'unknown-owner-mutation', userId: undefined, entityType: 'task'
+    };
+    vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([ownerA, ownerB, unknownOwner] as any);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([{ ...ownerB, status: 'SYNCED' }] as any);
+    vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined);
+    mockedApi.post.mockResolvedValueOnce([{
+      clientUuid: ownerB.id,
+      serverId: 'server-shift-b',
+      status: 'SYNCED',
+      serverVersion: 1
+    }]);
+    useSecurityStore.setState({
+      isOnline: true,
+      currentTenantId: 'tenant-frankfurt',
+      currentUserId: 'user-b',
+      isAuthenticated: true,
+      authUser: {
+        id: 'user-b', email: '', fullName: '', role: '',
+        tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['shifts:manage']
+      }
+    });
+
+    const result = await useSecurityStore.getState().triggerManualSync();
+
+    expect(result).toMatchObject({ success: 1, failed: 0, conflicts: 0 });
+    expect(offlineVault.getPendingOutbox).toHaveBeenCalledWith('tenant-frankfurt', 'user-b');
+    expect(mockedApi.post).toHaveBeenCalledWith('/handovers/sync', expect.objectContaining({
+      mutations: [expect.objectContaining({ clientUuid: ownerB.id })]
+    }));
+    expect(JSON.stringify(mockedApi.post.mock.calls)).not.toContain(ownerA.id);
+    expect(JSON.stringify(mockedApi.post.mock.calls)).not.toContain(unknownOwner.id);
+    expect(useSecurityStore.getState().syncQueue.map(item => item.userId)).toEqual(['user-b']);
   });
 
   test('loadTenantData überspringt /sops ohne sop:read oder sop:manage', async () => {
@@ -440,9 +525,13 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
   test('Mitarbeiteränderungen bleiben bis zur bestätigten Outbox-Synchronisierung lokal erhalten', async () => {
     const enqueue = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
     const readPending = vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([]);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
     const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined as any);
     vi.spyOn(offlineVault, 'getDeviceId').mockReturnValue('employee-device');
-    useSecurityStore.setState({ isOnline: false, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-offline' });
+    useSecurityStore.setState({
+      isOnline: false, isAuthenticated: true, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-offline',
+      authUser: { id: 'user-offline', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['employees:manage'] }
+    });
 
     await useSecurityStore.getState().addEmployee({
       personnelNumber: 'MA-OFFLINE-1',
@@ -465,6 +554,7 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     const queuedMutation = {
       id: queued.id,
       tenantId: queued.tenantId,
+      userId: queued.userId,
       entityType: queued.entityType,
       action: queued.action,
       payload: queued.payload,
@@ -489,12 +579,15 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
   test('Mitarbeiter- und Qualifikations-Updates behalten IDs, Revisionen und NULL-Werte in der Outbox', async () => {
     const enqueue = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
     const readPending = vi.spyOn(offlineVault, 'getPendingOutbox').mockResolvedValue([]);
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
     const markSynced = vi.spyOn(offlineVault, 'markSynced').mockResolvedValue(undefined as any);
     vi.spyOn(offlineVault, 'getDeviceId').mockReturnValue('employee-device');
     useSecurityStore.setState({
       isOnline: false,
+      isAuthenticated: true,
       currentTenantId: 'tenant-frankfurt',
       currentUserId: 'user-offline',
+      authUser: { id: 'user-offline', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['employees:manage'] },
       employees: [{
         id: employeeRow.id, tenantId: 'tenant-frankfurt', revisionVersion: 4, synced: true,
         firstName: 'Erika', lastName: 'Muster', personnelNumber: 'MA-API-1', email: 'erika@test.de',
@@ -523,7 +616,7 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
     expect(enqueue).toHaveBeenCalledTimes(2);
 
     const asOutbox = (item: (typeof queued)[number]) => ({
-      id: item.id, tenantId: item.tenantId, entityType: item.entityType, action: item.action,
+      id: item.id, tenantId: item.tenantId, userId: item.userId, entityType: item.entityType, action: item.action,
       payload: item.payload, occurredAt: item.createdAt, baseVersion: item.baseVersion ?? 1,
       retryCount: 0, status: 'PENDING'
     });
@@ -721,11 +814,16 @@ describe('SecurityOps 2.0 – Frontend/Backend-Integration', () => {
 
   test('Standortänderungen werden offline mit Basisrevision in der Outbox gesichert und an Site-Sync gesendet', async () => {
     const mutationWrite = vi.spyOn(offlineVault, 'enqueueMutation').mockResolvedValue({} as any);
-    useSecurityStore.setState({ isOnline: false, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-regression', sites: [{
+    vi.spyOn(offlineVault, 'getOutbox').mockResolvedValue([]);
+    useSecurityStore.setState({
+      isOnline: false, isAuthenticated: true, currentTenantId: 'tenant-frankfurt', currentUserId: 'user-regression',
+      authUser: { id: 'user-regression', email: '', fullName: '', role: '', tenantId: 'tenant-frankfurt', tenantName: '', permissions: ['sites:manage'] },
+      sites: [{
       id: siteRow.id, tenantId: 'tenant-frankfurt', clientId: customerRow.id, clientName: customerRow.company_name,
       siteCode: siteRow.site_code, name: siteRow.name, address: siteRow.address, securityLevel: 'Mittel',
       siteManagerId: '', siteManagerName: '', requiredGuardsDay: 1, requiredGuardsNight: 1, checkpoints: [], alarmSystem: '', instructionsCount: 0, accessRules: '', activeAlarms: 0, revisionVersion: 7
-    }] });
+      }]
+    });
 
     await useSecurityStore.getState().updateSite(siteRow.id, { name: 'Lokal geändert' });
     expect(mutationWrite).toHaveBeenCalledWith(expect.objectContaining({ entityType: 'site', action: 'UPDATE', baseVersion: 7, payload: expect.objectContaining({ name: 'Lokal geändert' }) }));
