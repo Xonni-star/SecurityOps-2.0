@@ -19,7 +19,18 @@ const envSchema = z.object({
   JWT_EXPIRES_IN: z.string().regex(/^\d+[smhd]$/, 'JWT_EXPIRES_IN muss dem Format <Zahl><s|m|h|d> entsprechen (z. B. 8h).').default('8h'),
   CORS_ORIGIN: z.string().min(1, 'CORS_ORIGIN muss konfiguriert sein.'),
   TRUST_PROXY: z.string().default(''),
-  RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10)).pipe(z.number().int().positive())
+  RATE_LIMIT_MAX: z.string().default('120').transform((val) => parseInt(val, 10)).pipe(z.number().int().positive()),
+  RATE_LIMIT_REDIS_URL: z.string().url()
+    .refine((value) => /^rediss?:\/\//i.test(value), 'RATE_LIMIT_REDIS_URL muss eine Redis-URL sein.')
+    .optional()
+}).superRefine((config, context) => {
+  if (config.NODE_ENV === 'production' && !config.RATE_LIMIT_REDIS_URL) {
+    context.addIssue({
+      code: 'custom',
+      path: ['RATE_LIMIT_REDIS_URL'],
+      message: 'RATE_LIMIT_REDIS_URL ist im Produktivmodus erforderlich.'
+    });
+  }
 });
 
 const parsedEnv = envSchema.safeParse(process.env);

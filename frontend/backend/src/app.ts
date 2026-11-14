@@ -7,6 +7,7 @@ import { pool } from './config/database';
 import { errorHandler } from './middleware/errorHandler';
 import { createApiRateLimiter } from './middleware/apiRateLimit';
 import { configureTrustedProxies } from './middleware/trustedProxies';
+import { rateLimitRedisClient, rateLimitStore } from './config/rateLimitRedis';
 import { authenticateJwt, requireAnyPermission, requirePermission } from './middleware/auth';
 import * as authController from './controllers/authController';
 import * as clientController from './controllers/clientController';
@@ -63,11 +64,21 @@ const corsOptions: CorsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.use('/api/v1', createApiRateLimiter(env.RATE_LIMIT_MAX));
+app.use('/api/v1', createApiRateLimiter(env.RATE_LIMIT_MAX, true, rateLimitStore));
 app.use(express.json({ limit: '15mb' }));
 
 // Health- & Readiness-Endpunkt
 app.get('/api/v1/health', async (req, res) => {
+  if (rateLimitRedisClient) {
+    try {
+      await rateLimitRedisClient.ping();
+    } catch {
+      console.error('[HEALTH CHECK] Redis shared rate-limit query failed');
+      res.status(500).json({ status: 'DOWN', rateLimitStore: 'Unavailable', timestamp: new Date().toISOString() });
+      return;
+    }
+  }
+
   try {
     const dbRes = await pool.query('SELECT 1 as healthy');
     res.json({
@@ -75,6 +86,7 @@ app.get('/api/v1/health', async (req, res) => {
       service: 'SecurityOps 2.0 Backend (Node.js/TypeScript)',
       version: '2.0.0',
       database: dbRes.rows[0].healthy ? 'PostgreSQL 16+ Connected (RLS Active)' : 'DB Unhealthy',
+      rateLimitStore: rateLimitRedisClient ? 'Connected' : 'Not configured',
       timestamp: new Date().toISOString()
     });
   } catch {

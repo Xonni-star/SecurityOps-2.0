@@ -33,6 +33,25 @@ volumes:
   caddy_config:
 
 services:
+  # Shared, ephemeral counters for the API rate limiter; accessible only on the private network.
+  redis:
+    image: redis:7-alpine
+    container_name: secops_prod_rate_limit_redis
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "volatile-ttl", "--save", "", "--appendonly", "no"]
+    networks:
+      - secops_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
   db:
     image: postgres:16-alpine
     container_name: secops_prod_db
@@ -76,6 +95,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET muss gesetzt sein}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-8h}
       CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN muss gesetzt sein}
+      RATE_LIMIT_REDIS_URL: redis://redis:6379
     command: ["node", "dist/migrations/runner.js"]
     networks:
       - secops_internal
@@ -114,10 +134,11 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.backend
     image: securityops-backend:latest
-    container_name: secops_prod_backend
     restart: unless-stopped
     depends_on:
       db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       db-init:
         condition: service_completed_successfully
@@ -132,6 +153,7 @@ services:
       CORS_ORIGIN: ${CORS_ORIGIN:?CORS_ORIGIN muss gesetzt sein}
       TRUST_PROXY: ${TRUST_PROXY:-172.30.0.2/32}
       RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+      RATE_LIMIT_REDIS_URL: redis://redis:6379
       DMS_STORAGE_PATH: /var/lib/securityops/documents
       DMS_MAX_FILE_SIZE_BYTES: ${DMS_MAX_FILE_SIZE_BYTES:-10485760}
     volumes:
